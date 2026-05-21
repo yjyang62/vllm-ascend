@@ -19,7 +19,9 @@
 
 import copy
 import gc
+from collections.abc import Callable
 from types import NoneType
+from typing import TypeVar
 
 import torch
 import torch.nn as nn
@@ -62,6 +64,8 @@ from vllm_ascend.utils import (
     register_ascend_customop,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+T = TypeVar("T")
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -130,6 +134,7 @@ class NPUWorker(WorkerBase):
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_hccl_destroyed = False
         self._sleep_acl_graph_invalidated = False
+        self._sleep_cos_sin_cache_cleared = False
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -231,6 +236,36 @@ class NPUWorker(WorkerBase):
         self._reset_model_runner_graph_manager()
         self._sleep_acl_graph_invalidated = True
 
+    def _clear_attention_workspaces_for_sleep(self) -> int:
+        from vllm_ascend.compilation.acl_graph import reset_attention_workspaces_for_sleep
+
+        return reset_attention_workspaces_for_sleep()
+
+    def _clear_cos_sin_cache_for_sleep(self) -> int:
+        from vllm_ascend.ops.rotary_embedding import clear_global_cos_sin_cache
+
+        cache_bytes = clear_global_cos_sin_cache()
+        self._sleep_cos_sin_cache_cleared = cache_bytes > 0
+        return cache_bytes
+
+    def _restore_cos_sin_cache_after_sleep(self, tags: list[str] | None) -> None:
+        if not getattr(self, "_sleep_cos_sin_cache_cleared", False):
+            return
+        if tags is not None and "weights" not in tags and "kv_cache" not in tags:
+            return
+
+        from vllm_ascend.ops.rotary_embedding import restore_global_cos_sin_cache
+
+        restore_global_cos_sin_cache(
+            self.model_runner.model,
+            self.vllm_config,
+            self.model_runner.max_num_reqs,
+            self.model_runner.decode_token_per_req,
+            self.model_runner.dtype,
+            self.device,
+        )
+        self._sleep_cos_sin_cache_cleared = False
+
     def _should_restore_acl_graphs(self, tags: list[str] | None) -> bool:
         return tags is None or "kv_cache" in tags
 
@@ -267,14 +302,26 @@ class NPUWorker(WorkerBase):
         self._sleep_hccl_destroyed = False
         logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
 
+    def _measure_npu_free_delta(self, action: Callable[[], T]) -> tuple[T, int]:
+        free_before = torch.npu.mem_get_info()[0]
+        result = action()
+        free_after = torch.npu.mem_get_info()[0]
+        return result, max(free_after - free_before, 0)
+
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Save the buffers before level 2 sleep
         if level == 2:
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+        attention_workspace_bytes, attention_workspace_freed_bytes = self._measure_npu_free_delta(
+            self._clear_attention_workspaces_for_sleep
+        )
         self._invalidate_acl_graphs_for_sleep()
-        self._destroy_hccl_for_sleep()
+        cos_sin_cache_bytes, cos_sin_cache_freed_bytes = self._measure_npu_free_delta(
+            self._clear_cos_sin_cache_for_sleep
+        )
+        _, hccl_freed_bytes = self._measure_npu_free_delta(self._destroy_hccl_for_sleep)
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
@@ -285,6 +332,15 @@ class NPUWorker(WorkerBase):
             "Sleep mode freed %.2f GiB memory, %.2f GiB memory is still in use.",
             freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes,
+        )
+        logger.info(
+            "Sleep mode resource cleanup: HCCL freed %.2f GiB; attention workspace freed %.2f GiB "
+            "(tracked %.2f GiB); global sin/cos cache freed %.2f GiB (tracked %.2f GiB).",
+            hccl_freed_bytes / GiB_bytes,
+            attention_workspace_freed_bytes / GiB_bytes,
+            attention_workspace_bytes / GiB_bytes,
+            cos_sin_cache_freed_bytes / GiB_bytes,
+            cos_sin_cache_bytes / GiB_bytes,
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
@@ -324,6 +380,7 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+        self._restore_cos_sin_cache_after_sleep(tags)
         self._restore_acl_graphs_after_sleep(tags)
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:

@@ -59,6 +59,80 @@ _cos_slice: torch.Tensor = None
 _sin_slice: torch.Tensor = None
 
 
+def _tensor_nbytes(tensor: torch.Tensor | None, seen_storages: set[tuple[torch.device, int]]) -> int:
+    if not isinstance(tensor, torch.Tensor):
+        return 0
+    try:
+        storage = tensor.untyped_storage()
+        storage_key = (tensor.device, storage.data_ptr())
+        if storage_key in seen_storages:
+            return 0
+        seen_storages.add(storage_key)
+        return storage.nbytes()
+    except Exception:
+        return tensor.numel() * tensor.element_size()
+
+
+def get_global_cos_sin_cache_size_bytes() -> int:
+    seen_storages: set[tuple[torch.device, int]] = set()
+    return sum(
+        _tensor_nbytes(tensor, seen_storages)
+        for tensor in (
+            _cos_mla,
+            _sin_mla,
+            _cos_cache,
+            _sin_cache,
+            _cos_sin_cache,
+            _cos,
+            _sin,
+            _cos_slice,
+            _sin_slice,
+        )
+    )
+
+
+def clear_global_cos_sin_cache() -> int:
+    global _cos_mla, _sin_mla, _cos_cache, _sin_cache, _cos_sin_cache, _cos, _sin, _cos_slice, _sin_slice
+
+    cache_bytes = get_global_cos_sin_cache_size_bytes()
+    _cos_mla = None
+    _sin_mla = None
+    _cos_cache = None
+    _sin_cache = None
+    _cos_sin_cache = None
+    _cos = None
+    _sin = None
+    _cos_slice = None
+    _sin_slice = None
+    return cache_bytes
+
+
+def restore_global_cos_sin_cache(
+    model: torch.nn.Module,
+    vllm_config,
+    max_num_reqs,
+    decode_token_per_req,
+    dtype,
+    device,
+):
+    modules = model.modules() if hasattr(model, "modules") else []
+    for module in modules:
+        cos_sin_cache = getattr(module, "cos_sin_cache", None)
+        if not isinstance(cos_sin_cache, torch.Tensor):
+            continue
+
+        _record_cos_sin_cache(cos_sin_cache)
+        cos_cached = getattr(module, "cos_cached", None)
+        sin_cached = getattr(module, "sin_cached", None)
+        if isinstance(cos_cached, torch.Tensor) and isinstance(sin_cached, torch.Tensor):
+            _record_cos_and_sin_cache(cos_cached, sin_cached)
+        else:
+            _record_cos_and_sin_cache_interleaved(cos_sin_cache)
+        break
+
+    set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
+
+
 def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device):
     global _cos_mla
     global _sin_mla

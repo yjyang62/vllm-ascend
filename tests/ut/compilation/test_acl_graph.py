@@ -31,7 +31,7 @@ from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
                                           AscendMLAMetadata)
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphEntry, ACLGraphWrapper, get_draft_graph_params, get_graph_params,
-    reset_aclgraph_caches_for_sleep, reset_graph_params_for_sleep,
+    reset_aclgraph_caches_for_sleep, reset_attention_workspaces_for_sleep, reset_graph_params_for_sleep,
     set_draft_graph_params, set_graph_params, update_draft_graph_params_workspaces)
 
 
@@ -822,9 +822,23 @@ class TestDraftGraphParams(TestBase):
 
         for params in (graph_params_mock, draft_graph_params_mock):
             self.assertEqual(params.events[4], [])
-            self.assertIsNone(params.workspaces[4])
+            self.assertIsNotNone(params.workspaces[4])
             self.assertEqual(params.handles[4], [])
             self.assertEqual(params.attn_params[4], [])
+
+    @patch('vllm_ascend.compilation.acl_graph._draft_graph_params')
+    @patch('vllm_ascend.compilation.acl_graph._graph_params')
+    def test_reset_attention_workspaces_for_sleep(self, graph_params_mock,
+                                                  draft_graph_params_mock):
+        workspace = torch.empty(2, 4, dtype=torch.float16)
+        graph_params_mock.workspaces = {4: workspace}
+        draft_graph_params_mock.workspaces = {4: workspace}
+
+        workspace_bytes = reset_attention_workspaces_for_sleep()
+
+        self.assertEqual(workspace_bytes, workspace.untyped_storage().nbytes())
+        self.assertIsNone(graph_params_mock.workspaces[4])
+        self.assertIsNone(draft_graph_params_mock.workspaces[4])
 
 
 class TestPCPDCPGraphParams(TestBase):

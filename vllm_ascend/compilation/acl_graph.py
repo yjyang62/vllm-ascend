@@ -26,6 +26,20 @@ from vllm_ascend.utils import weak_ref_tensors
 _acl_graph_wrappers = weakref.WeakSet()
 
 
+def _tensor_nbytes(tensor: Any, seen_storages: set[tuple[Any, Any]]) -> int:
+    if not isinstance(tensor, torch.Tensor):
+        return 0
+    try:
+        storage = tensor.untyped_storage()
+        storage_key = (tensor.device, storage.data_ptr())
+        if storage_key in seen_storages:
+            return 0
+        seen_storages.add(storage_key)
+        return storage.nbytes()
+    except Exception:
+        return tensor.numel() * tensor.element_size()
+
+
 @dataclasses.dataclass
 class ACLGraphEntry:
     batch_descriptor: BatchDescriptor
@@ -290,12 +304,27 @@ def _reset_graph_params(params: GraphParams | None) -> None:
         return
     for num_tokens in params.events:
         params.events[num_tokens] = []
-    for num_tokens in params.workspaces:
-        params.workspaces[num_tokens] = None
     for num_tokens in params.handles:
         params.handles[num_tokens] = []
     for num_tokens in params.attn_params:
         params.attn_params[num_tokens] = []
+
+
+def _reset_attention_workspaces(params: GraphParams | None, seen_storages: set[tuple[Any, Any]]) -> int:
+    if params is None:
+        return 0
+    workspace_bytes = 0
+    for num_tokens, workspace in params.workspaces.items():
+        workspace_bytes += _tensor_nbytes(workspace, seen_storages)
+        params.workspaces[num_tokens] = None
+    return workspace_bytes
+
+
+def reset_attention_workspaces_for_sleep() -> int:
+    seen_storages: set[tuple[Any, Any]] = set()
+    return _reset_attention_workspaces(_graph_params, seen_storages) + _reset_attention_workspaces(
+        _draft_graph_params, seen_storages
+    )
 
 
 def reset_graph_params_for_sleep() -> None:
