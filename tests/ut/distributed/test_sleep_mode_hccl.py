@@ -5,7 +5,8 @@ from vllm_ascend.patch.worker.patch_distributed import GroupCoordinatorPatch
 
 def test_destroy_hccl_for_sleep_preserves_cpu_group():
     group = object.__new__(GroupCoordinatorPatch)
-    group.device_communicator = MagicMock()
+    device_communicator = MagicMock()
+    group.device_communicator = device_communicator
     device_group = MagicMock()
     group.device_group = device_group
     group.cpu_group = MagicMock()
@@ -13,7 +14,7 @@ def test_destroy_hccl_for_sleep_preserves_cpu_group():
     with patch('vllm_ascend.patch.worker.patch_distributed.torch.distributed.destroy_process_group') as mock_destroy:
         assert group.destroy_hccl_for_sleep()
 
-    group.device_communicator.destroy.assert_called_once()
+    device_communicator.destroy.assert_called_once()
     mock_destroy.assert_called_once_with(device_group)
     assert group.device_communicator is None
     assert group.device_group is None
