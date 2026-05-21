@@ -242,7 +242,8 @@ class NPUWorker(WorkerBase):
         capture_model = getattr(self.model_runner, "capture_model", None)
         if capture_model is None:
             return
-        capture_model()
+        with set_current_vllm_config(self.vllm_config):
+            capture_model()
         self._sleep_acl_graph_invalidated = False
 
     def _destroy_hccl_for_sleep(self) -> None:
@@ -261,7 +262,8 @@ class NPUWorker(WorkerBase):
     def _restore_hccl_after_sleep(self) -> None:
         if not getattr(self, "_sleep_hccl_destroyed", False):
             return
-        num_restored = restore_hccl_after_sleep()
+        with set_current_vllm_config(self.vllm_config):
+            num_restored = restore_hccl_after_sleep()
         self._sleep_hccl_destroyed = False
         logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
 

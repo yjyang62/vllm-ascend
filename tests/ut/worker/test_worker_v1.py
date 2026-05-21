@@ -264,9 +264,11 @@ class TestNPUWorker(TestBase):
         mock_destroy_hccl.assert_called_once()
         mock_allocator.sleep.assert_called_once_with(offload_tags=("weights",))
 
+    @patch("vllm_ascend.worker.worker.set_current_vllm_config")
     @patch("vllm_ascend.worker.worker.restore_hccl_after_sleep")
     def test_restore_hccl_after_sleep_only_when_destroyed(self,
-                                                         mock_restore_hccl):
+                                                         mock_restore_hccl,
+                                                         mock_set_config):
         """Test HCCL process groups are restored only once."""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -274,13 +276,16 @@ class TestNPUWorker(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
             worker._sleep_hccl_destroyed = True
+            worker.vllm_config = MagicMock()
 
             worker._restore_hccl_after_sleep()
             worker._restore_hccl_after_sleep()
 
         mock_restore_hccl.assert_called_once()
+        mock_set_config.assert_called_once_with(worker.vllm_config)
 
-    def test_restore_acl_graphs_waits_for_kv_cache(self):
+    @patch("vllm_ascend.worker.worker.set_current_vllm_config")
+    def test_restore_acl_graphs_waits_for_kv_cache(self, mock_set_config):
         """Test partial wake_up does not recapture graphs before KV cache."""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -288,6 +293,7 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker._sleep_acl_graph_invalidated = True
             worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
 
             worker._restore_acl_graphs_after_sleep(tags=["weights"])
             worker.model_runner.capture_model.assert_not_called()
@@ -296,6 +302,7 @@ class TestNPUWorker(TestBase):
             worker._restore_acl_graphs_after_sleep(tags=["kv_cache"])
             worker.model_runner.capture_model.assert_called_once()
             self.assertFalse(worker._sleep_acl_graph_invalidated)
+            mock_set_config.assert_called_once_with(worker.vllm_config)
 
     @patch(
         "vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment"
