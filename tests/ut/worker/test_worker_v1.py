@@ -236,6 +236,67 @@ class TestNPUWorker(TestBase):
 
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
 
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.NPUWorker._destroy_hccl_for_sleep")
+    @patch("vllm_ascend.worker.worker.NPUWorker._invalidate_acl_graphs_for_sleep")
+    @patch("torch.npu.mem_get_info")
+    def test_sleep_invalidates_graphs_and_destroys_hccl(
+        self,
+        mock_mem_get_info,
+        mock_invalidate_graphs,
+        mock_destroy_hccl,
+        mock_allocator_class,
+    ):
+        """Test sleep clears graph/HCCL state before allocator sleep."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_mem_get_info.side_effect = [(100, 1000), (300, 1000)]
+        mock_allocator = MagicMock()
+        mock_allocator_class.get_instance.return_value = mock_allocator
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+
+            worker.sleep(level=1)
+
+        mock_invalidate_graphs.assert_called_once()
+        mock_destroy_hccl.assert_called_once()
+        mock_allocator.sleep.assert_called_once_with(offload_tags=("weights",))
+
+    @patch("vllm_ascend.worker.worker.restore_hccl_after_sleep")
+    def test_restore_hccl_after_sleep_only_when_destroyed(self,
+                                                         mock_restore_hccl):
+        """Test HCCL process groups are restored only once."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_restore_hccl.return_value = 3
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker._sleep_hccl_destroyed = True
+
+            worker._restore_hccl_after_sleep()
+            worker._restore_hccl_after_sleep()
+
+        mock_restore_hccl.assert_called_once()
+
+    def test_restore_acl_graphs_waits_for_kv_cache(self):
+        """Test partial wake_up does not recapture graphs before KV cache."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker._sleep_acl_graph_invalidated = True
+            worker.model_runner = MagicMock()
+
+            worker._restore_acl_graphs_after_sleep(tags=["weights"])
+            worker.model_runner.capture_model.assert_not_called()
+            self.assertTrue(worker._sleep_acl_graph_invalidated)
+
+            worker._restore_acl_graphs_after_sleep(tags=["kv_cache"])
+            worker.model_runner.capture_model.assert_called_once()
+            self.assertFalse(worker._sleep_acl_graph_invalidated)
+
     @patch(
         "vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment"
     )

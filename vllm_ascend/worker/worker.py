@@ -52,6 +52,7 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.patch.worker.patch_distributed import destroy_hccl_for_sleep, restore_hccl_after_sleep
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -127,6 +128,8 @@ class NPUWorker(WorkerBase):
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_hccl_destroyed = False
+        self._sleep_acl_graph_invalidated = False
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -187,12 +190,119 @@ class NPUWorker(WorkerBase):
                 except Exception:
                     return
 
+    def _uses_acl_graph(self) -> bool:
+        model_runner = getattr(self, "model_runner", None)
+        if getattr(model_runner, "use_aclgraph", False):
+            return True
+        compilation_config = getattr(self.vllm_config, "compilation_config", None)
+        model_config = getattr(self.vllm_config, "model_config", None)
+        if compilation_config is None or model_config is None:
+            return False
+        return (
+            compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and not getattr(model_config, "enforce_eager", False)
+        )
+
+    def _reset_acl_graph_wrappers(self, obj, visited: set[int]) -> int:
+        from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+
+        if obj is None or id(obj) in visited:
+            return 0
+        visited.add(id(obj))
+
+        if isinstance(obj, ACLGraphWrapper):
+            return obj.reset_aclgraph_cache() + self._reset_acl_graph_wrappers(obj.unwrap(), visited)
+        return 0
+
+    def _acl_graph_reset_candidates(self) -> list[object]:
+        model_runner = getattr(self, "model_runner", None)
+        if model_runner is None:
+            return []
+
+        candidates = [
+            getattr(model_runner, "model", None),
+            getattr(model_runner, "drafter", None),
+            getattr(model_runner, "speculator", None),
+        ]
+        for owner in tuple(candidates):
+            candidates.extend([
+                getattr(owner, "model", None),
+                getattr(owner, "_runnable", None),
+            ])
+        return candidates
+
+    def _reset_model_runner_graph_manager(self) -> None:
+        from vllm.platforms import current_platform
+
+        model_runner = getattr(self, "model_runner", None)
+        if model_runner is None:
+            return
+        for attr_name in ("cudagraph_manager",):
+            manager = getattr(model_runner, attr_name, None)
+            if manager is None:
+                continue
+            if hasattr(manager, "graphs"):
+                manager.graphs.clear()
+            if hasattr(manager, "_graphs_captured"):
+                manager._graphs_captured = False
+            if hasattr(manager, "pool"):
+                manager.pool = current_platform.get_global_graph_pool()
+
+    def _invalidate_acl_graphs_for_sleep(self) -> None:
+        if not self._uses_acl_graph():
+            return
+
+        from vllm_ascend.compilation.acl_graph import reset_graph_params_for_sleep
+
+        reset_graph_params_for_sleep()
+        visited: set[int] = set()
+        for candidate in self._acl_graph_reset_candidates():
+            self._reset_acl_graph_wrappers(candidate, visited)
+        self._reset_model_runner_graph_manager()
+        self._sleep_acl_graph_invalidated = True
+
+    def _should_restore_acl_graphs(self, tags: list[str] | None) -> bool:
+        return tags is None or "kv_cache" in tags
+
+    def _restore_acl_graphs_after_sleep(self, tags: list[str] | None) -> None:
+        if not getattr(self, "_sleep_acl_graph_invalidated", False):
+            return
+        if not self._should_restore_acl_graphs(tags):
+            return
+        capture_model = getattr(self.model_runner, "capture_model", None)
+        if capture_model is None:
+            return
+        capture_model()
+        self._sleep_acl_graph_invalidated = False
+
+    def _destroy_hccl_for_sleep(self) -> None:
+        if getattr(self, "_sleep_hccl_destroyed", False):
+            return
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            for handle in getattr(self, "_pp_send_work", []):
+                handle.wait()
+            self._pp_send_work = []
+            torch.npu.synchronize()
+            num_destroyed = destroy_hccl_for_sleep()
+            self._sleep_hccl_destroyed = num_destroyed > 0
+            if self._sleep_hccl_destroyed:
+                logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)
+
+    def _restore_hccl_after_sleep(self) -> None:
+        if not getattr(self, "_sleep_hccl_destroyed", False):
+            return
+        num_restored = restore_hccl_after_sleep()
+        self._sleep_hccl_destroyed = False
+        logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
+
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Save the buffers before level 2 sleep
         if level == 2:
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+        self._invalidate_acl_graphs_for_sleep()
+        self._destroy_hccl_for_sleep()
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
@@ -212,6 +322,7 @@ class NPUWorker(WorkerBase):
                 "in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0."
             )
         allocator = CaMemAllocator.get_instance()
+        self._restore_hccl_after_sleep()
         allocator.wake_up(tags=tags)
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
@@ -241,6 +352,7 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+        self._restore_acl_graphs_after_sleep(tags)
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks

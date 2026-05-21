@@ -106,6 +106,13 @@ class ACLGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    def reset_aclgraph_cache(self) -> int:
+        num_entries = len(self.concrete_aclgraph_entries)
+        self.concrete_aclgraph_entries.clear()
+        self.first_run_finished = False
+        self.graph_pool = current_platform.get_global_graph_pool()
+        return num_entries
+
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
@@ -272,6 +279,24 @@ def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
 
 def get_graph_params():
     return _graph_params
+
+
+def _reset_graph_params(params: GraphParams | None) -> None:
+    if params is None:
+        return
+    for num_tokens in params.events:
+        params.events[num_tokens] = []
+    for num_tokens in params.workspaces:
+        params.workspaces[num_tokens] = None
+    for num_tokens in params.handles:
+        params.handles[num_tokens] = []
+    for num_tokens in params.attn_params:
+        params.attn_params[num_tokens] = []
+
+
+def reset_graph_params_for_sleep() -> None:
+    _reset_graph_params(_graph_params)
+    _reset_graph_params(_draft_graph_params)
 
 
 _draft_graph_params: GraphParams | None = None
