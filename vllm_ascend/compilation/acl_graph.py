@@ -26,6 +26,21 @@ from vllm_ascend.utils import weak_ref_tensors
 _acl_graph_wrappers = weakref.WeakSet()
 
 
+def log_hccl_group_addresses_for_aclgraph(reason: str) -> None:
+    try:
+        from vllm_ascend.patch.worker.patch_distributed import get_hccl_group_debug_info
+
+        debug_info = get_hccl_group_debug_info()
+    except Exception as exc:
+        logger.warning("Failed to collect HCCL group addresses for ACL graph capture (%s): %s", reason, exc)
+        return
+
+    if not debug_info:
+        logger.info("ACL graph capture HCCL group addresses (%s): no active HCCL device groups.", reason)
+        return
+    logger.info("ACL graph capture HCCL group addresses (%s): %s", reason, "; ".join(debug_info))
+
+
 def _tensor_nbytes(tensor: Any, seen_storages: set[tuple[Any, Any]]) -> int:
     if not isinstance(tensor, torch.Tensor):
         return 0
@@ -164,6 +179,9 @@ class ACLGraphWrapper:
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
             aclgraph = torch.npu.NPUGraph()
+            log_hccl_group_addresses_for_aclgraph(
+                f"wrapper mode={self.runtime_mode.name}, batch={entry.batch_descriptor}, inputs={input_addresses}"
+            )
 
             with ExitStack() as stack:
                 if self.aclgraph_options.gc_disable:

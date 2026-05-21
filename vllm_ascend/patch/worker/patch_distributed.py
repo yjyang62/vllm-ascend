@@ -178,3 +178,21 @@ def restore_hccl_after_sleep() -> int:
         if restore is not None and restore():
             num_restored += 1
     return num_restored
+
+
+def get_hccl_group_debug_info() -> list[str]:
+    debug_info: list[str] = []
+    for group in _iter_alive_group_coordinators():
+        device_group = getattr(group, "device_group", None)
+        if device_group is None:
+            continue
+        device_communicator = getattr(group, "device_communicator", None)
+        debug_info.append(
+            f"{getattr(group, 'unique_name', '<unknown>')}"
+            f"(group_name={getattr(group, 'group_name', '<unknown>')}, "
+            f"device_group_id=0x{id(device_group):x}, "
+            f"device_group={device_group!r}, "
+            f"device_communicator_id="
+            f"{'None' if device_communicator is None else hex(id(device_communicator))})"
+        )
+    return debug_info

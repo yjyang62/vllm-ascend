@@ -194,6 +194,9 @@ def graph_capture(device: torch.device):
     if curr_stream != stream:
         stream.wait_stream(curr_stream)
 
+    from vllm_ascend.compilation.acl_graph import log_hccl_group_addresses_for_aclgraph
+
+    log_hccl_group_addresses_for_aclgraph(f"model_runner capture stream_id=0x{id(stream):x}")
     with torch.npu.stream(stream), maybe_ca_context:
         yield graph_capture_context
 

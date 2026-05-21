@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from vllm_ascend.patch.worker.patch_distributed import GroupCoordinatorPatch
+from vllm_ascend.patch.worker.patch_distributed import GroupCoordinatorPatch, get_hccl_group_debug_info
 
 
 def test_destroy_hccl_for_sleep_preserves_cpu_group():
@@ -50,3 +50,20 @@ def test_restore_hccl_after_sleep_recreates_device_group_and_communicator():
         device_group=device_groups[0],
         unique_name='tp:0',
     )
+
+
+def test_get_hccl_group_debug_info_reports_device_group_address():
+    group = MagicMock()
+    group.unique_name = 'tp:0'
+    group.group_name = 'tp'
+    group.device_group = MagicMock(name='device_group')
+    group.device_communicator = MagicMock(name='device_communicator')
+
+    with patch('vllm_ascend.patch.worker.patch_distributed._iter_alive_group_coordinators',
+               return_value=[group]):
+        debug_info = get_hccl_group_debug_info()
+
+    assert len(debug_info) == 1
+    assert 'tp:0' in debug_info[0]
+    assert f'device_group_id=0x{id(group.device_group):x}' in debug_info[0]
+    assert f'device_communicator_id={hex(id(group.device_communicator))}' in debug_info[0]
