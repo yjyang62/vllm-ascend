@@ -203,34 +203,6 @@ class NPUWorker(WorkerBase):
             and not getattr(model_config, "enforce_eager", False)
         )
 
-    def _reset_acl_graph_wrappers(self, obj, visited: set[int]) -> int:
-        from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
-
-        if obj is None or id(obj) in visited:
-            return 0
-        visited.add(id(obj))
-
-        if isinstance(obj, ACLGraphWrapper):
-            return obj.reset_aclgraph_cache() + self._reset_acl_graph_wrappers(obj.unwrap(), visited)
-        return 0
-
-    def _acl_graph_reset_candidates(self) -> list[object]:
-        model_runner = getattr(self, "model_runner", None)
-        if model_runner is None:
-            return []
-
-        candidates = [
-            getattr(model_runner, "model", None),
-            getattr(model_runner, "drafter", None),
-            getattr(model_runner, "speculator", None),
-        ]
-        for owner in tuple(candidates):
-            candidates.extend([
-                getattr(owner, "model", None),
-                getattr(owner, "_runnable", None),
-            ])
-        return candidates
-
     def _reset_model_runner_graph_manager(self) -> None:
         from vllm.platforms import current_platform
 
@@ -252,12 +224,10 @@ class NPUWorker(WorkerBase):
         if not self._uses_acl_graph():
             return
 
-        from vllm_ascend.compilation.acl_graph import reset_graph_params_for_sleep
+        from vllm_ascend.compilation.acl_graph import reset_aclgraph_caches_for_sleep, reset_graph_params_for_sleep
 
         reset_graph_params_for_sleep()
-        visited: set[int] = set()
-        for candidate in self._acl_graph_reset_candidates():
-            self._reset_acl_graph_wrappers(candidate, visited)
+        reset_aclgraph_caches_for_sleep()
         self._reset_model_runner_graph_manager()
         self._sleep_acl_graph_invalidated = True
 

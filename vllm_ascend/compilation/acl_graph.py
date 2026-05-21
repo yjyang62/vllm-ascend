@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.utils import weak_ref_tensors
+
+_acl_graph_wrappers = weakref.WeakSet()
 
 
 @dataclasses.dataclass
@@ -91,6 +94,7 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        _acl_graph_wrappers.add(self)
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -297,6 +301,10 @@ def _reset_graph_params(params: GraphParams | None) -> None:
 def reset_graph_params_for_sleep() -> None:
     _reset_graph_params(_graph_params)
     _reset_graph_params(_draft_graph_params)
+
+
+def reset_aclgraph_caches_for_sleep() -> int:
+    return sum(wrapper.reset_aclgraph_cache() for wrapper in list(_acl_graph_wrappers))
 
 
 _draft_graph_params: GraphParams | None = None

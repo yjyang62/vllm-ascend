@@ -31,8 +31,8 @@ from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
                                           AscendMLAMetadata)
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphEntry, ACLGraphWrapper, get_draft_graph_params, get_graph_params,
-    reset_graph_params_for_sleep, set_draft_graph_params, set_graph_params,
-    update_draft_graph_params_workspaces)
+    reset_aclgraph_caches_for_sleep, reset_graph_params_for_sleep,
+    set_draft_graph_params, set_graph_params, update_draft_graph_params_workspaces)
 
 
 class TestACLGraphEntry(TestBase):
@@ -170,6 +170,32 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(wrapper.concrete_aclgraph_entries, {})
         self.assertFalse(wrapper.first_run_finished)
         self.assertEqual(wrapper.graph_pool, self.mock_graph_pool)
+
+    @patch('vllm_ascend.compilation.acl_graph.current_platform')
+    @patch('vllm_ascend.compilation.acl_graph.envs')
+    def test_reset_aclgraph_caches_for_sleep(self, mock_envs,
+                                             mock_current_platform):
+        """Test sleep-mode reset clears all registered ACLGraphWrapper caches."""
+        mock_envs.VLLM_LOGGING_LEVEL = "INFO"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+
+        wrappers = [
+            ACLGraphWrapper(
+                runnable=self.mock_runnable,
+                vllm_config=self.mock_vllm_config,
+                runtime_mode=CUDAGraphMode.FULL,
+                cudagraph_options=self.mock_cudagraph_options)
+            for _ in range(2)
+        ]
+        for wrapper in wrappers:
+            wrapper.concrete_aclgraph_entries[self.mock_batch_descriptor] = ACLGraphEntry(
+                batch_descriptor=self.mock_batch_descriptor,
+                aclgraph=MagicMock())
+
+        self.assertGreaterEqual(reset_aclgraph_caches_for_sleep(), 2)
+
+        for wrapper in wrappers:
+            self.assertEqual(wrapper.concrete_aclgraph_entries, {})
 
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
