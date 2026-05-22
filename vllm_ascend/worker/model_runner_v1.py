@@ -196,6 +196,8 @@ def graph_capture(device: torch.device):
 
     from vllm_ascend.compilation.acl_graph import log_hccl_group_addresses_for_aclgraph
 
+    # full graph capture 由上游 GPUModelRunner 触发，这里在包装边界也记录
+    # 一次 HCCL 快照，与 ACLGraphWrapper 内部记录形成互补。
     log_hccl_group_addresses_for_aclgraph(f"model_runner capture stream_id=0x{id(stream):x}")
     with torch.npu.stream(stream), maybe_ca_context:
         yield graph_capture_context

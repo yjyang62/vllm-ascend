@@ -23,12 +23,17 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.utils import weak_ref_tensors
 
+# 记录仍然存活的 ACLGraphWrapper，sleep 时不需要区分主模型、草稿模型
+# 或上游 CUDA graph manager 的归属，也能统一失效所有已捕获图。
 _acl_graph_wrappers = weakref.WeakSet()
+# HCCL 地址日志比较长，每个 rank 的每一轮 capture 只打印一次。
+# sleep 失效图缓存时会重置该标记并递增 generation。
 _hccl_group_addresses_logged_for_capture = False
 _hccl_group_address_log_generation = 0
 
 
 def _collect_hccl_group_debug_info() -> list[str]:
+    """返回 vLLM 已注册 HCCL ProcessGroup 的本进程地址信息。"""
     from vllm.distributed import parallel_state
 
     groups = getattr(parallel_state, "_groups", {})
@@ -44,6 +49,8 @@ def _collect_hccl_group_debug_info() -> list[str]:
         if device_group is None:
             continue
         device_communicator = getattr(group, "device_communicator", None)
+        # Python id/repr 只能作为本进程内的地址指纹；不同 rank 属于不同
+        # 进程地址空间，不能跨 rank 比较，只能比较同一 rank 的 sleep 前后。
         debug_info.append(
             f"{getattr(group, 'unique_name', '<unknown>')}"
             f"(group_name={getattr(group, 'group_name', '<unknown>')}, "
@@ -56,6 +63,7 @@ def _collect_hccl_group_debug_info() -> list[str]:
 
 
 def _get_hccl_group_log_rank_info() -> tuple[str, str]:
+    """尽力获取 rank 信息，方便关联同一 rank 的地址日志。"""
     rank = "uninitialized"
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         rank = str(torch.distributed.get_rank())
@@ -77,6 +85,7 @@ def _get_hccl_group_log_rank_info() -> tuple[str, str]:
 
 
 def reset_hccl_group_address_log_for_aclgraph() -> None:
+    """开启新一轮 capture generation，用于控制 HCCL 地址日志只打印一次。"""
     global _hccl_group_addresses_logged_for_capture
     global _hccl_group_address_log_generation
     _hccl_group_addresses_logged_for_capture = False
@@ -84,6 +93,7 @@ def reset_hccl_group_address_log_for_aclgraph() -> None:
 
 
 def log_hccl_group_addresses_for_aclgraph(reason: str, *, log_once: bool = True) -> list[str]:
+    """打印并返回 ACL graph 捕获时观测到的 HCCL 地址快照。"""
     global _hccl_group_addresses_logged_for_capture
 
     try:
@@ -109,6 +119,7 @@ def log_hccl_group_addresses_for_aclgraph(reason: str, *, log_once: bool = True)
 
 
 def _tensor_nbytes(tensor: Any, seen_storages: set[tuple[Any, Any]]) -> int:
+    """统计底层 storage 大小；多个 tensor 共享 storage 时只计一次。"""
     if not isinstance(tensor, torch.Tensor):
         return 0
     try:
@@ -132,8 +143,8 @@ class ACLGraphEntry:
     # during capture, and check if they are the same during replay
     input_addresses: list[int] | None = None
 
-    # Snapshot of HCCL device group addresses observed when this graph
-    # was captured. Use this to compare pre-sleep and post-wakeup captures.
+    # 该图捕获时观测到的 HCCL device group 地址快照；
+    # 用于对比 sleep 前和 wakeup 后的捕获是否使用了同一通信域对象。
     hccl_group_addresses: list[str] | None = None
 
 
@@ -194,6 +205,7 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        # 维护进程内弱引用注册表，供 sleep 统一清理 ACL graph 缓存。
         _acl_graph_wrappers.add(self)
 
     def __getattr__(self, key: str):
@@ -250,6 +262,8 @@ class ACLGraphWrapper:
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
             aclgraph = torch.npu.NPUGraph()
+            # 将捕获时的 HCCL 地址快照保存到图条目中，便于同一 rank
+            # 对比 sleep 前和 wakeup 后是否换了通信域对象。
             entry.hccl_group_addresses = log_hccl_group_addresses_for_aclgraph(
                 f"wrapper mode={self.runtime_mode.name}, batch={entry.batch_descriptor}, inputs={input_addresses}"
             )
@@ -389,6 +403,7 @@ def get_graph_params():
 
 
 def _reset_graph_params(params: GraphParams | None) -> None:
+    """清理指向旧 capture 状态的 graph task 元数据。"""
     if params is None:
         return
     for num_tokens in params.events:
@@ -400,6 +415,7 @@ def _reset_graph_params(params: GraphParams | None) -> None:
 
 
 def _reset_attention_workspaces(params: GraphParams | None, seen_storages: set[tuple[Any, Any]]) -> int:
+    """清理 attention workspace，并返回已跟踪的 storage 字节数。"""
     if params is None:
         return 0
     workspace_bytes = 0
@@ -410,6 +426,7 @@ def _reset_attention_workspaces(params: GraphParams | None, seen_storages: set[t
 
 
 def reset_attention_workspaces_for_sleep() -> int:
+    """进入 sleep 前释放所有缓存的 attention workspace。"""
     seen_storages: set[tuple[Any, Any]] = set()
     return _reset_attention_workspaces(_graph_params, seen_storages) + _reset_attention_workspaces(
         _draft_graph_params, seen_storages
@@ -417,11 +434,13 @@ def reset_attention_workspaces_for_sleep() -> int:
 
 
 def reset_graph_params_for_sleep() -> None:
+    """失效 ACL graph 元数据；workspace 清理和统计由单独函数处理。"""
     _reset_graph_params(_graph_params)
     _reset_graph_params(_draft_graph_params)
 
 
 def reset_aclgraph_caches_for_sleep() -> int:
+    """清理已捕获 ACL graph，并允许下一轮 capture 再打印一次 HCCL 地址。"""
     reset_hccl_group_address_log_for_aclgraph()
     return sum(wrapper.reset_aclgraph_cache() for wrapper in list(_acl_graph_wrappers))
 

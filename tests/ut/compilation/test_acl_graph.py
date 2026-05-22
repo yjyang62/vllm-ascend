@@ -157,7 +157,7 @@ class TestACLGraphWrapper(TestBase):
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
     def test_reset_aclgraph_cache(self, mock_envs, mock_current_platform):
-        """Test reset_aclgraph_cache clears captured graph entries."""
+        """验证 reset_aclgraph_cache 会清理已捕获图条目。"""
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
 
@@ -181,7 +181,7 @@ class TestACLGraphWrapper(TestBase):
     @patch('vllm_ascend.compilation.acl_graph.envs')
     def test_reset_aclgraph_caches_for_sleep(self, mock_envs,
                                              mock_current_platform):
-        """Test sleep-mode reset clears all registered ACLGraphWrapper caches."""
+        """验证 sleep 重置会清理所有已注册 ACLGraphWrapper 缓存。"""
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
 
@@ -797,7 +797,7 @@ class TestACLGraphWrapper(TestBase):
     @patch('vllm_ascend.compilation.acl_graph._collect_hccl_group_debug_info')
     def test_log_hccl_group_addresses_once(self, mock_collect,
                                            mock_rank_info, mock_logger):
-        """Test HCCL address logging only emits once per capture generation."""
+        """验证每轮 capture generation 只打印一次 HCCL 地址日志。"""
         mock_collect.return_value = ["tp:0(device_group_id=0x1)"]
         mock_rank_info.return_value = ("2", "1")
         reset_hccl_group_address_log_for_aclgraph()

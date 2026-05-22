@@ -60,6 +60,7 @@ _sin_slice: torch.Tensor = None
 
 
 def _tensor_nbytes(tensor: torch.Tensor | None, seen_storages: set[tuple[torch.device, int]]) -> int:
+    """统计全局 rotary cache 的 NPU storage；别名 tensor 只计一次。"""
     if not isinstance(tensor, torch.Tensor):
         return 0
     try:
@@ -74,6 +75,7 @@ def _tensor_nbytes(tensor: torch.Tensor | None, seen_storages: set[tuple[torch.d
 
 
 def get_global_cos_sin_cache_size_bytes() -> int:
+    """返回所有全局 sin/cos cache tensor 的已跟踪 storage 大小。"""
     seen_storages: set[tuple[torch.device, int]] = set()
     return sum(
         _tensor_nbytes(tensor, seen_storages)
@@ -92,6 +94,7 @@ def get_global_cos_sin_cache_size_bytes() -> int:
 
 
 def clear_global_cos_sin_cache() -> int:
+    """清理全局 rotary cache 引用，使其 NPU storage 可以被释放。"""
     global _cos_mla, _sin_mla, _cos_cache, _sin_cache, _cos_sin_cache, _cos, _sin, _cos_slice, _sin_slice
 
     cache_bytes = get_global_cos_sin_cache_size_bytes()
@@ -115,6 +118,10 @@ def restore_global_cos_sin_cache(
     dtype,
     device,
 ):
+    """sleep wakeup 后重建全局 rotary cache 绑定。"""
+    # 模型中的 rotary 模块仍持有持久化 cos_sin_cache buffer；先把模块级
+    # 全局变量重新绑定到这些 buffer，再重建 fused rotary kernel 使用的
+    # 每步临时 sin/cos scratch tensor。
     modules = model.modules() if hasattr(model, "modules") else []
     for module in modules:
         cos_sin_cache = getattr(module, "cos_sin_cache", None)

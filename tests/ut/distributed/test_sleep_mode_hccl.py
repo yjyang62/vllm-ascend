@@ -4,6 +4,7 @@ from vllm_ascend.patch.worker.patch_distributed import GroupCoordinatorPatch, ge
 
 
 def test_destroy_hccl_for_sleep_preserves_cpu_group():
+    """验证 sleep 只销毁 HCCL device_group，不影响 Gloo cpu_group。"""
     group = object.__new__(GroupCoordinatorPatch)
     device_communicator = MagicMock()
     group.device_communicator = device_communicator
@@ -22,6 +23,7 @@ def test_destroy_hccl_for_sleep_preserves_cpu_group():
 
 
 def test_restore_hccl_after_sleep_recreates_device_group_and_communicator():
+    """验证 wakeup 会按原 rank 列表重建 HCCL group 和 communicator。"""
     group = object.__new__(GroupCoordinatorPatch)
     group.device_group = None
     group.cpu_group = MagicMock()
@@ -53,6 +55,7 @@ def test_restore_hccl_after_sleep_recreates_device_group_and_communicator():
 
 
 def test_get_hccl_group_debug_info_reports_device_group_address():
+    """验证调试信息包含 HCCL group 和 communicator 地址指纹。"""
     group = MagicMock()
     group.unique_name = 'tp:0'
     group.group_name = 'tp'

@@ -36,6 +36,8 @@ class GroupCoordinatorPatch(GroupCoordinator):
         group_name: str | None = None,
     ):
         group_name = group_name or "anonymous"
+        # 保存建组参数，sleep/wakeup 时只重建 HCCL device_group，
+        # 不替换 Python 层 GroupCoordinator 对象。
         self.group_name = group_name
         self.group_ranks = group_ranks
         self.torch_distributed_backend = torch_distributed_backend
@@ -86,6 +88,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.use_cpu_custom_send_recv = False
 
     def _init_device_communicator(self) -> None:
+        """创建绑定当前 HCCL group 的 Ascend device communicator。"""
         self.device_communicator = NPUCommunicator(
             cpu_group=self.cpu_group,
             device=self.device,
@@ -94,7 +97,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         )
 
     def destroy_hccl_for_sleep(self) -> bool:
-        """Release the HCCL process group while keeping the Gloo group alive."""
+        """释放 HCCL process group，同时保留 Gloo group。"""
         destroyed = False
         if self.device_communicator is not None:
             self.device_communicator.destroy()
@@ -107,13 +110,15 @@ class GroupCoordinatorPatch(GroupCoordinator):
         return destroyed
 
     def restore_hccl_after_sleep(self) -> bool:
-        """Recreate the HCCL process group in place after sleep mode."""
+        """sleep 后在原 GroupCoordinator 对象上重建 HCCL process group。"""
         if self.device_group is not None:
             return False
 
         self_device_group = None
         hccl_pg_options = create_hccl_pg_options(self.group_name)
         for ranks in self.group_ranks:
+            # 所有 rank 必须按相同顺序为每个 ranks 列表调用 new_group，
+            # 与 GroupCoordinator 初始化时的建组语义保持一致。
             device_group = torch.distributed.new_group(
                 ranks,
                 backend=self.torch_distributed_backend,
@@ -153,6 +158,7 @@ vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
 
 
 def _iter_alive_group_coordinators():
+    """遍历仍存活且去重后的 GroupCoordinator 对象。"""
     seen: set[int] = set()
     for group_ref in list(_groups.values()):
         group = group_ref()
@@ -163,6 +169,7 @@ def _iter_alive_group_coordinators():
 
 
 def destroy_hccl_for_sleep() -> int:
+    """sleep 时销毁所有已注册的 HCCL device group。"""
     num_destroyed = 0
     for group in _iter_alive_group_coordinators():
         destroy = getattr(group, "destroy_hccl_for_sleep", None)
@@ -172,6 +179,7 @@ def destroy_hccl_for_sleep() -> int:
 
 
 def restore_hccl_after_sleep() -> int:
+    """wakeup 时恢复之前被 sleep 销毁的 HCCL device group。"""
     num_restored = 0
     for group in _iter_alive_group_coordinators():
         restore = getattr(group, "restore_hccl_after_sleep", None)
@@ -181,6 +189,7 @@ def restore_hccl_after_sleep() -> int:
 
 
 def get_hccl_group_debug_info() -> list[str]:
+    """返回当前活跃 HCCL device group 的地址指纹。"""
     debug_info: list[str] = []
     for group in _iter_alive_group_coordinators():
         device_group = getattr(group, "device_group", None)

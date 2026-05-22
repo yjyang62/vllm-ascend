@@ -207,7 +207,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
     def test_wake_up_mode_enabled(self, mock_allocator_class):
-        """Test wake_up method when sleep mode is enabled"""
+        """验证 sleep mode 开启时 wake_up 会唤醒 allocator。"""
         from vllm_ascend.worker.worker import NPUWorker
 
         # Setup mock
@@ -231,7 +231,7 @@ class TestNPUWorker(TestBase):
             worker.model_runner = mock_model_runner
             worker.vllm_config = mock_vllm_config
             worker._sleep_saved_buffers = {}
-            # Test wake_up method
+            # 调用 wake_up，验证参数透传到 allocator。
             worker.wake_up(tags=["test_tag"])
 
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
@@ -251,7 +251,7 @@ class TestNPUWorker(TestBase):
         mock_destroy_hccl,
         mock_allocator_class,
     ):
-        """Test sleep clears graph/HCCL state before allocator sleep."""
+        """验证 allocator sleep 前会先清理图缓存和 HCCL 状态。"""
         from vllm_ascend.worker.worker import NPUWorker
 
         mock_mem_get_info.side_effect = [
@@ -283,7 +283,7 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.ops.rotary_embedding.clear_global_cos_sin_cache")
     def test_clear_cos_sin_cache_for_sleep(self, mock_clear_cache):
-        """Test sleep clears global sin/cos cache state."""
+        """验证 sleep 会清理全局 sin/cos cache 状态。"""
         from vllm_ascend.worker.worker import NPUWorker
 
         mock_clear_cache.return_value = 1024
@@ -297,7 +297,7 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.ops.rotary_embedding.restore_global_cos_sin_cache")
     def test_restore_cos_sin_cache_after_sleep(self, mock_restore_cache):
-        """Test wake_up restores global sin/cos cache before graph recapture."""
+        """验证 wake_up 会在重新捕获图前恢复全局 sin/cos cache。"""
         from vllm_ascend.worker.worker import NPUWorker
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
@@ -327,7 +327,7 @@ class TestNPUWorker(TestBase):
     def test_restore_hccl_after_sleep_only_when_destroyed(self,
                                                          mock_restore_hccl,
                                                          mock_set_config):
-        """Test HCCL process groups are restored only once."""
+        """验证 HCCL process group 只在确实销毁后恢复一次。"""
         from vllm_ascend.worker.worker import NPUWorker
 
         mock_restore_hccl.return_value = 3
@@ -344,7 +344,7 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.set_current_vllm_config")
     def test_restore_acl_graphs_waits_for_kv_cache(self, mock_set_config):
-        """Test partial wake_up does not recapture graphs before KV cache."""
+        """验证分阶段 wake_up 在 KV cache 恢复前不会重新捕获图。"""
         from vllm_ascend.worker.worker import NPUWorker
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):

@@ -130,8 +130,10 @@ class NPUWorker(WorkerBase):
         self.profiler_config = vllm_config.profiler_config
         self.profiler = None
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
-            # Buffers saved before sleep
+            # level 2 sleep 前保存的 buffer。
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        # 记录 sleep 期间被清理的资源，wakeup 时据此按需恢复，
+        # 确保恢复完成后才能继续正常推理。
         self._sleep_hccl_destroyed = False
         self._sleep_acl_graph_invalidated = False
         self._sleep_cos_sin_cache_cleared = False
@@ -196,6 +198,7 @@ class NPUWorker(WorkerBase):
                     return
 
     def _uses_acl_graph(self) -> bool:
+        """判断当前 worker 是否可能持有可复用的 ACL graph 状态。"""
         model_runner = getattr(self, "model_runner", None)
         if getattr(model_runner, "use_aclgraph", False):
             return True
@@ -209,6 +212,7 @@ class NPUWorker(WorkerBase):
         )
 
     def _reset_model_runner_graph_manager(self) -> None:
+        """清理可能持有旧 HCCL 句柄的 full-graph manager 状态。"""
         from vllm.platforms import current_platform
 
         model_runner = getattr(self, "model_runner", None)
@@ -226,6 +230,7 @@ class NPUWorker(WorkerBase):
                 manager.pool = current_platform.get_global_graph_pool()
 
     def _invalidate_acl_graphs_for_sleep(self) -> None:
+        """在销毁 HCCL group 前失效已捕获的 ACL graph。"""
         if not self._uses_acl_graph():
             return
 
@@ -237,11 +242,13 @@ class NPUWorker(WorkerBase):
         self._sleep_acl_graph_invalidated = True
 
     def _clear_attention_workspaces_for_sleep(self) -> int:
+        """清理缓存的 attention workspace，并返回跟踪到的字节数。"""
         from vllm_ascend.compilation.acl_graph import reset_attention_workspaces_for_sleep
 
         return reset_attention_workspaces_for_sleep()
 
     def _clear_cos_sin_cache_for_sleep(self) -> int:
+        """清理全局 rotary cache 引用，并返回跟踪到的字节数。"""
         from vllm_ascend.ops.rotary_embedding import clear_global_cos_sin_cache
 
         cache_bytes = clear_global_cos_sin_cache()
@@ -249,6 +256,7 @@ class NPUWorker(WorkerBase):
         return cache_bytes
 
     def _restore_cos_sin_cache_after_sleep(self, tags: list[str] | None) -> None:
+        """当权重或 KV cache 已重新映射后恢复 rotary 全局缓存。"""
         if not getattr(self, "_sleep_cos_sin_cache_cleared", False):
             return
         if tags is not None and "weights" not in tags and "kv_cache" not in tags:
@@ -267,9 +275,11 @@ class NPUWorker(WorkerBase):
         self._sleep_cos_sin_cache_cleared = False
 
     def _should_restore_acl_graphs(self, tags: list[str] | None) -> bool:
+        """仅在 KV cache 映射可用后才重新捕获 ACL graph。"""
         return tags is None or "kv_cache" in tags
 
     def _restore_acl_graphs_after_sleep(self, tags: list[str] | None) -> None:
+        """sleep 失效 HCCL/workspace 状态后重新捕获 ACL graph。"""
         if not getattr(self, "_sleep_acl_graph_invalidated", False):
             return
         if not self._should_restore_acl_graphs(tags):
@@ -282,6 +292,7 @@ class NPUWorker(WorkerBase):
         self._sleep_acl_graph_invalidated = False
 
     def _destroy_hccl_for_sleep(self) -> None:
+        """等待未完成通信并释放 HCCL group。"""
         if getattr(self, "_sleep_hccl_destroyed", False):
             return
         if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -295,6 +306,7 @@ class NPUWorker(WorkerBase):
                 logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)
 
     def _restore_hccl_after_sleep(self) -> None:
+        """在当前 vLLM config 上下文中重建 HCCL group。"""
         if not getattr(self, "_sleep_hccl_destroyed", False):
             return
         with set_current_vllm_config(self.vllm_config):
@@ -303,6 +315,7 @@ class NPUWorker(WorkerBase):
         logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
 
     def _measure_npu_free_delta(self, action: Callable[[], T]) -> tuple[T, int]:
+        """执行清理动作，并测量 NPU 空闲显存的实际增加量。"""
         free_before = torch.npu.mem_get_info()[0]
         result = action()
         free_after = torch.npu.mem_get_info()[0]
@@ -314,6 +327,8 @@ class NPUWorker(WorkerBase):
         if level == 2:
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+        # 先清理独立缓存，再进入 allocator sleep；这样日志可以把这些缓存
+        # 与权重/KV cache 的释放量分开统计。
         attention_workspace_bytes, attention_workspace_freed_bytes = self._measure_npu_free_delta(
             self._clear_attention_workspaces_for_sleep
         )
@@ -374,7 +389,7 @@ class NPUWorker(WorkerBase):
                     w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
                     setattr(parent_module, param_name, w13_data)
 
-        # Restore the buffers after level 2 sleep
+        # level 2 sleep 后恢复之前保存的 buffer。
         if len(self._sleep_saved_buffers):
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
