@@ -25,6 +25,7 @@ from vllm_ascend.utils import weak_ref_tensors
 
 _acl_graph_wrappers = weakref.WeakSet()
 _hccl_group_addresses_logged_for_capture = False
+_hccl_group_address_log_generation = 0
 
 
 def _collect_hccl_group_debug_info() -> list[str]:
@@ -54,9 +55,32 @@ def _collect_hccl_group_debug_info() -> list[str]:
     return debug_info
 
 
+def _get_hccl_group_log_rank_info() -> tuple[str, str]:
+    rank = "uninitialized"
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        rank = str(torch.distributed.get_rank())
+
+    local_rank = "unknown"
+    try:
+        from vllm.distributed import parallel_state
+
+        groups = getattr(parallel_state, "_groups", {})
+        for group_ref in list(groups.values()):
+            group = group_ref()
+            if group is None or getattr(group, "group_name", None) != "world":
+                continue
+            local_rank = str(getattr(group, "local_rank", "unknown"))
+            break
+    except Exception:
+        pass
+    return rank, local_rank
+
+
 def reset_hccl_group_address_log_for_aclgraph() -> None:
     global _hccl_group_addresses_logged_for_capture
+    global _hccl_group_address_log_generation
     _hccl_group_addresses_logged_for_capture = False
+    _hccl_group_address_log_generation += 1
 
 
 def log_hccl_group_addresses_for_aclgraph(reason: str, *, log_once: bool = True) -> list[str]:
@@ -72,10 +96,15 @@ def log_hccl_group_addresses_for_aclgraph(reason: str, *, log_once: bool = True)
         return debug_info
 
     _hccl_group_addresses_logged_for_capture = True
+    rank, local_rank = _get_hccl_group_log_rank_info()
+    log_context = (
+        f"generation={_hccl_group_address_log_generation}, rank={rank}, "
+        f"local_rank={local_rank}, {reason}"
+    )
     if not debug_info:
-        logger.info("ACL graph capture recorded HCCL group addresses (%s): no active HCCL device groups.", reason)
+        logger.info("ACL graph capture recorded HCCL group addresses (%s): no active HCCL device groups.", log_context)
         return []
-    logger.info("ACL graph capture recorded HCCL group addresses (%s): %s", reason, "; ".join(debug_info))
+    logger.info("ACL graph capture recorded HCCL group addresses (%s): %s", log_context, "; ".join(debug_info))
     return debug_info
 
 

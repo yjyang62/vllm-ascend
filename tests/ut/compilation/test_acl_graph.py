@@ -793,10 +793,13 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(unwrapped, self.mock_runnable)
 
     @patch('vllm_ascend.compilation.acl_graph.logger')
+    @patch('vllm_ascend.compilation.acl_graph._get_hccl_group_log_rank_info')
     @patch('vllm_ascend.compilation.acl_graph._collect_hccl_group_debug_info')
-    def test_log_hccl_group_addresses_once(self, mock_collect, mock_logger):
+    def test_log_hccl_group_addresses_once(self, mock_collect,
+                                           mock_rank_info, mock_logger):
         """Test HCCL address logging only emits once per capture generation."""
         mock_collect.return_value = ["tp:0(device_group_id=0x1)"]
+        mock_rank_info.return_value = ("2", "1")
         reset_hccl_group_address_log_for_aclgraph()
 
         self.assertEqual(
@@ -810,6 +813,8 @@ class TestACLGraphWrapper(TestBase):
 
         mock_collect.assert_called()
         mock_logger.info.assert_called_once()
+        self.assertIn("rank=2", mock_logger.info.call_args.args[1])
+        self.assertIn("local_rank=1", mock_logger.info.call_args.args[1])
 
 
 class TestDraftGraphParams(TestBase):
