@@ -26,11 +26,36 @@ from vllm_ascend.utils import weak_ref_tensors
 _acl_graph_wrappers = weakref.WeakSet()
 
 
+def _collect_hccl_group_debug_info() -> list[str]:
+    from vllm.distributed import parallel_state
+
+    groups = getattr(parallel_state, "_groups", {})
+    debug_info: list[str] = []
+    seen: set[int] = set()
+    for group_ref in list(groups.values()):
+        group = group_ref()
+        if group is None or id(group) in seen:
+            continue
+        seen.add(id(group))
+
+        device_group = getattr(group, "device_group", None)
+        if device_group is None:
+            continue
+        device_communicator = getattr(group, "device_communicator", None)
+        debug_info.append(
+            f"{getattr(group, 'unique_name', '<unknown>')}"
+            f"(group_name={getattr(group, 'group_name', '<unknown>')}, "
+            f"device_group_id=0x{id(device_group):x}, "
+            f"device_group={device_group!r}, "
+            f"device_communicator_id="
+            f"{'None' if device_communicator is None else hex(id(device_communicator))})"
+        )
+    return debug_info
+
+
 def log_hccl_group_addresses_for_aclgraph(reason: str) -> list[str]:
     try:
-        from vllm_ascend.patch.worker.patch_distributed import get_hccl_group_debug_info
-
-        debug_info = get_hccl_group_debug_info()
+        debug_info = _collect_hccl_group_debug_info()
     except Exception as exc:
         logger.warning("Failed to collect HCCL group addresses for ACL graph capture (%s): %s", reason, exc)
         return []
