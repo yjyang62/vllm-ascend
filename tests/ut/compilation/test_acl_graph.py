@@ -31,8 +31,10 @@ from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
                                           AscendMLAMetadata)
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphEntry, ACLGraphWrapper, get_draft_graph_params, get_graph_params,
-    reset_aclgraph_caches_for_sleep, reset_attention_workspaces_for_sleep, reset_graph_params_for_sleep,
-    set_draft_graph_params, set_graph_params, update_draft_graph_params_workspaces)
+    log_hccl_group_addresses_for_aclgraph, reset_aclgraph_caches_for_sleep,
+    reset_attention_workspaces_for_sleep, reset_graph_params_for_sleep,
+    reset_hccl_group_address_log_for_aclgraph, set_draft_graph_params,
+    set_graph_params, update_draft_graph_params_workspaces)
 
 
 class TestACLGraphEntry(TestBase):
@@ -789,6 +791,25 @@ class TestACLGraphWrapper(TestBase):
 
         unwrapped = wrapper.unwrap()
         self.assertEqual(unwrapped, self.mock_runnable)
+
+    @patch('vllm_ascend.compilation.acl_graph.logger')
+    @patch('vllm_ascend.compilation.acl_graph._collect_hccl_group_debug_info')
+    def test_log_hccl_group_addresses_once(self, mock_collect, mock_logger):
+        """Test HCCL address logging only emits once per capture generation."""
+        mock_collect.return_value = ["tp:0(device_group_id=0x1)"]
+        reset_hccl_group_address_log_for_aclgraph()
+
+        self.assertEqual(
+            log_hccl_group_addresses_for_aclgraph("first"),
+            ["tp:0(device_group_id=0x1)"],
+        )
+        self.assertEqual(
+            log_hccl_group_addresses_for_aclgraph("second"),
+            ["tp:0(device_group_id=0x1)"],
+        )
+
+        mock_collect.assert_called()
+        mock_logger.info.assert_called_once()
 
 
 class TestDraftGraphParams(TestBase):

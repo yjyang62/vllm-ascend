@@ -24,6 +24,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.utils import weak_ref_tensors
 
 _acl_graph_wrappers = weakref.WeakSet()
+_hccl_group_addresses_logged_for_capture = False
 
 
 def _collect_hccl_group_debug_info() -> list[str]:
@@ -53,13 +54,24 @@ def _collect_hccl_group_debug_info() -> list[str]:
     return debug_info
 
 
-def log_hccl_group_addresses_for_aclgraph(reason: str) -> list[str]:
+def reset_hccl_group_address_log_for_aclgraph() -> None:
+    global _hccl_group_addresses_logged_for_capture
+    _hccl_group_addresses_logged_for_capture = False
+
+
+def log_hccl_group_addresses_for_aclgraph(reason: str, *, log_once: bool = True) -> list[str]:
+    global _hccl_group_addresses_logged_for_capture
+
     try:
         debug_info = _collect_hccl_group_debug_info()
     except Exception as exc:
         logger.warning("Failed to collect HCCL group addresses for ACL graph capture (%s): %s", reason, exc)
         return []
 
+    if log_once and _hccl_group_addresses_logged_for_capture:
+        return debug_info
+
+    _hccl_group_addresses_logged_for_capture = True
     if not debug_info:
         logger.info("ACL graph capture recorded HCCL group addresses (%s): no active HCCL device groups.", reason)
         return []
@@ -381,6 +393,7 @@ def reset_graph_params_for_sleep() -> None:
 
 
 def reset_aclgraph_caches_for_sleep() -> int:
+    reset_hccl_group_address_log_for_aclgraph()
     return sum(wrapper.reset_aclgraph_cache() for wrapper in list(_acl_graph_wrappers))
 
 
