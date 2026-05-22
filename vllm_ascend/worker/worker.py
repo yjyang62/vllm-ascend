@@ -215,18 +215,23 @@ class NPUWorker(WorkerBase):
         """清理可能持有旧 HCCL 句柄的 full-graph manager 状态。"""
         from vllm.platforms import current_platform
 
+        # v1/v2 runner 可能没有 cudagraph_manager，按属性存在性处理。
         model_runner = getattr(self, "model_runner", None)
         if model_runner is None:
             return
         for attr_name in ("cudagraph_manager",):
+            # v2 ModelAclGraphManager 继承自上游 manager，graphs 里持有捕获图。
             manager = getattr(model_runner, attr_name, None)
             if manager is None:
                 continue
             if hasattr(manager, "graphs"):
+                # 清空捕获图字典，避免 wakeup 后复用旧 HCCL 句柄。
                 manager.graphs.clear()
             if hasattr(manager, "_graphs_captured"):
+                # 置为未捕获，后续 dispatch 会回到重新捕获路径。
                 manager._graphs_captured = False
             if hasattr(manager, "pool"):
+                # graph pool 也重新获取，避免沿用旧 capture pool。
                 manager.pool = current_platform.get_global_graph_pool()
 
     def _invalidate_acl_graphs_for_sleep(self) -> None:
@@ -236,9 +241,11 @@ class NPUWorker(WorkerBase):
 
         from vllm_ascend.compilation.acl_graph import reset_aclgraph_caches_for_sleep, reset_graph_params_for_sleep
 
+        # 先清 graph task 元数据，再清各 wrapper 的捕获图缓存。
         reset_graph_params_for_sleep()
         reset_aclgraph_caches_for_sleep()
         self._reset_model_runner_graph_manager()
+        # 标记 wakeup 后需要重新 capture。
         self._sleep_acl_graph_invalidated = True
 
     def _clear_attention_workspaces_for_sleep(self) -> int:
@@ -251,7 +258,9 @@ class NPUWorker(WorkerBase):
         """清理全局 rotary cache 引用，并返回跟踪到的字节数。"""
         from vllm_ascend.ops.rotary_embedding import clear_global_cos_sin_cache
 
+        # 返回值用于日志中的 tracked 大小。
         cache_bytes = clear_global_cos_sin_cache()
+        # 只有确实清理过缓存时，wakeup 才需要恢复。
         self._sleep_cos_sin_cache_cleared = cache_bytes > 0
         return cache_bytes
 
@@ -264,6 +273,7 @@ class NPUWorker(WorkerBase):
 
         from vllm_ascend.ops.rotary_embedding import restore_global_cos_sin_cache
 
+        # 从模型 rotary 模块恢复持久化 cache 引用，并重建运行期 scratch。
         restore_global_cos_sin_cache(
             self.model_runner.model,
             self.vllm_config,
@@ -287,6 +297,7 @@ class NPUWorker(WorkerBase):
         capture_model = getattr(self.model_runner, "capture_model", None)
         if capture_model is None:
             return
+        # recapture 过程中可能会创建 custom op / HCCL pg options，必须提供当前 config。
         with set_current_vllm_config(self.vllm_config):
             capture_model()
         self._sleep_acl_graph_invalidated = False
@@ -296,9 +307,11 @@ class NPUWorker(WorkerBase):
         if getattr(self, "_sleep_hccl_destroyed", False):
             return
         if torch.distributed.is_available() and torch.distributed.is_initialized():
+            # PP send/recv 可能是异步的，销毁 HCCL 前必须等待完成。
             for handle in getattr(self, "_pp_send_work", []):
                 handle.wait()
             self._pp_send_work = []
+            # 等待 NPU stream 完成，避免仍有通信 kernel 使用旧 group。
             torch.npu.synchronize()
             num_destroyed = destroy_hccl_for_sleep()
             self._sleep_hccl_destroyed = num_destroyed > 0
@@ -309,6 +322,7 @@ class NPUWorker(WorkerBase):
         """在当前 vLLM config 上下文中重建 HCCL group。"""
         if not getattr(self, "_sleep_hccl_destroyed", False):
             return
+        # restore 过程中 create_hccl_pg_options 会读取当前 vLLM config。
         with set_current_vllm_config(self.vllm_config):
             num_restored = restore_hccl_after_sleep()
         self._sleep_hccl_destroyed = False
@@ -317,8 +331,10 @@ class NPUWorker(WorkerBase):
     def _measure_npu_free_delta(self, action: Callable[[], T]) -> tuple[T, int]:
         """执行清理动作，并测量 NPU 空闲显存的实际增加量。"""
         free_before = torch.npu.mem_get_info()[0]
+        # action 返回 tracked bytes 或 None，原样返回给调用方。
         result = action()
         free_after = torch.npu.mem_get_info()[0]
+        # allocator 可能延迟释放，若观测值没有增加则记 0，避免负数日志。
         return result, max(free_after - free_before, 0)
 
     def sleep(self, level: int = 1) -> None:
@@ -336,6 +352,7 @@ class NPUWorker(WorkerBase):
         cos_sin_cache_bytes, cos_sin_cache_freed_bytes = self._measure_npu_free_delta(
             self._clear_cos_sin_cache_for_sleep
         )
+        # HCCL 清理放在图和 cache 清理之后，避免旧 ACL graph 继续引用旧通信域。
         _, hccl_freed_bytes = self._measure_npu_free_delta(self._destroy_hccl_for_sleep)
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
@@ -395,6 +412,7 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+        # sin/cos cache 必须先恢复，后续 ACL graph recapture 才能捕获正确输入。
         self._restore_cos_sin_cache_after_sleep(tags)
         self._restore_acl_graphs_after_sleep(tags)
 

@@ -89,6 +89,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
     def _init_device_communicator(self) -> None:
         """创建绑定当前 HCCL group 的 Ascend device communicator。"""
+        # communicator 内部持有 device_group，因此恢复 HCCL 后必须重建。
         self.device_communicator = NPUCommunicator(
             cpu_group=self.cpu_group,
             device=self.device,
@@ -98,12 +99,15 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
     def destroy_hccl_for_sleep(self) -> bool:
         """释放 HCCL process group，同时保留 Gloo group。"""
+        # 返回值表示本 coordinator 是否真的释放了 HCCL 相关资源。
         destroyed = False
         if self.device_communicator is not None:
+            # 先销毁 communicator，避免它继续持有即将销毁的 device_group。
             self.device_communicator.destroy()
             self.device_communicator = None
             destroyed = True
         if hasattr(self, "device_group") and self.device_group is not None:
+            # 只销毁 HCCL device_group；cpu_group(Gloo) 保留用于 CPU 协调。
             torch.distributed.destroy_process_group(self.device_group)
             self.device_group = None
             destroyed = True
@@ -114,7 +118,9 @@ class GroupCoordinatorPatch(GroupCoordinator):
         if self.device_group is not None:
             return False
 
+        # 找到包含当前 rank 的新 HCCL group，最后重新赋给 self.device_group。
         self_device_group = None
+        # 使用原 group_name 生成 HCCL pg options，保证 buffer 配置一致。
         hccl_pg_options = create_hccl_pg_options(self.group_name)
         for ranks in self.group_ranks:
             # 所有 rank 必须按相同顺序为每个 ranks 列表调用 new_group，
@@ -128,9 +134,12 @@ class GroupCoordinatorPatch(GroupCoordinator):
                 self_device_group = device_group
 
         assert self_device_group is not None
+        # 原地替换底层 HCCL group，保持 Python coordinator 引用不变。
         self.device_group = self_device_group
+        # 当前 NPU device 可能在 wakeup 前后重新设置，恢复时重新读取。
         self.device = torch.npu.current_device()
         if self.use_device_communicator and self.world_size > 1:
+            # 新 device_group 需要新的 communicator，旧 communicator 已在 sleep 销毁。
             self._init_device_communicator()
         return True
 
@@ -170,8 +179,10 @@ def _iter_alive_group_coordinators():
 
 def destroy_hccl_for_sleep() -> int:
     """sleep 时销毁所有已注册的 HCCL device group。"""
+    # 统计被销毁的 coordinator 数量，用于日志。
     num_destroyed = 0
     for group in _iter_alive_group_coordinators():
+        # 兼容非 Ascend patch 的 GroupCoordinator：没有该方法就跳过。
         destroy = getattr(group, "destroy_hccl_for_sleep", None)
         if destroy is not None and destroy():
             num_destroyed += 1
@@ -180,8 +191,10 @@ def destroy_hccl_for_sleep() -> int:
 
 def restore_hccl_after_sleep() -> int:
     """wakeup 时恢复之前被 sleep 销毁的 HCCL device group。"""
+    # 统计被恢复的 coordinator 数量，用于日志。
     num_restored = 0
     for group in _iter_alive_group_coordinators():
+        # 兼容非 Ascend patch 的 GroupCoordinator：没有该方法就跳过。
         restore = getattr(group, "restore_hccl_after_sleep", None)
         if restore is not None and restore():
             num_restored += 1
@@ -190,11 +203,14 @@ def restore_hccl_after_sleep() -> int:
 
 def get_hccl_group_debug_info() -> list[str]:
     """返回当前活跃 HCCL device group 的地址指纹。"""
+    # 每个元素描述一个本进程内的 active HCCL device_group。
     debug_info: list[str] = []
     for group in _iter_alive_group_coordinators():
+        # 已进入 sleep 的 group 会被置空，不打印。
         device_group = getattr(group, "device_group", None)
         if device_group is None:
             continue
+        # communicator 地址辅助确认使用该 device_group 的上层通信封装是否变化。
         device_communicator = getattr(group, "device_communicator", None)
         debug_info.append(
             f"{getattr(group, 'unique_name', '<unknown>')}"

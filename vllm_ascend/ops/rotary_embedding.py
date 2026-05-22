@@ -64,20 +64,25 @@ def _tensor_nbytes(tensor: torch.Tensor | None, seen_storages: set[tuple[torch.d
     if not isinstance(tensor, torch.Tensor):
         return 0
     try:
+        # 使用 storage 统计真实占用，避免 _cos_slice 这类 view 重复计数。
         storage = tensor.untyped_storage()
+        # device + data_ptr 作为 storage 指纹。
         storage_key = (tensor.device, storage.data_ptr())
         if storage_key in seen_storages:
             return 0
         seen_storages.add(storage_key)
         return storage.nbytes()
     except Exception:
+        # 如果 storage API 不可用，退化为 tensor 元素数 * 元素大小。
         return tensor.numel() * tensor.element_size()
 
 
 def get_global_cos_sin_cache_size_bytes() -> int:
     """返回所有全局 sin/cos cache tensor 的已跟踪 storage 大小。"""
+    # 多个全局变量可能指向同一块底层 storage，seen_storages 用于去重。
     seen_storages: set[tuple[torch.device, int]] = set()
     return sum(
+        # 逐个统计模块级全局 rotary cache / scratch tensor。
         _tensor_nbytes(tensor, seen_storages)
         for tensor in (
             _cos_mla,
@@ -97,14 +102,19 @@ def clear_global_cos_sin_cache() -> int:
     """清理全局 rotary cache 引用，使其 NPU storage 可以被释放。"""
     global _cos_mla, _sin_mla, _cos_cache, _sin_cache, _cos_sin_cache, _cos, _sin, _cos_slice, _sin_slice
 
+    # 清空前先记录被跟踪的理论大小，用于 sleep 日志。
     cache_bytes = get_global_cos_sin_cache_size_bytes()
+    # MLA 路径使用的运行期 cos/sin scratch。
     _cos_mla = None
     _sin_mla = None
+    # 模型 rotary 模块上的持久化 cos/sin cache 绑定。
     _cos_cache = None
     _sin_cache = None
     _cos_sin_cache = None
+    # GQA/普通 rope 路径使用的运行期 cos/sin scratch。
     _cos = None
     _sin = None
+    # 最近一次 update_cos_sin 得到的切片引用。
     _cos_slice = None
     _sin_slice = None
     return cache_bytes
@@ -122,21 +132,27 @@ def restore_global_cos_sin_cache(
     # 模型中的 rotary 模块仍持有持久化 cos_sin_cache buffer；先把模块级
     # 全局变量重新绑定到这些 buffer，再重建 fused rotary kernel 使用的
     # 每步临时 sin/cos scratch tensor。
+    # model 可能在单测中是 MagicMock，因此先判断是否有 modules 方法。
     modules = model.modules() if hasattr(model, "modules") else []
     for module in modules:
+        # 找到第一个带 cos_sin_cache 的 rotary 模块作为全局 cache 来源。
         cos_sin_cache = getattr(module, "cos_sin_cache", None)
         if not isinstance(cos_sin_cache, torch.Tensor):
             continue
 
+        # 恢复 interleaved cos_sin_cache 全局引用。
         _record_cos_sin_cache(cos_sin_cache)
         cos_cached = getattr(module, "cos_cached", None)
         sin_cached = getattr(module, "sin_cached", None)
         if isinstance(cos_cached, torch.Tensor) and isinstance(sin_cached, torch.Tensor):
+            # DeepSeek/YaRN 等模块会直接维护独立 cos_cached/sin_cached。
             _record_cos_and_sin_cache(cos_cached, sin_cached)
         else:
+            # 普通 rotary 只有 cos_sin_cache，需要拆分出 cos/sin 视图。
             _record_cos_and_sin_cache_interleaved(cos_sin_cache)
         break
 
+    # 重建运行期 scratch tensor，例如 _cos/_sin 或 _cos_mla/_sin_mla。
     set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
 
 

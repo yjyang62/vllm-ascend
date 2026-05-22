@@ -34,20 +34,28 @@ _hccl_group_address_log_generation = 0
 
 def _collect_hccl_group_debug_info() -> list[str]:
     """返回 vLLM 已注册 HCCL ProcessGroup 的本进程地址信息。"""
+    # 从 vLLM 的 parallel_state 中读取 group 注册表，避免依赖
+    # vllm_ascend.patch.worker.patch_distributed 的具体导出版本。
     from vllm.distributed import parallel_state
 
+    # _groups 中保存的是 unique_name -> weakref(GroupCoordinator)。
     groups = getattr(parallel_state, "_groups", {})
+    # debug_info 保存本 rank 内可用于对比的地址字符串。
     debug_info: list[str] = []
+    # 同一个 GroupCoordinator 可能被多个引用路径命中，seen 用于去重。
     seen: set[int] = set()
     for group_ref in list(groups.values()):
+        # 注册表存的是 weakref，先取出真实 GroupCoordinator 对象。
         group = group_ref()
         if group is None or id(group) in seen:
             continue
         seen.add(id(group))
 
+        # device_group 对应 HCCL ProcessGroup；被 sleep 销毁后这里会是 None。
         device_group = getattr(group, "device_group", None)
         if device_group is None:
             continue
+        # device_communicator 是基于 device_group 构造的 NPU 通信封装。
         device_communicator = getattr(group, "device_communicator", None)
         # Python id/repr 只能作为本进程内的地址指纹；不同 rank 属于不同
         # 进程地址空间，不能跨 rank 比较，只能比较同一 rank 的 sleep 前后。
@@ -64,14 +72,17 @@ def _collect_hccl_group_debug_info() -> list[str]:
 
 def _get_hccl_group_log_rank_info() -> tuple[str, str]:
     """尽力获取 rank 信息，方便关联同一 rank 的地址日志。"""
+    # 分布式未初始化时不能调用 get_rank，保留字符串用于日志说明。
     rank = "uninitialized"
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         rank = str(torch.distributed.get_rank())
 
+    # local_rank 不在 torch ProcessGroup 里，只能从 vLLM world group 上取。
     local_rank = "unknown"
     try:
         from vllm.distributed import parallel_state
 
+        # 遍历已注册 group，找到 world group 的 local_rank。
         groups = getattr(parallel_state, "_groups", {})
         for group_ref in list(groups.values()):
             group = group_ref()
@@ -88,7 +99,9 @@ def reset_hccl_group_address_log_for_aclgraph() -> None:
     """开启新一轮 capture generation，用于控制 HCCL 地址日志只打印一次。"""
     global _hccl_group_addresses_logged_for_capture
     global _hccl_group_address_log_generation
+    # 允许下一次 ACL graph capture 重新打印一条 HCCL 地址日志。
     _hccl_group_addresses_logged_for_capture = False
+    # generation 用于区分 sleep 前和 wakeup 后的两轮 capture。
     _hccl_group_address_log_generation += 1
 
 
@@ -97,23 +110,30 @@ def log_hccl_group_addresses_for_aclgraph(reason: str, *, log_once: bool = True)
     global _hccl_group_addresses_logged_for_capture
 
     try:
+        # 每次都采集快照，保证 ACLGraphEntry 可以保存自己的地址信息。
         debug_info = _collect_hccl_group_debug_info()
     except Exception as exc:
+        # 地址日志只是诊断信息，采集失败不能影响图捕获主流程。
         logger.warning("Failed to collect HCCL group addresses for ACL graph capture (%s): %s", reason, exc)
         return []
 
+    # 日志只打印一次，但返回值仍给每个 ACLGraphEntry 使用。
     if log_once and _hccl_group_addresses_logged_for_capture:
         return debug_info
 
+    # 标记本轮 generation 已经打印过，避免 PIECEWISE 多子图刷屏。
     _hccl_group_addresses_logged_for_capture = True
+    # rank/local_rank 放进日志，方便只比较同一 rank 的 sleep 前后地址。
     rank, local_rank = _get_hccl_group_log_rank_info()
     log_context = (
         f"generation={_hccl_group_address_log_generation}, rank={rank}, "
         f"local_rank={local_rank}, {reason}"
     )
+    # 无 active HCCL group 时也打印一次，说明本轮 capture 没采集到地址。
     if not debug_info:
         logger.info("ACL graph capture recorded HCCL group addresses (%s): no active HCCL device groups.", log_context)
         return []
+    # 打印本轮 capture 记录到的所有 active HCCL group 地址。
     logger.info("ACL graph capture recorded HCCL group addresses (%s): %s", log_context, "; ".join(debug_info))
     return debug_info
 
@@ -123,13 +143,16 @@ def _tensor_nbytes(tensor: Any, seen_storages: set[tuple[Any, Any]]) -> int:
     if not isinstance(tensor, torch.Tensor):
         return 0
     try:
+        # untyped_storage 能得到真实底层存储，避免按 view 的 numel 重复统计。
         storage = tensor.untyped_storage()
+        # device + data_ptr 组成 storage 唯一键，用于去重。
         storage_key = (tensor.device, storage.data_ptr())
         if storage_key in seen_storages:
             return 0
         seen_storages.add(storage_key)
         return storage.nbytes()
     except Exception:
+        # 某些 weak/ref tensor 可能没有完整 storage API，退化为形状估算。
         return tensor.numel() * tensor.element_size()
 
 
@@ -223,9 +246,13 @@ class ACLGraphWrapper:
         return self.runnable
 
     def reset_aclgraph_cache(self) -> int:
+        # 返回清理前条目数，便于 sleep 统计清理了多少张图。
         num_entries = len(self.concrete_aclgraph_entries)
+        # 删除 BatchDescriptor -> ACLGraphEntry 映射，释放旧图对象引用。
         self.concrete_aclgraph_entries.clear()
+        # 下一次调用需要重新完成 first-run/capture 逻辑。
         self.first_run_finished = False
+        # graph pool 也重新从平台获取，避免复用旧捕获池状态。
         self.graph_pool = current_platform.get_global_graph_pool()
         return num_entries
 
@@ -406,6 +433,7 @@ def _reset_graph_params(params: GraphParams | None) -> None:
     """清理指向旧 capture 状态的 graph task 元数据。"""
     if params is None:
         return
+    # events/handles/attn_params 都和旧 ACL graph capture 绑定，必须清空。
     for num_tokens in params.events:
         params.events[num_tokens] = []
     for num_tokens in params.handles:
@@ -418,15 +446,19 @@ def _reset_attention_workspaces(params: GraphParams | None, seen_storages: set[t
     """清理 attention workspace，并返回已跟踪的 storage 字节数。"""
     if params is None:
         return 0
+    # workspace_bytes 是按 tensor storage 统计的理论释放量。
     workspace_bytes = 0
     for num_tokens, workspace in params.workspaces.items():
+        # 同一个 workspace 可能被 graph/draft graph 共享，使用 seen_storages 去重。
         workspace_bytes += _tensor_nbytes(workspace, seen_storages)
+        # 置空后下一次 capture/update 会重新申请 workspace。
         params.workspaces[num_tokens] = None
     return workspace_bytes
 
 
 def reset_attention_workspaces_for_sleep() -> int:
     """进入 sleep 前释放所有缓存的 attention workspace。"""
+    # 跨 graph 和 draft graph 共用一个 seen 集合，避免重复统计共享 storage。
     seen_storages: set[tuple[Any, Any]] = set()
     return _reset_attention_workspaces(_graph_params, seen_storages) + _reset_attention_workspaces(
         _draft_graph_params, seen_storages
