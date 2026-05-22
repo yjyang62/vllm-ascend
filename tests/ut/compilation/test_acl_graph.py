@@ -50,6 +50,7 @@ class TestACLGraphEntry(TestBase):
         self.assertIsNone(entry.aclgraph)
         self.assertIsNone(entry.output)
         self.assertIsNone(entry.input_addresses)
+        self.assertIsNone(entry.hccl_group_addresses)
 
     def test_aclgraph_entry_with_values(self):
         """Test ACLGraphEntry initialization with specified values"""
@@ -61,16 +62,19 @@ class TestACLGraphEntry(TestBase):
         mock_graph = MagicMock()
         mock_output = MagicMock()
         input_addresses = [12345, 67890]
+        hccl_group_addresses = ["tp:0(device_group_id=0x1)"]
 
         entry = ACLGraphEntry(batch_descriptor=batch_descriptor,
                               aclgraph=mock_graph,
                               output=mock_output,
-                              input_addresses=input_addresses)
+                              input_addresses=input_addresses,
+                              hccl_group_addresses=hccl_group_addresses)
 
         self.assertEqual(entry.batch_descriptor, batch_descriptor)
         self.assertEqual(entry.aclgraph, mock_graph)
         self.assertEqual(entry.output, mock_output)
         self.assertEqual(entry.input_addresses, input_addresses)
+        self.assertEqual(entry.hccl_group_addresses, hccl_group_addresses)
 
 
 class TestACLGraphWrapper(TestBase):
