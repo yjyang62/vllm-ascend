@@ -237,6 +237,132 @@ class TestNPUWorker(TestBase):
 
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
 
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.NPUWorker._destroy_hccl_for_sleep")
+    @patch("vllm_ascend.worker.worker.NPUWorker._invalidate_acl_graphs_for_sleep")
+    @patch("vllm_ascend.worker.worker.NPUWorker._clear_cos_sin_cache_for_sleep")
+    @patch("vllm_ascend.worker.worker.NPUWorker._clear_attention_workspaces_for_sleep")
+    @patch("torch.npu.mem_get_info")
+    def test_sleep_invalidates_graphs_and_destroys_hccl(
+        self,
+        mock_mem_get_info,
+        mock_clear_attention,
+        mock_clear_cos_sin,
+        mock_invalidate_graphs,
+        mock_destroy_hccl,
+        mock_allocator_class,
+    ):
+        """Test sleep clears graph/HCCL state before allocator sleep."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_mem_get_info.side_effect = [
+            (100, 1000),
+            (100, 1000),
+            (110, 1000),
+            (110, 1000),
+            (120, 1000),
+            (120, 1000),
+            (130, 1000),
+            (300, 1000),
+        ]
+        mock_clear_attention.return_value = 10
+        mock_clear_cos_sin.return_value = 10
+        mock_allocator = MagicMock()
+        mock_allocator_class.get_instance.return_value = mock_allocator
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+
+            worker.sleep(level=1)
+
+        mock_invalidate_graphs.assert_called_once()
+        mock_clear_attention.assert_called_once()
+        mock_clear_cos_sin.assert_called_once()
+        mock_destroy_hccl.assert_called_once()
+        mock_allocator.sleep.assert_called_once_with(offload_tags=("weights",))
+
+    @patch("vllm_ascend.ops.rotary_embedding.clear_global_cos_sin_cache")
+    def test_clear_cos_sin_cache_for_sleep(self, mock_clear_cache):
+        """Test sleep clears global sin/cos cache state."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_clear_cache.return_value = 1024
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+
+            cache_bytes = worker._clear_cos_sin_cache_for_sleep()
+
+        self.assertEqual(cache_bytes, 1024)
+        self.assertTrue(worker._sleep_cos_sin_cache_cleared)
+
+    @patch("vllm_ascend.ops.rotary_embedding.restore_global_cos_sin_cache")
+    def test_restore_cos_sin_cache_after_sleep(self, mock_restore_cache):
+        """Test wake_up restores global sin/cos cache before graph recapture."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker._sleep_cos_sin_cache_cleared = True
+            worker.model_runner = MagicMock()
+            worker.model_runner.max_num_reqs = 4
+            worker.model_runner.decode_token_per_req = 1
+            worker.model_runner.dtype = torch.float16
+            worker.vllm_config = MagicMock()
+            worker.device = torch.device("cpu")
+
+            worker._restore_cos_sin_cache_after_sleep(tags=["weights"])
+
+        mock_restore_cache.assert_called_once_with(
+            worker.model_runner.model,
+            worker.vllm_config,
+            4,
+            1,
+            torch.float16,
+            torch.device("cpu"),
+        )
+        self.assertFalse(worker._sleep_cos_sin_cache_cleared)
+
+    @patch("vllm_ascend.worker.worker.set_current_vllm_config")
+    @patch("vllm_ascend.worker.worker.restore_hccl_after_sleep")
+    def test_restore_hccl_after_sleep_only_when_destroyed(self,
+                                                         mock_restore_hccl,
+                                                         mock_set_config):
+        """Test HCCL process groups are restored only once."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_restore_hccl.return_value = 3
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker._sleep_hccl_destroyed = True
+            worker.vllm_config = MagicMock()
+
+            worker._restore_hccl_after_sleep()
+            worker._restore_hccl_after_sleep()
+
+        mock_restore_hccl.assert_called_once()
+        mock_set_config.assert_called_once_with(worker.vllm_config)
+
+    @patch("vllm_ascend.worker.worker.set_current_vllm_config")
+    def test_restore_acl_graphs_waits_for_kv_cache(self, mock_set_config):
+        """Test partial wake_up does not recapture graphs before KV cache."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker._sleep_acl_graph_invalidated = True
+            worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
+
+            worker._restore_acl_graphs_after_sleep(tags=["weights"])
+            worker.model_runner.capture_model.assert_not_called()
+            self.assertTrue(worker._sleep_acl_graph_invalidated)
+
+            worker._restore_acl_graphs_after_sleep(tags=["kv_cache"])
+            worker.model_runner.capture_model.assert_called_once()
+            self.assertFalse(worker._sleep_acl_graph_invalidated)
+            mock_set_config.assert_called_once_with(worker.vllm_config)
+
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
     @patch("vllm_ascend.worker.worker.init_device_properties_triton")
     @patch("torch.npu.set_device")

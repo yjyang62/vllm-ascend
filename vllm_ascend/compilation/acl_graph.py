@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -22,6 +23,22 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 from ..utils import weak_ref_tensors
+
+_acl_graph_wrappers = weakref.WeakSet()
+
+
+def _tensor_nbytes(tensor: Any, seen_storages: set[tuple[Any, Any]]) -> int:
+    if not isinstance(tensor, torch.Tensor):
+        return 0
+    try:
+        storage = tensor.untyped_storage()
+        storage_key = (tensor.device, storage.data_ptr())
+        if storage_key in seen_storages:
+            return 0
+        seen_storages.add(storage_key)
+        return storage.nbytes()
+    except Exception:
+        return tensor.numel() * tensor.element_size()
 
 
 @dataclasses.dataclass
@@ -92,6 +109,7 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        _acl_graph_wrappers.add(self)
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -106,6 +124,13 @@ class ACLGraphWrapper:
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
         return self.runnable
+
+    def reset_aclgraph_cache(self) -> int:
+        num_entries = len(self.concrete_aclgraph_entries)
+        self.concrete_aclgraph_entries.clear()
+        self.first_run_finished = False
+        self.graph_pool = current_platform.get_global_graph_pool()
+        return num_entries
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -295,6 +320,50 @@ def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
 
 def get_graph_params():
     return _graph_params
+
+
+def _reset_graph_params(params: GraphParams | None) -> None:
+    if params is None:
+        return
+    for graph_state in (
+        params.events,
+        params.handles,
+        params.attn_params,
+        params.conv1d_params,
+        params.conv1d_handles,
+        params.conv1d_events,
+    ):
+        for num_tokens in graph_state:
+            graph_state[num_tokens] = []
+
+
+def _reset_attention_workspaces(params: GraphParams | None, seen_storages: set[tuple[Any, Any]]) -> int:
+    if params is None:
+        return 0
+    workspace_bytes = 0
+    for num_tokens, workspace in params.workspaces.items():
+        workspace_bytes += _tensor_nbytes(workspace, seen_storages)
+        params.workspaces[num_tokens] = None
+    return workspace_bytes
+
+
+def reset_attention_workspaces_for_sleep() -> int:
+    seen_storages: set[tuple[Any, Any]] = set()
+    return (
+        _reset_attention_workspaces(_graph_params, seen_storages)
+        + _reset_attention_workspaces(_draft_graph_params, seen_storages)
+        + _reset_attention_workspaces(_draft_graph_prefill_params, seen_storages)
+    )
+
+
+def reset_graph_params_for_sleep() -> None:
+    _reset_graph_params(_graph_params)
+    _reset_graph_params(_draft_graph_params)
+    _reset_graph_params(_draft_graph_prefill_params)
+
+
+def reset_aclgraph_caches_for_sleep() -> int:
+    return sum(wrapper.reset_aclgraph_cache() for wrapper in list(_acl_graph_wrappers))
 
 
 _draft_graph_params: GraphParams | None = None

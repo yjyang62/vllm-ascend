@@ -22,7 +22,7 @@ from typing import Any, cast
 import torch
 import vllm
 from torch.distributed import Backend
-from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
+from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _groups, _register_group
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgRegistry, make_hccl_pg_key
@@ -108,6 +108,8 @@ class GroupCoordinatorPatch(GroupCoordinator):
         group_name: str | None = None,
     ):
         group_name = group_name or "anonymous"
+        self.group_name = group_name
+        self.group_ranks = group_ranks
         self.unique_name = _get_unique_name(group_name)
         _register_group(self)
 
@@ -125,7 +127,8 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.use_custom_op_call = True
         self.use_cpu_custom_send_recv = False
 
-        reuse_domain = _resolve_reuse_domain(group_name)
+        self.reuse_domain = _resolve_reuse_domain(group_name)
+        self._hccl_destroyed_for_sleep = False
 
         try:
             for ranks in group_ranks:
@@ -134,7 +137,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
                     ranks=ranks,
                     backend=self.backend,
                     hccl_pg_options=hccl_pg_options,
-                    reuse_domain=reuse_domain,
+                    reuse_domain=self.reuse_domain,
                 )
                 if hccl_key is not None:
                     self._acquired_hccl_keys.append(hccl_key)
@@ -209,6 +212,77 @@ class GroupCoordinatorPatch(GroupCoordinator):
         if getattr(self, "mq_broadcaster", None) is not None:
             self.mq_broadcaster = None
 
+    def destroy_hccl_for_sleep(self) -> bool:
+        """Release HCCL device resources while keeping the Gloo CPU group."""
+        if self.backend != "hccl" or self._hccl_destroyed_for_sleep:
+            return False
+
+        destroyed = False
+        if self.device_communicator is not None:
+            self.device_communicator.destroy()
+            self.device_communicator = None
+            destroyed = True
+
+        for hccl_key in reversed(self._acquired_hccl_keys):
+            released_group = _HCCL_PG_REGISTRY.release(hccl_key)
+            destroyed = destroyed or released_group is not None
+        self._acquired_hccl_keys = []
+
+        for device_group in reversed(self._unshared_hccl_groups):
+            torch.distributed.destroy_process_group(device_group)
+            destroyed = True
+        self._unshared_hccl_groups = []
+
+        self.device_group = None
+        self._hccl_destroyed_for_sleep = True
+        return destroyed
+
+    def restore_hccl_after_sleep(self) -> bool:
+        """Recreate HCCL device resources in place after sleep mode."""
+        if self.backend != "hccl" or not self._hccl_destroyed_for_sleep:
+            return False
+
+        self_device_group = None
+        new_hccl_keys = []
+        new_unshared_groups = []
+        try:
+            for ranks in self.group_ranks:
+                hccl_pg_options = create_hccl_pg_options(self.group_name)
+                device_group, hccl_key = _acquire_hccl_group(
+                    ranks=ranks,
+                    backend=self.backend,
+                    hccl_pg_options=hccl_pg_options,
+                    reuse_domain=self.reuse_domain,
+                )
+                if hccl_key is not None:
+                    new_hccl_keys.append(hccl_key)
+                elif self.rank in ranks:
+                    new_unshared_groups.append(device_group)
+
+                if self.rank in ranks:
+                    self_device_group = device_group
+
+            assert self_device_group is not None
+            self._acquired_hccl_keys = new_hccl_keys
+            self._unshared_hccl_groups = new_unshared_groups
+            self.device_group = self_device_group
+            self.device = torch.npu.current_device()
+            if self.use_device_communicator and self.world_size > 1:
+                self.device_communicator = NPUCommunicator(
+                    cpu_group=self.cpu_group,
+                    device=self.device,
+                    device_group=self.device_group,
+                    unique_name=self.unique_name,
+                )
+            self._hccl_destroyed_for_sleep = False
+            return True
+        except Exception:
+            for hccl_key in reversed(new_hccl_keys):
+                _HCCL_PG_REGISTRY.release(hccl_key)
+            for device_group in reversed(new_unshared_groups):
+                torch.distributed.destroy_process_group(device_group)
+            raise
+
     def all_to_all(
         self,
         input_: torch.Tensor,
@@ -231,3 +305,31 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
 _patch_destroy_distributed_environment()
+
+
+def _iter_alive_group_coordinators():
+    seen: set[int] = set()
+    for group_ref in list(_groups.values()):
+        group = group_ref()
+        if group is None or id(group) in seen:
+            continue
+        seen.add(id(group))
+        yield group
+
+
+def destroy_hccl_for_sleep() -> int:
+    num_destroyed = 0
+    for group in _iter_alive_group_coordinators():
+        destroy = getattr(group, "destroy_hccl_for_sleep", None)
+        if destroy is not None and destroy():
+            num_destroyed += 1
+    return num_destroyed
+
+
+def restore_hccl_after_sleep() -> int:
+    num_restored = 0
+    for group in _iter_alive_group_coordinators():
+        restore = getattr(group, "restore_hccl_after_sleep", None)
+        if restore is not None and restore():
+            num_restored += 1
+    return num_restored

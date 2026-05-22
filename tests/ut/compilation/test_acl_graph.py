@@ -31,6 +31,9 @@ from vllm_ascend.compilation.acl_graph import (
     ACLGraphWrapper,
     get_draft_graph_params,
     get_graph_params,
+    reset_aclgraph_caches_for_sleep,
+    reset_attention_workspaces_for_sleep,
+    reset_graph_params_for_sleep,
     set_draft_graph_params,
     set_graph_params,
     update_draft_graph_params_workspaces,
@@ -104,6 +107,30 @@ class TestACLGraphWrapper(TestBase):
         self.mock_forward_context = MagicMock(spec=ForwardContext)
         self.mock_forward_context.batch_descriptor = self.mock_batch_descriptor
         self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.FULL
+
+    @patch("vllm_ascend.compilation.acl_graph.current_platform")
+    @patch("vllm_ascend.compilation.acl_graph.envs")
+    def test_reset_aclgraph_cache(self, mock_envs, mock_current_platform):
+        """Test reset_aclgraph_cache clears captured graph entries."""
+        mock_envs.VLLM_LOGGING_LEVEL = "INFO"
+        mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
+
+        wrapper = ACLGraphWrapper(
+            runnable=self.mock_runnable,
+            vllm_config=self.mock_vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            cudagraph_options=self.mock_cudagraph_options,
+        )
+        wrapper.concrete_aclgraph_entries[self.mock_batch_descriptor] = ACLGraphEntry(
+            batch_descriptor=self.mock_batch_descriptor,
+            aclgraph=MagicMock(),
+        )
+        wrapper.first_run_finished = True
+
+        self.assertEqual(wrapper.reset_aclgraph_cache(), 1)
+        self.assertEqual(wrapper.concrete_aclgraph_entries, {})
+        self.assertFalse(wrapper.first_run_finished)
+        self.assertEqual(wrapper.graph_pool, self.mock_graph_pool)
 
     @patch("vllm_ascend.compilation.acl_graph.current_platform")
     @patch("vllm_ascend.compilation.acl_graph.envs")
@@ -777,6 +804,50 @@ class TestDraftGraphParams(TestBase):
     def test_get_draft_graph_params(self, draft_graph_params_mock):
         graph_params = get_draft_graph_params()
         self.assertIs(draft_graph_params_mock, graph_params)
+
+    @patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params")
+    @patch("vllm_ascend.compilation.acl_graph._draft_graph_params")
+    @patch("vllm_ascend.compilation.acl_graph._graph_params")
+    def test_reset_graph_params_for_sleep(self, graph_params_mock,
+                                          draft_graph_params_mock,
+                                          draft_prefill_params_mock):
+        for params in (graph_params_mock, draft_graph_params_mock, draft_prefill_params_mock):
+            params.events = {4: [MagicMock()]}
+            params.workspaces = {4: MagicMock()}
+            params.handles = {4: [MagicMock()]}
+            params.attn_params = {4: [MagicMock()]}
+            params.conv1d_params = {4: [MagicMock()]}
+            params.conv1d_handles = {4: [MagicMock()]}
+            params.conv1d_events = {4: [MagicMock()]}
+
+        reset_graph_params_for_sleep()
+
+        for params in (graph_params_mock, draft_graph_params_mock, draft_prefill_params_mock):
+            self.assertEqual(params.events[4], [])
+            self.assertIsNotNone(params.workspaces[4])
+            self.assertEqual(params.handles[4], [])
+            self.assertEqual(params.attn_params[4], [])
+            self.assertEqual(params.conv1d_params[4], [])
+            self.assertEqual(params.conv1d_handles[4], [])
+            self.assertEqual(params.conv1d_events[4], [])
+
+    @patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params")
+    @patch("vllm_ascend.compilation.acl_graph._draft_graph_params")
+    @patch("vllm_ascend.compilation.acl_graph._graph_params")
+    def test_reset_attention_workspaces_for_sleep(self, graph_params_mock,
+                                                  draft_graph_params_mock,
+                                                  draft_prefill_params_mock):
+        workspace = torch.empty(2, 4, dtype=torch.float16)
+        graph_params_mock.workspaces = {4: workspace}
+        draft_graph_params_mock.workspaces = {4: workspace}
+        draft_prefill_params_mock.workspaces = {4: workspace}
+
+        workspace_bytes = reset_attention_workspaces_for_sleep()
+
+        self.assertEqual(workspace_bytes, workspace.untyped_storage().nbytes())
+        self.assertIsNone(graph_params_mock.workspaces[4])
+        self.assertIsNone(draft_graph_params_mock.workspaces[4])
+        self.assertIsNone(draft_prefill_params_mock.workspaces[4])
 
 
 class TestPCPDCPGraphParams(TestBase):
