@@ -279,10 +279,30 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.ops import rotary_embedding
 
         cleared = False
-        for cache_name in ("_cos_mla", "_sin_mla", "_cos", "_sin", "_cos_slice", "_sin_slice"):
+        for cache_name in (
+            "_cos_mla",
+            "_sin_mla",
+            "_cos",
+            "_sin",
+            "_cos_slice",
+            "_sin_slice",
+            "_cos_cache",
+            "_sin_cache",
+            "_cos_sin_cache",
+        ):
             if getattr(rotary_embedding, cache_name, None) is not None:
                 setattr(rotary_embedding, cache_name, None)
                 cleared = True
+
+        model = getattr(getattr(self, "model_runner", None), "model", None)
+        if model is not None:
+            for module in model.modules():
+                if hasattr(module, "cos") and getattr(module, "cos") is not None:
+                    module.cos = None
+                    cleared = True
+                if hasattr(module, "sin") and getattr(module, "sin") is not None:
+                    module.sin = None
+                    cleared = True
 
         self._sleep_cos_sin_cache_cleared = cleared
         if cleared:
@@ -292,6 +312,7 @@ class NPUWorker(WorkerBase):
         if not self._sleep_cos_sin_cache_cleared:
             return
 
+        from vllm_ascend.ops import rotary_embedding
         from vllm_ascend.ops.rotary_embedding import set_cos_and_sin
 
         model_runner = getattr(self, "model_runner", None)
@@ -306,6 +327,24 @@ class NPUWorker(WorkerBase):
         if None in (max_num_reqs, decode_token_per_req, dtype, device):
             logger.warning("Skip restoring global cos/sin cache after sleep due to incomplete model runner state.")
             return
+
+        model = getattr(model_runner, "model", None)
+        if model is not None:
+            for module in model.modules():
+                cos_sin_cache = getattr(module, "cos_sin_cache", None)
+                if cos_sin_cache is None:
+                    continue
+                rotary_embedding._record_cos_sin_cache(cos_sin_cache)
+                cos_cached = getattr(module, "cos_cached", None)
+                sin_cached = getattr(module, "sin_cached", None)
+                if cos_cached is not None and sin_cached is not None:
+                    rotary_embedding._record_cos_and_sin_cache(cos_cached, sin_cached)
+                elif (
+                    getattr(rotary_embedding, "_cos_cache", None) is None
+                    or getattr(rotary_embedding, "_sin_cache", None) is None
+                ):
+                    rotary_embedding._record_cos_and_sin_cache_interleaved(cos_sin_cache)
+                break
 
         set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
         self._sleep_cos_sin_cache_cleared = False
