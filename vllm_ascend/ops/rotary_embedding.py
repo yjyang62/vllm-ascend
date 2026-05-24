@@ -80,13 +80,8 @@ def get_global_cos_sin_cache_size_bytes() -> int:
         for tensor in (
             _cos_mla,
             _sin_mla,
-            _cos_cache,
-            _sin_cache,
-            _cos_sin_cache,
             _cos,
             _sin,
-            _cos_slice,
-            _sin_slice,
         )
     )
 

@@ -241,7 +241,9 @@ class NPUWorker(WorkerBase):
     def _clear_attention_workspaces_for_sleep(self) -> int:
         from vllm_ascend.compilation.acl_graph import reset_attention_workspaces_for_sleep
 
-        return reset_attention_workspaces_for_sleep()
+        workspace_bytes = reset_attention_workspaces_for_sleep()
+        self._invalidate_acl_graphs_for_sleep()
+        return workspace_bytes
 
     def _clear_cos_sin_cache_for_sleep(self) -> int:
         from vllm_ascend.ops.rotary_embedding import clear_global_cos_sin_cache
@@ -304,9 +306,16 @@ class NPUWorker(WorkerBase):
         self._sleep_hccl_destroyed = False
         logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
 
-    def _measure_npu_free_delta(self, action: Callable[[], T]) -> tuple[T, int]:
+    def _release_unreferenced_npu_memory(self) -> None:
+        torch.npu.synchronize()
+        gc.collect()
+        torch.npu.empty_cache()
+
+    def _measure_npu_free_delta(self, action: Callable[[], T], *, release_cache: bool = False) -> tuple[T, int]:
         free_before = torch.npu.mem_get_info()[0]
         result = action()
+        if release_cache:
+            self._release_unreferenced_npu_memory()
         free_after = torch.npu.mem_get_info()[0]
         return result, max(free_after - free_before, 0)
 
@@ -317,11 +326,12 @@ class NPUWorker(WorkerBase):
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
         attention_workspace_bytes, attention_workspace_freed_bytes = self._measure_npu_free_delta(
-            self._clear_attention_workspaces_for_sleep
+            self._clear_attention_workspaces_for_sleep,
+            release_cache=True,
         )
-        self._invalidate_acl_graphs_for_sleep()
         cos_sin_cache_bytes, cos_sin_cache_freed_bytes = self._measure_npu_free_delta(
-            self._clear_cos_sin_cache_for_sleep
+            self._clear_cos_sin_cache_for_sleep,
+            release_cache=True,
         )
         _, hccl_freed_bytes = self._measure_npu_free_delta(self._destroy_hccl_for_sleep)
         allocator = CaMemAllocator.get_instance()

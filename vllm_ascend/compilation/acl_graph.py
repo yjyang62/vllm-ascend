@@ -343,7 +343,7 @@ def _reset_attention_workspaces(params: GraphParams | None, seen_storages: set[t
     workspace_bytes = 0
     for num_tokens, workspace in params.workspaces.items():
         workspace_bytes += _tensor_nbytes(workspace, seen_storages)
-        params.workspaces[num_tokens] = None
+    params.workspaces.clear()
     return workspace_bytes
 
 

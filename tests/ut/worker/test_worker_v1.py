@@ -239,7 +239,6 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.NPUWorker._destroy_hccl_for_sleep")
-    @patch("vllm_ascend.worker.worker.NPUWorker._invalidate_acl_graphs_for_sleep")
     @patch("vllm_ascend.worker.worker.NPUWorker._clear_cos_sin_cache_for_sleep")
     @patch("vllm_ascend.worker.worker.NPUWorker._clear_attention_workspaces_for_sleep")
     @patch("torch.npu.mem_get_info")
@@ -248,7 +247,6 @@ class TestNPUWorker(TestBase):
         mock_mem_get_info,
         mock_clear_attention,
         mock_clear_cos_sin,
-        mock_invalidate_graphs,
         mock_destroy_hccl,
         mock_allocator_class,
     ):
@@ -276,7 +274,6 @@ class TestNPUWorker(TestBase):
 
             worker.sleep(level=1)
 
-        mock_invalidate_graphs.assert_called_once()
         mock_clear_attention.assert_called_once()
         mock_clear_cos_sin.assert_called_once()
         mock_destroy_hccl.assert_called_once()

@@ -845,9 +845,9 @@ class TestDraftGraphParams(TestBase):
         workspace_bytes = reset_attention_workspaces_for_sleep()
 
         self.assertEqual(workspace_bytes, workspace.untyped_storage().nbytes())
-        self.assertIsNone(graph_params_mock.workspaces[4])
-        self.assertIsNone(draft_graph_params_mock.workspaces[4])
-        self.assertIsNone(draft_prefill_params_mock.workspaces[4])
+        self.assertEqual(graph_params_mock.workspaces, {})
+        self.assertEqual(draft_graph_params_mock.workspaces, {})
+        self.assertEqual(draft_prefill_params_mock.workspaces, {})
 
 
 class TestPCPDCPGraphParams(TestBase):
