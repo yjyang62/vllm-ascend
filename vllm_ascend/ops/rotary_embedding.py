@@ -59,7 +59,23 @@ _cos_slice: torch.Tensor = None
 _sin_slice: torch.Tensor = None
 
 
-def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> bool:
+def _tensor_cache_nbytes(tensor: torch.Tensor | None, seen_storages: set[tuple[str, int]]) -> int:
+    if tensor is None or not isinstance(tensor, torch.Tensor) or tensor.device.type == "cpu":
+        return 0
+    try:
+        storage = tensor.untyped_storage()
+        storage_key = (str(tensor.device), storage.data_ptr())
+        storage_bytes = int(storage.nbytes())
+    except RuntimeError:
+        storage_key = (str(tensor.device), tensor.data_ptr())
+        storage_bytes = int(tensor.numel() * tensor.element_size())
+    if storage_key in seen_storages:
+        return 0
+    seen_storages.add(storage_key)
+    return storage_bytes
+
+
+def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> int:
     global _cos_mla
     global _sin_mla
     global _cos_cache
@@ -70,7 +86,8 @@ def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> 
     global _cos_slice
     global _sin_slice
 
-    cleared = False
+    cleared_bytes = 0
+    seen_storages: set[tuple[str, int]] = set()
     for cache_name in (
         "_cos_mla",
         "_sin_mla",
@@ -82,19 +99,20 @@ def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> 
         "_cos_slice",
         "_sin_slice",
     ):
-        if globals()[cache_name] is not None:
+        cache = globals()[cache_name]
+        if cache is not None:
+            cleared_bytes += _tensor_cache_nbytes(cache, seen_storages)
             globals()[cache_name] = None
-            cleared = True
 
     if model is not None:
         for module in model.modules():
             if hasattr(module, "cos") and getattr(module, "cos") is not None:
+                cleared_bytes += _tensor_cache_nbytes(module.cos, seen_storages)
                 module.cos = None
-                cleared = True
             if hasattr(module, "sin") and getattr(module, "sin") is not None:
+                cleared_bytes += _tensor_cache_nbytes(module.sin, seen_storages)
                 module.sin = None
-                cleared = True
-    return cleared
+    return cleared_bytes
 
 
 def restore_global_cos_sin_cache_from_model(model: torch.nn.Module | None = None) -> bool:

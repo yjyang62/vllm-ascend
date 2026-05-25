@@ -270,6 +270,7 @@ def update_full_graph_params(
 class GraphParams:
     events: dict[int, list[torch.npu.ExternalEvent]]
     workspaces: dict[int, torch.Tensor]
+    workspace_bytes: dict[int, int]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
     conv1d_params: dict[int, list[tuple]]  # for causal conv1d params
@@ -280,6 +281,28 @@ class GraphParams:
 _graph_params: GraphParams | None = None
 
 
+def _get_workspace_nbytes(workspace: Any) -> int:
+    if workspace is None:
+        return 0
+    if hasattr(workspace, "untyped_storage"):
+        try:
+            return int(workspace.untyped_storage().nbytes())
+        except RuntimeError:
+            pass
+    if hasattr(workspace, "nbytes"):
+        return int(workspace.nbytes)
+    if hasattr(workspace, "numel") and hasattr(workspace, "element_size"):
+        return int(workspace.numel() * workspace.element_size())
+    return 0
+
+
+def _record_graph_workspace(params: GraphParams | None, num_tokens: int, workspace: Any) -> None:
+    if params is None:
+        return
+    params.workspaces[num_tokens] = workspace
+    params.workspace_bytes[num_tokens] = _get_workspace_nbytes(workspace)
+
+
 def set_graph_params(aclgraph_capture_sizes: list[int]):
     global _graph_params
     if _graph_params is not None:
@@ -287,6 +310,7 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     _graph_params = GraphParams(
         {size: [] for size in aclgraph_capture_sizes},
         {size: None for size in aclgraph_capture_sizes},
+        {size: 0 for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
@@ -297,8 +321,7 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
 
 def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
     global _graph_params
-    if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = workspace
+    _record_graph_workspace(_graph_params, num_tokens, workspace)
 
 
 def get_graph_params():
@@ -315,6 +338,7 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
     _draft_graph_params = GraphParams(
         {size: [] for size in aclgraph_capture_sizes},
         {size: None for size in aclgraph_capture_sizes},
+        {size: 0 for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
@@ -325,8 +349,7 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
 
 def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
     global _draft_graph_params
-    if _draft_graph_params is not None:
-        _draft_graph_params.workspaces[num_tokens] = workspace
+    _record_graph_workspace(_draft_graph_params, num_tokens, workspace)
 
 
 def get_draft_graph_params():
@@ -340,6 +363,8 @@ def _reset_graph_params(params: GraphParams | None) -> None:
         params.events[num_tokens] = []
     for num_tokens in params.workspaces:
         params.workspaces[num_tokens] = None
+    for num_tokens in params.workspace_bytes:
+        params.workspace_bytes[num_tokens] = 0
     for num_tokens in params.handles:
         params.handles[num_tokens] = []
     for num_tokens in params.attn_params:
@@ -352,33 +377,39 @@ def _reset_graph_params(params: GraphParams | None) -> None:
         params.conv1d_events[num_tokens] = []
 
 
-def _clear_graph_workspaces(params: GraphParams | None) -> int:
+def _clear_graph_workspaces(params: GraphParams | None) -> tuple[int, int]:
     if params is None:
-        return 0
+        return 0, 0
     num_cleared = 0
-    for num_tokens in params.workspaces:
-        if params.workspaces[num_tokens] is not None:
+    cleared_bytes = 0
+    for num_tokens, workspace in params.workspaces.items():
+        workspace_bytes = max(params.workspace_bytes.get(num_tokens, 0), _get_workspace_nbytes(workspace))
+        if workspace is not None or workspace_bytes > 0:
             params.workspaces[num_tokens] = None
+            params.workspace_bytes[num_tokens] = 0
             num_cleared += 1
-    return num_cleared
+            cleared_bytes += workspace_bytes
+    return num_cleared, cleared_bytes
 
 
-def clear_attention_workspaces_for_sleep() -> int:
+def clear_attention_workspaces_for_sleep() -> tuple[int, int]:
     num_cleared = 0
-    num_cleared += _clear_graph_workspaces(_graph_params)
-    num_cleared += _clear_graph_workspaces(_draft_graph_params)
-    num_cleared += _clear_graph_workspaces(_draft_graph_prefill_params)
-    return num_cleared
+    cleared_bytes = 0
+    for params in (_graph_params, _draft_graph_params, _draft_graph_prefill_params):
+        params_cleared, params_bytes = _clear_graph_workspaces(params)
+        num_cleared += params_cleared
+        cleared_bytes += params_bytes
+    return num_cleared, cleared_bytes
 
 
-def reset_graph_params_for_sleep() -> int:
-    num_cleared = clear_attention_workspaces_for_sleep()
+def reset_graph_params_for_sleep() -> tuple[int, int]:
+    num_cleared, cleared_bytes = clear_attention_workspaces_for_sleep()
     _reset_graph_params(_graph_params)
     _reset_graph_params(_draft_graph_params)
     _reset_graph_params(_draft_graph_prefill_params)
     for wrapper in list(_acl_graph_wrappers):
         wrapper.reset_aclgraph_cache()
-    return num_cleared
+    return num_cleared, cleared_bytes
 
 
 _draft_graph_prefill_params: GraphParams | None = None
@@ -391,6 +422,7 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
     _draft_graph_prefill_params = GraphParams(
         {size: [] for size in aclgraph_capture_sizes},
         {size: None for size in aclgraph_capture_sizes},
+        {size: 0 for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
@@ -401,8 +433,7 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
 
 def update_draft_graph_prefill_params_workspaces(num_tokens: int, workspace: Any):
     global _draft_graph_prefill_params
-    if _draft_graph_prefill_params is not None:
-        _draft_graph_prefill_params.workspaces[num_tokens] = workspace
+    _record_graph_workspace(_draft_graph_prefill_params, num_tokens, workspace)
 
 
 def get_draft_graph_prefill_params():

@@ -30,10 +30,12 @@ from vllm_ascend.compilation.acl_graph import (
     ACLGraphEntry,
     ACLGraphWrapper,
     get_draft_graph_params,
+    clear_attention_workspaces_for_sleep,
     get_graph_params,
     set_draft_graph_params,
     set_graph_params,
     update_draft_graph_params_workspaces,
+    update_graph_params_workspaces,
 )
 
 
@@ -757,6 +759,23 @@ class TestACLGraphWrapper(TestBase):
 
         unwrapped = wrapper.unwrap()
         self.assertEqual(unwrapped, self.mock_runnable)
+
+
+class TestGraphWorkspaceSleep(TestBase):
+    def test_clear_attention_workspaces_returns_tracked_bytes(self):
+        workspace = torch.empty(2, 4, dtype=torch.float32)
+
+        with patch("vllm_ascend.compilation.acl_graph._graph_params", new=None):
+            set_graph_params([4])
+            update_graph_params_workspaces(4, workspace)
+
+            num_cleared, cleared_bytes = clear_attention_workspaces_for_sleep()
+            graph_params = get_graph_params()
+
+            self.assertEqual(num_cleared, 1)
+            self.assertEqual(cleared_bytes, workspace.numel() * workspace.element_size())
+            self.assertIsNone(graph_params.workspaces[4])
+            self.assertEqual(graph_params.workspace_bytes[4], 0)
 
 
 class TestDraftGraphParams(TestBase):

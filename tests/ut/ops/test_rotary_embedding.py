@@ -345,3 +345,29 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
         check_parent_init_signature_has_not_changed(
             YaRNScalingRotaryEmbedding.__init__, AscendYaRNRotaryEmbedding.__init__
         )
+
+
+def test_clear_global_cos_sin_runtime_cache_returns_cleared_bytes():
+    from vllm_ascend.ops import rotary_embedding
+    from vllm_ascend.ops.rotary_embedding import clear_global_cos_sin_runtime_cache
+
+    rotary_embedding._cos = torch.empty(2, 4, dtype=torch.float32)
+    rotary_embedding._sin = torch.empty(2, 4, dtype=torch.float32)
+
+    def mock_tensor_cache_nbytes(tensor, seen_storages):
+        storage_key = id(tensor)
+        if storage_key in seen_storages:
+            return 0
+        seen_storages.add(storage_key)
+        return tensor.numel() * tensor.element_size()
+
+    try:
+        with patch("vllm_ascend.ops.rotary_embedding._tensor_cache_nbytes", side_effect=mock_tensor_cache_nbytes):
+            cleared_bytes = clear_global_cos_sin_runtime_cache()
+
+        assert cleared_bytes == 2 * 2 * 4 * torch.empty((), dtype=torch.float32).element_size()
+        assert rotary_embedding._cos is None
+        assert rotary_embedding._sin is None
+    finally:
+        rotary_embedding._cos = None
+        rotary_embedding._sin = None

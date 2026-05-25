@@ -935,9 +935,14 @@ class TestNPUWorker(TestBase):
             # Verify calls
             worker.model_runner.load_model.assert_called_once()
 
+    @patch("vllm_ascend.worker.worker.torch.npu.empty_cache")
+    @patch("vllm_ascend.worker.worker.torch.npu.synchronize")
+    @patch("vllm_ascend.worker.worker.gc.collect")
     @patch("vllm_ascend.worker.worker.logger")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
-    def test_sleep_logs_component_memory_release(self, mock_allocator_class, mock_logger):
+    def test_sleep_logs_component_memory_release(
+        self, mock_allocator_class, mock_logger, mock_gc_collect, mock_synchronize, mock_empty_cache
+    ):
         """Test sleep logs HCCL, attention workspace, and global cos/sin memory release."""
         from vllm.utils.mem_constants import GiB_bytes
 
@@ -947,11 +952,11 @@ class TestNPUWorker(TestBase):
         mem_get_info_values = [
             (1 * GiB_bytes, total_bytes),
             (1 * GiB_bytes, total_bytes),
+            (1 * GiB_bytes, total_bytes),
+            (1 * GiB_bytes, total_bytes),
+            (1 * GiB_bytes, total_bytes),
+            (1 * GiB_bytes, total_bytes),
             (2 * GiB_bytes, total_bytes),
-            (2 * GiB_bytes, total_bytes),
-            (4 * GiB_bytes, total_bytes),
-            (4 * GiB_bytes, total_bytes),
-            (7 * GiB_bytes, total_bytes),
             (8 * GiB_bytes, total_bytes),
         ]
 
@@ -960,8 +965,8 @@ class TestNPUWorker(TestBase):
             patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=mem_get_info_values),
         ):
             worker = NPUWorker()
-            worker._invalidate_acl_graphs_for_sleep = MagicMock()
-            worker._clear_global_cos_sin_cache_for_sleep = MagicMock()
+            worker._invalidate_acl_graphs_for_sleep = MagicMock(return_value=64 * 1024 * 1024)
+            worker._clear_global_cos_sin_cache_for_sleep = MagicMock(return_value=4 * 1024 * 1024)
             worker._destroy_hccl_for_sleep = MagicMock()
             mock_allocator = MagicMock()
             mock_allocator_class.get_instance.return_value = mock_allocator
@@ -969,11 +974,11 @@ class TestNPUWorker(TestBase):
             worker.sleep()
 
         mock_logger.info.assert_any_call(
-            "Sleep mode released %.2f GiB HCCL memory, %.2f GiB attention workspace memory, "
-            "and %.2f GiB global sin/cos cache memory.",
-            3.0,
-            1.0,
-            2.0,
+            "Sleep mode released HCCL memory: %s, attention workspace memory: %s, "
+            "global sin/cos cache memory: %s.",
+            "1.00 GiB",
+            "64.00 MiB (0.0625 GiB)",
+            "4.00 MiB (0.0039 GiB)",
         )
         mock_logger.info.assert_any_call(
             "Sleep mode freed %.2f GiB memory, %.2f GiB memory is still in use.",
@@ -981,25 +986,28 @@ class TestNPUWorker(TestBase):
             8.0,
         )
         mock_allocator.sleep.assert_called_once_with(offload_tags=("weights",))
+        self.assertEqual(mock_gc_collect.call_count, 3)
+        self.assertEqual(mock_empty_cache.call_count, 3)
+        self.assertEqual(mock_synchronize.call_count, 6)
 
-    @patch("vllm_ascend.worker.worker.torch.npu.empty_cache")
-    @patch("vllm_ascend.worker.worker.gc.collect")
-    def test_invalidate_acl_graphs_releases_attention_workspace_cache(self, mock_gc_collect, mock_empty_cache):
-        """Test attention workspace cleanup returns memory to the NPU cache."""
+    def test_invalidate_acl_graphs_returns_attention_workspace_bytes(self):
+        """Test attention workspace cleanup reports tracked workspace bytes."""
         from vllm_ascend.worker.worker import NPUWorker
 
         with (
             patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
-            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep", return_value=2),
+            patch(
+                "vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep",
+                return_value=(2, 1234),
+            ),
         ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.model_runner.use_aclgraph = False
 
-            worker._invalidate_acl_graphs_for_sleep()
+            cleared_bytes = worker._invalidate_acl_graphs_for_sleep()
 
-        mock_gc_collect.assert_called_once()
-        mock_empty_cache.assert_called_once()
+        self.assertEqual(cleared_bytes, 1234)
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     def test_load_model_sleep_mode_assertion_error(self, mock_allocator_class):

@@ -66,6 +66,8 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
+MiB_BYTES = 1024 * 1024
+
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
@@ -134,7 +136,6 @@ class NPUWorker(WorkerBase):
         self._sleep_hccl_destroyed = False
         self._sleep_acl_graph_invalidated = False
         self._sleep_cos_sin_cache_cleared = False
-        self._sleep_dsa_rope_cache_cleared = False
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -216,11 +217,11 @@ class NPUWorker(WorkerBase):
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
-            "Sleep mode released %.2f GiB HCCL memory, %.2f GiB attention workspace memory, "
-            "and %.2f GiB global sin/cos cache memory.",
-            hccl_freed_bytes / GiB_bytes,
-            attention_workspace_freed_bytes / GiB_bytes,
-            global_cos_sin_cache_freed_bytes / GiB_bytes,
+            "Sleep mode released HCCL memory: %s, attention workspace memory: %s, "
+            "global sin/cos cache memory: %s.",
+            self._format_sleep_memory(hccl_freed_bytes),
+            self._format_sleep_memory(attention_workspace_freed_bytes),
+            self._format_sleep_memory(global_cos_sin_cache_freed_bytes),
         )
         logger.info(
             "Sleep mode freed %.2f GiB memory, %.2f GiB memory is still in use.",
@@ -269,81 +270,74 @@ class NPUWorker(WorkerBase):
             self._sleep_saved_buffers = {}
         self._restore_acl_graphs_after_sleep(tags)
 
+    @staticmethod
+    def _format_sleep_memory(num_bytes: int) -> str:
+        if num_bytes < GiB_bytes // 100:
+            return f"{num_bytes / MiB_BYTES:.2f} MiB ({num_bytes / GiB_bytes:.4f} GiB)"
+        return f"{num_bytes / GiB_bytes:.2f} GiB"
+
     def _measure_sleep_cleanup_memory(self, cleanup) -> int:
+        torch.npu.synchronize()
         free_bytes_before_cleanup = torch.npu.mem_get_info()[0]
-        cleanup()
+        tracked_freed_bytes = cleanup() or 0
+        self._release_sleep_cleanup_cache()
+        torch.npu.synchronize()
         free_bytes_after_cleanup = torch.npu.mem_get_info()[0]
-        return max(free_bytes_after_cleanup - free_bytes_before_cleanup, 0)
+        return max(free_bytes_after_cleanup - free_bytes_before_cleanup, tracked_freed_bytes, 0)
 
     def _release_sleep_cleanup_cache(self) -> None:
         gc.collect()
         torch.npu.empty_cache()
 
-    def _invalidate_acl_graphs_for_sleep(self) -> None:
+    def _invalidate_acl_graphs_for_sleep(self) -> int:
         from vllm_ascend.compilation.acl_graph import (
             clear_attention_workspaces_for_sleep,
             reset_graph_params_for_sleep,
         )
 
         if not self.model_runner.use_aclgraph:
-            num_cleared = clear_attention_workspaces_for_sleep()
-            if num_cleared:
-                self._release_sleep_cleanup_cache()
-            return
+            _, workspace_bytes = clear_attention_workspaces_for_sleep()
+            return workspace_bytes
 
-        num_cleared = reset_graph_params_for_sleep()
+        _, workspace_bytes = reset_graph_params_for_sleep()
         self._reset_model_runner_graph_manager()
         self._sleep_acl_graph_invalidated = True
-        if num_cleared:
-            self._release_sleep_cleanup_cache()
+        return workspace_bytes
 
-    def _clear_global_cos_sin_cache_for_sleep(self) -> None:
-        if getattr(self, "_sleep_cos_sin_cache_cleared", False) or getattr(
-            self, "_sleep_dsa_rope_cache_cleared", False
-        ):
-            return
+    def _clear_global_cos_sin_cache_for_sleep(self) -> int:
+        if getattr(self, "_sleep_cos_sin_cache_cleared", False):
+            return 0
 
         from vllm_ascend.ops.rotary_embedding import clear_global_cos_sin_runtime_cache
-        from vllm_ascend.ops.rope_dsv4 import clear_global_dsa_rope_cache
 
         model = getattr(getattr(self, "model_runner", None), "model", None)
-        cleared = clear_global_cos_sin_runtime_cache(model)
-        dsa_cleared = clear_global_dsa_rope_cache()
+        cleared_bytes = clear_global_cos_sin_runtime_cache(model)
 
-        self._sleep_cos_sin_cache_cleared = cleared
-        self._sleep_dsa_rope_cache_cleared = dsa_cleared
-        if cleared or dsa_cleared:
-            self._release_sleep_cleanup_cache()
+        self._sleep_cos_sin_cache_cleared = cleared_bytes > 0
+        return cleared_bytes
 
     def _restore_global_cos_sin_cache_after_sleep(self) -> None:
-        if not getattr(self, "_sleep_cos_sin_cache_cleared", False) and not getattr(
-            self, "_sleep_dsa_rope_cache_cleared", False
-        ):
+        if not getattr(self, "_sleep_cos_sin_cache_cleared", False):
             return
 
         from vllm_ascend.ops.rotary_embedding import restore_global_cos_sin_cache_from_model, set_cos_and_sin
-        from vllm_ascend.ops.rope_dsv4 import restore_global_dsa_rope_cache
 
         model_runner = getattr(self, "model_runner", None)
         if model_runner is None:
             return
-        if getattr(self, "_sleep_cos_sin_cache_cleared", False):
-            max_num_reqs = getattr(model_runner, "max_num_reqs", None)
-            decode_token_per_req = getattr(
-                model_runner, "uniform_decode_query_len", getattr(model_runner, "decode_query_len", None)
-            )
-            dtype = getattr(model_runner, "dtype", None)
-            device = getattr(model_runner, "device", None)
-            if None in (max_num_reqs, decode_token_per_req, dtype, device):
-                logger.warning("Skip restoring global cos/sin cache after sleep due to incomplete model runner state.")
-                return
+        max_num_reqs = getattr(model_runner, "max_num_reqs", None)
+        decode_token_per_req = getattr(
+            model_runner, "uniform_decode_query_len", getattr(model_runner, "decode_query_len", None)
+        )
+        dtype = getattr(model_runner, "dtype", None)
+        device = getattr(model_runner, "device", None)
+        if None in (max_num_reqs, decode_token_per_req, dtype, device):
+            logger.warning("Skip restoring global cos/sin cache after sleep due to incomplete model runner state.")
+            return
 
-            restore_global_cos_sin_cache_from_model(getattr(model_runner, "model", None))
-            set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
+        restore_global_cos_sin_cache_from_model(getattr(model_runner, "model", None))
+        set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
         self._sleep_cos_sin_cache_cleared = False
-        if getattr(self, "_sleep_dsa_rope_cache_cleared", False):
-            restore_global_dsa_rope_cache()
-            self._sleep_dsa_rope_cache_cleared = False
 
     def _reset_model_runner_graph_manager(self) -> None:
         from vllm.platforms import current_platform
