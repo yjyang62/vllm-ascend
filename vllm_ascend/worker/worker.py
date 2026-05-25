@@ -335,7 +335,7 @@ class NPUWorker(WorkerBase):
             logger.warning("Skip restoring global cos/sin cache after sleep due to incomplete model runner state.")
             return
 
-        restore_global_cos_sin_cache_from_model(getattr(model_runner, "model", None))
+        restore_global_cos_sin_cache_from_model(getattr(model_runner, "model", None), device=device)
         set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
         self._sleep_cos_sin_cache_cleared = False
 

@@ -75,6 +75,44 @@ def _tensor_cache_nbytes(tensor: torch.Tensor | None, seen_storages: set[tuple[s
     return storage_bytes
 
 
+_SLEEP_CACHE_BACKUP_PREFIX = "_vllm_ascend_sleep_"
+
+
+def _offload_module_cache_tensor(
+    module: torch.nn.Module,
+    cache_name: str,
+    seen_storages: set[tuple[str, int]],
+) -> int:
+    cache = getattr(module, cache_name, None)
+    if cache is None or not isinstance(cache, torch.Tensor) or cache.device.type == "cpu":
+        return 0
+
+    cleared_bytes = _tensor_cache_nbytes(cache, seen_storages)
+    setattr(module, f"{_SLEEP_CACHE_BACKUP_PREFIX}{cache_name}_cpu", cache.detach().cpu())
+    setattr(module, f"{_SLEEP_CACHE_BACKUP_PREFIX}{cache_name}_device", cache.device)
+    setattr(module, cache_name, None)
+    return cleared_bytes
+
+
+def _restore_module_cache_tensor(
+    module: torch.nn.Module,
+    cache_name: str,
+    device: torch.device | str | None = None,
+) -> bool:
+    backup_name = f"{_SLEEP_CACHE_BACKUP_PREFIX}{cache_name}_cpu"
+    device_name = f"{_SLEEP_CACHE_BACKUP_PREFIX}{cache_name}_device"
+    cache = getattr(module, backup_name, None)
+    if cache is None:
+        return False
+
+    target_device = device if device is not None else getattr(module, device_name)
+    setattr(module, cache_name, cache.to(device=target_device))
+    delattr(module, backup_name)
+    if hasattr(module, device_name):
+        delattr(module, device_name)
+    return True
+
+
 def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> int:
     global _cos_mla
     global _sin_mla
@@ -106,18 +144,22 @@ def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> 
 
     if model is not None:
         for module in model.modules():
-            if hasattr(module, "cos") and getattr(module, "cos") is not None:
-                cleared_bytes += _tensor_cache_nbytes(module.cos, seen_storages)
-                module.cos = None
-            if hasattr(module, "sin") and getattr(module, "sin") is not None:
-                cleared_bytes += _tensor_cache_nbytes(module.sin, seen_storages)
-                module.sin = None
+            for cache_name in ("cos_sin_cache", "cos_cached", "sin_cached", "cos", "sin"):
+                cleared_bytes += _offload_module_cache_tensor(module, cache_name, seen_storages)
     return cleared_bytes
 
 
-def restore_global_cos_sin_cache_from_model(model: torch.nn.Module | None = None) -> bool:
+def restore_global_cos_sin_cache_from_model(
+    model: torch.nn.Module | None = None,
+    device: torch.device | str | None = None,
+) -> bool:
     if model is None:
         return False
+
+    restored = False
+    for module in model.modules():
+        for cache_name in ("cos_sin_cache", "cos_cached", "sin_cached", "cos", "sin"):
+            restored = _restore_module_cache_tensor(module, cache_name, device) or restored
 
     for module in model.modules():
         cos_sin_cache = getattr(module, "cos_sin_cache", None)
@@ -131,7 +173,7 @@ def restore_global_cos_sin_cache_from_model(model: torch.nn.Module | None = None
         elif _cos_cache is None or _sin_cache is None:
             _record_cos_and_sin_cache_interleaved(cos_sin_cache)
         return True
-    return False
+    return restored
 
 
 def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device):

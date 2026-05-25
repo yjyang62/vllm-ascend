@@ -371,3 +371,48 @@ def test_clear_global_cos_sin_runtime_cache_returns_cleared_bytes():
     finally:
         rotary_embedding._cos = None
         rotary_embedding._sin = None
+
+
+def test_clear_global_cos_sin_runtime_cache_offloads_module_cache_attrs():
+    from vllm_ascend.ops.rotary_embedding import clear_global_cos_sin_runtime_cache
+
+    module = torch.nn.Module()
+    module.cos_sin_cache = torch.empty(2, 4, dtype=torch.float32)
+    module.cos_cached = torch.empty(2, 4, dtype=torch.float32)
+
+    def mock_offload(module, cache_name, seen_storages):
+        cache = getattr(module, cache_name, None)
+        if cache is None:
+            return 0
+        setattr(module, cache_name, None)
+        return cache.numel() * cache.element_size()
+
+    with patch("vllm_ascend.ops.rotary_embedding._offload_module_cache_tensor", side_effect=mock_offload):
+        cleared_bytes = clear_global_cos_sin_runtime_cache(module)
+
+    assert cleared_bytes == 2 * 2 * 4 * torch.empty((), dtype=torch.float32).element_size()
+    assert module.cos_sin_cache is None
+    assert module.cos_cached is None
+
+
+def test_restore_global_cos_sin_cache_restores_offloaded_module_cache():
+    from vllm_ascend.ops import rotary_embedding
+    from vllm_ascend.ops.rotary_embedding import restore_global_cos_sin_cache_from_model
+
+    module = torch.nn.Module()
+    cpu_cache = torch.ones(2, 4, dtype=torch.float32)
+    module._vllm_ascend_sleep_cos_sin_cache_cpu = cpu_cache
+    module._vllm_ascend_sleep_cos_sin_cache_device = torch.device("cpu")
+
+    try:
+        restored = restore_global_cos_sin_cache_from_model(module, device="cpu")
+
+        assert restored
+        assert torch.equal(module.cos_sin_cache, cpu_cache)
+        assert rotary_embedding._cos_sin_cache is module.cos_sin_cache
+        assert not hasattr(module, "_vllm_ascend_sleep_cos_sin_cache_cpu")
+        assert not hasattr(module, "_vllm_ascend_sleep_cos_sin_cache_device")
+    finally:
+        rotary_embedding._cos_sin_cache = None
+        rotary_embedding._cos_cache = None
+        rotary_embedding._sin_cache = None
