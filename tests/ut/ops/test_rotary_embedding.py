@@ -15,6 +15,7 @@
 
 
 import inspect
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -416,3 +417,18 @@ def test_restore_global_cos_sin_cache_restores_offloaded_module_cache():
         rotary_embedding._cos_sin_cache = None
         rotary_embedding._cos_cache = None
         rotary_embedding._sin_cache = None
+
+
+
+def test_clear_global_cos_sin_runtime_cache_clears_loaded_310p_mrope_cache():
+    from vllm_ascend.ops.rotary_embedding import clear_global_cos_sin_runtime_cache
+
+    mock_mrope_module = MagicMock()
+    mock_mrope_module.clear_global_mrope_runtime_cache.return_value = 1024
+    sys.modules["vllm_ascend._310p.ops.rotary_embedding"] = mock_mrope_module
+
+    try:
+        assert clear_global_cos_sin_runtime_cache() == 1024
+        mock_mrope_module.clear_global_mrope_runtime_cache.assert_called_once_with()
+    finally:
+        sys.modules.pop("vllm_ascend._310p.ops.rotary_embedding", None)

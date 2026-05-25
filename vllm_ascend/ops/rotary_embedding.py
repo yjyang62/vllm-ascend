@@ -17,6 +17,7 @@
 
 import math
 import os
+import sys
 
 import torch
 import torch_npu
@@ -146,6 +147,10 @@ def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> 
         for module in model.modules():
             for cache_name in ("cos_sin_cache", "cos_cached", "sin_cached", "cos", "sin"):
                 cleared_bytes += _offload_module_cache_tensor(module, cache_name, seen_storages)
+
+    mrope_module = sys.modules.get("vllm_ascend._310p.ops.rotary_embedding")
+    if mrope_module is not None and hasattr(mrope_module, "clear_global_mrope_runtime_cache"):
+        cleared_bytes += mrope_module.clear_global_mrope_runtime_cache()
     return cleared_bytes
 
 

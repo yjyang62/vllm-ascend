@@ -32,6 +32,25 @@ _mrope_cos_slice: torch.Tensor | None = None
 _mrope_sin_slice: torch.Tensor | None = None
 
 
+def _tensor_nbytes(tensor: torch.Tensor | None) -> int:
+    if tensor is None or not isinstance(tensor, torch.Tensor) or tensor.device.type == "cpu":
+        return 0
+    try:
+        return int(tensor.untyped_storage().nbytes())
+    except RuntimeError:
+        return int(tensor.numel() * tensor.element_size())
+
+
+def clear_global_mrope_runtime_cache() -> int:
+    global _mrope_cos_slice
+    global _mrope_sin_slice
+
+    cleared_bytes = _tensor_nbytes(_mrope_cos_slice) + _tensor_nbytes(_mrope_sin_slice)
+    _mrope_cos_slice = None
+    _mrope_sin_slice = None
+    return cleared_bytes
+
+
 def _apply_rotary_mrope_torch(
     q_rot: torch.Tensor,
     k_rot: torch.Tensor,
