@@ -352,7 +352,27 @@ def _reset_graph_params(params: GraphParams | None) -> None:
         params.conv1d_events[num_tokens] = []
 
 
+def _clear_graph_workspaces(params: GraphParams | None) -> int:
+    if params is None:
+        return 0
+    num_cleared = 0
+    for num_tokens in params.workspaces:
+        if params.workspaces[num_tokens] is not None:
+            params.workspaces[num_tokens] = None
+            num_cleared += 1
+    return num_cleared
+
+
+def clear_attention_workspaces_for_sleep() -> int:
+    num_cleared = 0
+    num_cleared += _clear_graph_workspaces(_graph_params)
+    num_cleared += _clear_graph_workspaces(_draft_graph_params)
+    num_cleared += _clear_graph_workspaces(_draft_graph_prefill_params)
+    return num_cleared
+
+
 def reset_graph_params_for_sleep() -> None:
+    clear_attention_workspaces_for_sleep()
     _reset_graph_params(_graph_params)
     _reset_graph_params(_draft_graph_params)
     _reset_graph_params(_draft_graph_prefill_params)
