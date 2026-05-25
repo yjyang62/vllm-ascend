@@ -371,13 +371,14 @@ def clear_attention_workspaces_for_sleep() -> int:
     return num_cleared
 
 
-def reset_graph_params_for_sleep() -> None:
-    clear_attention_workspaces_for_sleep()
+def reset_graph_params_for_sleep() -> int:
+    num_cleared = clear_attention_workspaces_for_sleep()
     _reset_graph_params(_graph_params)
     _reset_graph_params(_draft_graph_params)
     _reset_graph_params(_draft_graph_prefill_params)
     for wrapper in list(_acl_graph_wrappers):
         wrapper.reset_aclgraph_cache()
+    return num_cleared
 
 
 _draft_graph_prefill_params: GraphParams | None = None
