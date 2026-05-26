@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -23,7 +24,8 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 from ..utils import weak_ref_tensors
 
-_acl_graph_wrappers = set()
+_acl_graph_wrappers = weakref.WeakSet()
+
 
 @dataclasses.dataclass
 class ACLGraphEntry:
@@ -263,7 +265,7 @@ def update_full_graph_params(
 @dataclass
 class GraphParams:
     events: dict[int, list[torch.npu.ExternalEvent]]
-    workspaces: dict[int, torch.Tensor]
+    workspaces: dict[int, torch.Tensor | None]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
     conv1d_params: dict[int, list[tuple]]  # for causal conv1d params
@@ -326,10 +328,12 @@ def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
 def get_draft_graph_params():
     return _draft_graph_params
 
+
 def _clear_attention_workspaces_for_sleep(params: GraphParams | None) -> None:
     if params is None:
         return
-    params.workspaces.clear()
+    for num_tokens in params.workspaces:
+        params.workspaces[num_tokens] = None
 
 
 def clear_attention_workspaces_for_sleep() -> None:
@@ -355,7 +359,7 @@ def _reset_graph_params(params: GraphParams | None) -> None:
         params.conv1d_events[num_tokens] = []
 
 
-def reset_graph_params_for_sleep()  -> None:
+def reset_graph_params_for_sleep() -> None:
     _reset_graph_params(_graph_params)
     _reset_graph_params(_draft_graph_params)
     _reset_graph_params(_draft_graph_prefill_params)
