@@ -16,19 +16,21 @@
 from __future__ import annotations
 
 import logging
+import weakref
 from functools import wraps
 from typing import Any, cast
 
 import torch
 import vllm
 from torch.distributed import Backend
-from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _groups, _register_group
+from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgRegistry, make_hccl_pg_key
 from vllm_ascend.utils import create_hccl_pg_options
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
+_GROUP_COORDINATORS = weakref.WeakSet()
 logger = logging.getLogger(__name__)
 
 
@@ -110,6 +112,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
         _register_group(self)
+        _GROUP_COORDINATORS.add(self)
 
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
@@ -292,9 +295,8 @@ _patch_destroy_distributed_environment()
 
 def _iter_alive_group_coordinators():
     seen: set[int] = set()
-    for group_ref in list(_groups.values()):
-        group = group_ref()
-        if group is None or id(group) in seen:
+    for group in list(_GROUP_COORDINATORS):
+        if id(group) in seen:
             continue
         seen.add(id(group))
         yield group

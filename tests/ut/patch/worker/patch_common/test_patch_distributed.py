@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import sys
-import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -95,7 +94,6 @@ def _load_patch_distributed_module():
     communicator_instances: list[object] = []
     unique_name_counter = {"value": 0}
     sequence_counter = {"value": 0}
-    registered_groups = {}
     shared_hccl_options = {"hccl_config": {"hccl_buffer_size": 200}}
 
     torch_module: Any = ModuleType("torch")
@@ -149,13 +147,9 @@ def _load_patch_distributed_module():
         unique_name_counter["value"] += 1
         return f"{group_name}-{unique_name_counter['value']}"
 
-    def _register_group(group):
-        registered_groups[group.unique_name] = weakref.ref(group)
-
     parallel_state_module.GroupCoordinator = BaseGroupCoordinator
     parallel_state_module._get_unique_name = _get_unique_name
-    parallel_state_module._groups = registered_groups
-    parallel_state_module._register_group = MagicMock(side_effect=_register_group)
+    parallel_state_module._register_group = MagicMock()
     parallel_state_module.destroy_distributed_environment = destroy_distributed_environment
 
     shm_broadcast_module: Any = ModuleType("vllm.distributed.device_communicators.shm_broadcast")
