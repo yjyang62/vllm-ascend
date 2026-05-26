@@ -1084,6 +1084,133 @@ class TestNPUWorker(TestBase):
             # Verify calls
             worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
 
+    def _make_worker_for_sleep_helpers(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = MagicMock()
+        worker.model_runner = None
+        worker._sleep_acl_graph_invalidated = False
+        worker._sleep_cos_sin_cache_cleared = False
+        return worker
+
+    def test_invalidate_acl_graphs_for_sleep_handles_missing_model_runner(self):
+        worker = self._make_worker_for_sleep_helpers()
+
+        with (
+            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep") as mock_clear_workspaces,
+            patch("vllm_ascend.compilation.acl_graph.reset_graph_params_for_sleep") as mock_reset_graph_params,
+            patch.object(worker, "_reset_model_runner_graph_manager") as mock_reset_graph_manager,
+        ):
+            worker._invalidate_acl_graphs_for_sleep()
+
+        mock_clear_workspaces.assert_called_once()
+        mock_reset_graph_params.assert_not_called()
+        mock_reset_graph_manager.assert_not_called()
+        self.assertFalse(worker._sleep_acl_graph_invalidated)
+
+    def test_invalidate_acl_graphs_for_sleep_resets_acl_graph_state(self):
+        worker = self._make_worker_for_sleep_helpers()
+        worker.model_runner = MagicMock()
+        worker.model_runner.use_aclgraph = True
+
+        with (
+            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep") as mock_clear_workspaces,
+            patch("vllm_ascend.compilation.acl_graph.reset_graph_params_for_sleep") as mock_reset_graph_params,
+            patch.object(worker, "_reset_model_runner_graph_manager") as mock_reset_graph_manager,
+        ):
+            worker._invalidate_acl_graphs_for_sleep()
+
+        mock_clear_workspaces.assert_called_once()
+        mock_reset_graph_params.assert_called_once()
+        mock_reset_graph_manager.assert_called_once()
+        self.assertTrue(worker._sleep_acl_graph_invalidated)
+
+    def test_clear_global_cos_sin_cache_for_sleep_skips_missing_model(self):
+        for model_runner in (None, MagicMock()):
+            worker = self._make_worker_for_sleep_helpers()
+            worker.model_runner = model_runner
+            if model_runner is not None:
+                model_runner.model = None
+
+            with patch(
+                "vllm_ascend.ops.rotary_embedding.clear_global_cos_sin_runtime_cache"
+            ) as mock_clear_cache:
+                worker._clear_global_cos_sin_cache_for_sleep()
+
+            mock_clear_cache.assert_not_called()
+            self.assertFalse(worker._sleep_cos_sin_cache_cleared)
+
+    def test_clear_global_cos_sin_cache_for_sleep_records_clear_status(self):
+        worker = self._make_worker_for_sleep_helpers()
+        model = MagicMock()
+        worker.model_runner = MagicMock()
+        worker.model_runner.model = model
+
+        with patch(
+            "vllm_ascend.ops.rotary_embedding.clear_global_cos_sin_runtime_cache",
+            return_value=True,
+        ) as mock_clear_cache:
+            worker._clear_global_cos_sin_cache_for_sleep()
+
+        mock_clear_cache.assert_called_once_with(model)
+        self.assertTrue(worker._sleep_cos_sin_cache_cleared)
+
+    def test_restore_global_cos_sin_cache_after_sleep_handles_missing_model_runner(self):
+        worker = self._make_worker_for_sleep_helpers()
+        worker._sleep_cos_sin_cache_cleared = True
+
+        with (
+            patch("vllm_ascend.ops.rotary_embedding.restore_global_cos_sin_cache_from_model") as mock_restore_cache,
+            patch("vllm_ascend.ops.rotary_embedding.set_cos_and_sin") as mock_set_cos_sin,
+        ):
+            worker._restore_global_cos_sin_cache_after_sleep()
+
+        mock_restore_cache.assert_not_called()
+        mock_set_cos_sin.assert_not_called()
+        self.assertTrue(worker._sleep_cos_sin_cache_cleared)
+
+    def test_restore_global_cos_sin_cache_after_sleep_restores_complete_state(self):
+        worker = self._make_worker_for_sleep_helpers()
+        worker._sleep_cos_sin_cache_cleared = True
+        model = MagicMock()
+        worker.model_runner = MagicMock()
+        worker.model_runner.model = model
+        worker.model_runner.max_num_reqs = 8
+        worker.model_runner.uniform_decode_query_len = 1
+        worker.model_runner.dtype = torch.float16
+        worker.model_runner.device = "npu:0"
+
+        with (
+            patch("vllm_ascend.ops.rotary_embedding.restore_global_cos_sin_cache_from_model") as mock_restore_cache,
+            patch("vllm_ascend.ops.rotary_embedding.set_cos_and_sin") as mock_set_cos_sin,
+        ):
+            worker._restore_global_cos_sin_cache_after_sleep()
+
+        mock_restore_cache.assert_called_once_with(model)
+        mock_set_cos_sin.assert_called_once_with(worker.vllm_config, 8, 1, torch.float16, "npu:0")
+        self.assertFalse(worker._sleep_cos_sin_cache_cleared)
+
+    def test_restore_acl_graphs_after_sleep_handles_missing_model_runner(self):
+        worker = self._make_worker_for_sleep_helpers()
+        worker._sleep_acl_graph_invalidated = True
+
+        worker._restore_acl_graphs_after_sleep(tags=None)
+
+        self.assertTrue(worker._sleep_acl_graph_invalidated)
+
+    def test_restore_acl_graphs_after_sleep_recaptures_model(self):
+        worker = self._make_worker_for_sleep_helpers()
+        worker._sleep_acl_graph_invalidated = True
+        worker.model_runner = MagicMock()
+
+        with patch("vllm_ascend.worker.worker.set_current_vllm_config") as mock_set_config:
+            worker._restore_acl_graphs_after_sleep(tags=None)
+
+        mock_set_config.assert_called_once_with(worker.vllm_config)
+        worker.model_runner.capture_model.assert_called_once()
+        self.assertFalse(worker._sleep_acl_graph_invalidated)
+
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")
     @patch("vllm_ascend.worker.worker.get_tp_group")
