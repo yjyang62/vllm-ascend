@@ -648,6 +648,18 @@ def test_top_level_hccl_sleep_helpers_count_alive_groups_once(module_env):
     assert second.device_group is first.device_group
 
 
+def test_alive_group_iteration_preserves_registration_order(module_env):
+    first = _make_group(module_env, group_name="tp")
+    second = _make_group(module_env, group_name="eplb")
+    third = _make_group(module_env, group_name="mc2")
+
+    assert list(module_env.module._iter_alive_group_coordinators()) == [
+        first,
+        second,
+        third,
+    ]
+
+
 def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
     group = _make_group(
         module_env,
