@@ -136,6 +136,8 @@ class NPUWorker(WorkerBase):
         self._sleep_hccl_destroyed = False
         self._sleep_acl_graph_invalidated = False
         self._sleep_cos_sin_cache_cleared = False
+        self._sleep_level = 0
+        self._sleep_weights_need_reload = False
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -200,7 +202,13 @@ class NPUWorker(WorkerBase):
                     return
 
     def sleep(self, level: int = 1) -> None:
+        level = int(level)
+        if level not in (1, 2):
+            raise ValueError(f"Unsupported sleep level: {level}")
+
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
+        self._sleep_level = level
+        self._sleep_weights_need_reload = level == 2
         # Save the buffers before level 2 sleep
         if level == 2:
             model = self.model_runner.model
@@ -239,6 +247,7 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         self._restore_hccl_after_sleep()
         allocator.wake_up(tags=tags)
+        self._reload_model_weights_after_sleep(tags)
         self._restore_global_cos_sin_cache_after_sleep()
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
@@ -269,6 +278,25 @@ class NPUWorker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
         self._restore_acl_graphs_after_sleep(tags)
+
+    @staticmethod
+    def _should_wake_tag(tags: list[str] | None, tag: str) -> bool:
+        return tags is None or tag in tags
+
+    def _reload_model_weights_after_sleep(self, tags: list[str] | None) -> None:
+        if not getattr(self, "_sleep_weights_need_reload", False):
+            return
+        if not self._should_wake_tag(tags, "weights"):
+            return
+
+        from vllm.model_executor.model_loader import get_model_loader
+
+        model = self.model_runner.model
+        logger.info("Reloading model weights after level 2 sleep.")
+        with set_current_vllm_config(self.vllm_config):
+            model_loader = get_model_loader(self.vllm_config.load_config)
+            model_loader.load_weights(model, self.vllm_config.model_config)
+        self._sleep_weights_need_reload = False
 
     @staticmethod
     def _format_sleep_memory(num_bytes: int) -> str:

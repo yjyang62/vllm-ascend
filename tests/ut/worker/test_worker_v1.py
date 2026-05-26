@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -1008,6 +1009,46 @@ class TestNPUWorker(TestBase):
             cleared_bytes = worker._invalidate_acl_graphs_for_sleep()
 
         self.assertEqual(cleared_bytes, 1234)
+
+    def test_reload_model_weights_after_level_2_sleep(self):
+        """Test level 2 wake reloads weights into the existing model."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm.model_executor.model_loader.get_model_loader") as mock_get_model_loader,
+            patch("vllm_ascend.worker.worker.set_current_vllm_config", return_value=nullcontext()),
+        ):
+            worker = NPUWorker()
+            worker._sleep_weights_need_reload = True
+            worker.vllm_config = MagicMock()
+            worker.model_runner = MagicMock()
+            mock_model = MagicMock()
+            worker.model_runner.model = mock_model
+            mock_model_loader = MagicMock()
+            mock_get_model_loader.return_value = mock_model_loader
+
+            worker._reload_model_weights_after_sleep(tags=["weights"])
+
+        mock_get_model_loader.assert_called_once_with(worker.vllm_config.load_config)
+        mock_model_loader.load_weights.assert_called_once_with(mock_model, worker.vllm_config.model_config)
+        self.assertFalse(worker._sleep_weights_need_reload)
+
+    def test_reload_model_weights_after_level_2_sleep_waits_for_weight_tag(self):
+        """Test level 2 wake only reloads weights when the weights tag is mapped."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm.model_executor.model_loader.get_model_loader") as mock_get_model_loader,
+        ):
+            worker = NPUWorker()
+            worker._sleep_weights_need_reload = True
+
+            worker._reload_model_weights_after_sleep(tags=["kv_cache"])
+
+        mock_get_model_loader.assert_not_called()
+        self.assertTrue(worker._sleep_weights_need_reload)
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     def test_load_model_sleep_mode_assertion_error(self, mock_allocator_class):
