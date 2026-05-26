@@ -16,21 +16,19 @@
 from __future__ import annotations
 
 import logging
-import weakref
 from functools import wraps
 from typing import Any, cast
 
 import torch
 import vllm
 from torch.distributed import Backend
-from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
+from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _groups, _register_group
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgRegistry, make_hccl_pg_key
 from vllm_ascend.utils import create_hccl_pg_options
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
-_GROUP_COORDINATORS: list[weakref.ReferenceType] = []
 logger = logging.getLogger(__name__)
 
 
@@ -78,10 +76,6 @@ def _acquire_hccl_group(
     return device_group, hccl_key
 
 
-def _track_group_coordinator(group: GroupCoordinator) -> None:
-    _GROUP_COORDINATORS.append(weakref.ref(group))
-
-
 def _wrap_destroy_distributed_environment(destroy_fn):
     if getattr(cast(Any, destroy_fn), "_hccl_registry_clearing_wrapped", False) is True:
         return destroy_fn
@@ -92,7 +86,6 @@ def _wrap_destroy_distributed_environment(destroy_fn):
             return destroy_fn(*args, **kwargs)
         finally:
             _HCCL_PG_REGISTRY.clear()
-            _GROUP_COORDINATORS.clear()
 
     cast(Any, wrapped)._hccl_registry_clearing_wrapped = True
     return wrapped
@@ -117,7 +110,6 @@ class GroupCoordinatorPatch(GroupCoordinator):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
         _register_group(self)
-        _track_group_coordinator(self)
 
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
@@ -300,17 +292,12 @@ _patch_destroy_distributed_environment()
 
 def _iter_alive_group_coordinators():
     seen: set[int] = set()
-    alive_group_refs = []
-    for group_ref in _GROUP_COORDINATORS:
+    for group_ref in list(_groups.values()):
         group = group_ref()
-        if group is None:
-            continue
-        alive_group_refs.append(group_ref)
-        if id(group) in seen:
+        if group is None or id(group) in seen:
             continue
         seen.add(id(group))
         yield group
-    _GROUP_COORDINATORS[:] = alive_group_refs
 
 
 def destroy_hccl_for_sleep() -> int:
