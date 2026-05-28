@@ -346,8 +346,13 @@ class NPUWorker(WorkerBase):
             return
         with set_current_vllm_config(self.vllm_config):
             num_restored = restore_hccl_after_sleep()
+            from vllm_ascend.ops.fused_moe.moe_comm_method import refresh_moe_comm_method_after_hccl_restore
+
+            num_refreshed = refresh_moe_comm_method_after_hccl_restore()
         self._sleep_hccl_destroyed = False
         logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
+        if num_refreshed:
+            logger.info("Refreshed %d MC2 dispatchers after HCCL restore.", num_refreshed)
 
     def _restore_acl_graphs_after_sleep(self, tags: list[str] | None) -> None:
         if not getattr(self, "_sleep_acl_graph_invalidated", False):

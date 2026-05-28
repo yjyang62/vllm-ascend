@@ -100,7 +100,8 @@ class TestTokenDispatcherWithMC2(TestBase):
 
         self.mock_get_config.return_value = mock_config
         self.mc2_group = MagicMock()
-        self.mc2_group.device_group.return_value._get_backend.return_value.get_hccl_comm_name.return_value = "hccl_123"
+        self.mc2_group.device_group = MagicMock()
+        self.mc2_group.device_group._get_backend.return_value.get_hccl_comm_name.return_value = "hccl_123"
         self.mc2_group.rank_in_group = 0
         self.mc2_group.world_size = 8
         self.mc2_group_patch = patch(
@@ -138,6 +139,18 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertEqual(self.dispatcher.ep_world_size, 8)
         self.assertTrue(self.dispatcher.enable_dispatch_v2)
         self.assertTrue(self.dispatcher.need_extra_args)
+
+    def test_refresh_hccl_group_for_sleep_wakeup_updates_group_name(self):
+        self.mc2_group.device_group._get_backend.return_value.get_hccl_comm_name.return_value = "hccl_456"
+        self.mc2_group.rank_in_group = 3
+        self.mc2_group.world_size = 16
+
+        with patch("torch.distributed.get_rank", return_value=3):
+            self.dispatcher.refresh_hccl_group_for_sleep_wakeup()
+
+        self.assertEqual(self.dispatcher.moe_all_to_all_group_name, "hccl_456")
+        self.assertEqual(self.dispatcher.ep_rank_id, 3)
+        self.assertEqual(self.dispatcher.ep_world_size, 16)
 
     def test_get_dispatch_mc2_kwargs_without_quant(self):
         hidden_states = torch.randn(10, 128)

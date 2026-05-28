@@ -8,6 +8,7 @@ from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     AlltoAllCommImpl,
     MC2CommImpl,
+    refresh_moe_comm_method_after_hccl_restore,
 )
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
@@ -35,6 +36,25 @@ class TestMoECommMethod(TestBase):
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
         self.moe_config.global_redundant_expert_num = 0
+
+    def test_refresh_moe_comm_method_after_hccl_restore(self):
+        dispatcher_a = MagicMock()
+        dispatcher_a.refresh_hccl_group_for_sleep_wakeup = MagicMock()
+        dispatcher_b = MagicMock()
+        dispatcher_b.refresh_hccl_group_for_sleep_wakeup = MagicMock()
+        comm_method_a = MagicMock(token_dispatcher=dispatcher_a)
+        comm_method_b = MagicMock(token_dispatcher=dispatcher_b)
+        comm_method_c = MagicMock(token_dispatcher=object())
+
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_comm_method._MoECommMethods",
+            {"a": comm_method_a, "b": comm_method_b, "c": comm_method_c},
+        ):
+            refreshed = refresh_moe_comm_method_after_hccl_restore()
+
+        self.assertEqual(refreshed, 2)
+        dispatcher_a.refresh_hccl_group_for_sleep_wakeup.assert_called_once()
+        dispatcher_b.refresh_hccl_group_for_sleep_wakeup.assert_called_once()
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
