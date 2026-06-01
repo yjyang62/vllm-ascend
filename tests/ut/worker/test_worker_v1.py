@@ -1119,6 +1119,16 @@ class TestNPUWorker(TestBase):
 
         self.assertTrue(worker._sleep_acl_graph_invalidated)
 
+    def test_restore_acl_graphs_after_sleep_skips_weights_only_wakeup(self):
+        worker = self._make_worker_for_sleep_helpers()
+        worker._sleep_acl_graph_invalidated = True
+        worker.model_runner = MagicMock()
+
+        worker._restore_acl_graphs_after_sleep(tags=["weights"])
+
+        worker.model_runner.capture_model.assert_not_called()
+        self.assertTrue(worker._sleep_acl_graph_invalidated)
+
     def test_restore_acl_graphs_after_sleep_recaptures_model(self):
         worker = self._make_worker_for_sleep_helpers()
         worker._sleep_acl_graph_invalidated = True
@@ -1126,6 +1136,18 @@ class TestNPUWorker(TestBase):
 
         with patch("vllm_ascend.worker.worker.set_current_vllm_config") as mock_set_config:
             worker._restore_acl_graphs_after_sleep(tags=None)
+
+        mock_set_config.assert_called_once_with(worker.vllm_config)
+        worker.model_runner.capture_model.assert_called_once()
+        self.assertFalse(worker._sleep_acl_graph_invalidated)
+
+    def test_restore_acl_graphs_after_sleep_recaptures_after_kv_cache_wakeup(self):
+        worker = self._make_worker_for_sleep_helpers()
+        worker._sleep_acl_graph_invalidated = True
+        worker.model_runner = MagicMock()
+
+        with patch("vllm_ascend.worker.worker.set_current_vllm_config") as mock_set_config:
+            worker._restore_acl_graphs_after_sleep(tags=["kv_cache"])
 
         mock_set_config.assert_called_once_with(worker.vllm_config)
         worker.model_runner.capture_model.assert_called_once()
