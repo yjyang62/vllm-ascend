@@ -1,18 +1,25 @@
+from types import SimpleNamespace
+
+import pytest
 import torch
 
 import vllm_ascend.ops.rotary_embedding as rotary_embedding
-import pytest
 
 
 class _DummyRotaryModule(torch.nn.Module):
     def __init__(self, with_split_cache: bool):
         super().__init__()
+        self.max_position_embeddings = 8
+        self.use_flashinfer = False
         self.cos_sin_cache = torch.randn(8, 16)
         if with_split_cache:
             self.cos_cached = torch.randn(8, 16)
             self.sin_cached = torch.randn(8, 16)
         self.cos = torch.randn(1)
         self.sin = torch.randn(1)
+
+    def _compute_cos_sin_cache(self):
+        return torch.randn(8, 16)
 
 
 class _DummyModel(torch.nn.Module):
@@ -68,6 +75,9 @@ def test_clear_global_cos_sin_runtime_cache_clears_globals_and_module_cache():
     assert rotary_embedding._sin is None
     assert rotary_embedding._cos_slice is None
     assert rotary_embedding._sin_slice is None
+    assert model.rotary.cos_sin_cache is None
+    assert model.rotary.cos_cached is None
+    assert model.rotary.sin_cached is None
     assert model.rotary.cos is None
     assert model.rotary.sin is None
 
@@ -94,4 +104,20 @@ def test_restore_global_cos_sin_cache_from_model_interleaved_fallback():
     assert rotary_embedding._cos_sin_cache is model.rotary.cos_sin_cache
     assert rotary_embedding._cos_cache is not None
     assert rotary_embedding._sin_cache is not None
+
+
+def test_set_cos_and_sin_rebuilds_destroyed_module_cache(monkeypatch):
+    model = _DummyModel(with_split_cache=False)
+    rotary_embedding.clear_global_cos_sin_runtime_cache(model)
+    monkeypatch.setattr(rotary_embedding, "has_rope", lambda _: False)
+    monkeypatch.setattr(rotary_embedding, "is_vl_model", lambda _: False)
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(use_mla=False),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+    )
+
+    rotary_embedding.set_cos_and_sin(cfg, 4, 1, torch.float16, torch.device("cpu"), model=model)
+
+    assert model.rotary.cos_sin_cache is not None
+    assert rotary_embedding._cos_sin_cache is model.rotary.cos_sin_cache
 
