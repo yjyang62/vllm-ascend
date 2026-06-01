@@ -307,9 +307,12 @@ class NPUWorker(WorkerBase):
             logger.warning("Skip restoring global cos/sin cache after sleep due to incomplete model runner state.")
             return
 
-        rebuild_global_cos_sin_cache_for_wakeup(getattr(model_runner, "model", None), dtype, device)
+        restored = rebuild_global_cos_sin_cache_for_wakeup(getattr(model_runner, "model", None), dtype, device)
+        if not restored:
+            logger.warning("Failed to rebuild global cos/sin cache from model during wakeup.")
         set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
-        self._sleep_cos_sin_cache_cleared = False
+        # Keep retry state when restore failed; clear it only after a successful restore.
+        self._sleep_cos_sin_cache_cleared = not restored
 
     def _reset_model_runner_graph_manager(self) -> None:
         from vllm.platforms import current_platform

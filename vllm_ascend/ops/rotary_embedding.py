@@ -99,19 +99,41 @@ def restore_global_cos_sin_cache_from_model(model: torch.nn.Module | None = None
     if model is None:
         return False
 
+    best_cos_sin_cache: torch.Tensor | None = None
+    best_cos_cached: torch.Tensor | None = None
+    best_sin_cached: torch.Tensor | None = None
+    # Prefer modules with split caches, then prefer larger sequence capacity.
+    best_score = (-1, -1)
+
     for module in model.modules():
         cos_sin_cache = getattr(module, "cos_sin_cache", None)
-        if cos_sin_cache is None:
+        if not isinstance(cos_sin_cache, torch.Tensor):
             continue
-        _record_cos_sin_cache(cos_sin_cache)
+
         cos_cached = getattr(module, "cos_cached", None)
         sin_cached = getattr(module, "sin_cached", None)
-        if cos_cached is not None and sin_cached is not None:
-            _record_cos_and_sin_cache(cos_cached, sin_cached)
-        elif _cos_cache is None or _sin_cache is None:
-            _record_cos_and_sin_cache_interleaved(cos_sin_cache)
-        return True
-    return False
+        has_split_cache = isinstance(cos_cached, torch.Tensor) and isinstance(sin_cached, torch.Tensor)
+        seq_capacity = int(cos_sin_cache.shape[0]) if cos_sin_cache.ndim > 0 else 0
+        score = (1 if has_split_cache else 0, seq_capacity)
+        if score > best_score:
+            best_score = score
+            best_cos_sin_cache = cos_sin_cache
+            if has_split_cache:
+                best_cos_cached = cos_cached
+                best_sin_cached = sin_cached
+            else:
+                best_cos_cached = None
+                best_sin_cached = None
+
+    if best_cos_sin_cache is None:
+        return False
+
+    _record_cos_sin_cache(best_cos_sin_cache)
+    if best_cos_cached is not None and best_sin_cached is not None:
+        _record_cos_and_sin_cache(best_cos_cached, best_sin_cached)
+    else:
+        _record_cos_and_sin_cache_interleaved(best_cos_sin_cache)
+    return True
 
 
 def _rebuild_rotary_module_cache(module: torch.nn.Module, dtype: torch.dtype, device: torch.device) -> bool:

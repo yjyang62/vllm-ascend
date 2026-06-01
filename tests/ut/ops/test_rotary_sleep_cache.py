@@ -106,6 +106,24 @@ def test_restore_global_cos_sin_cache_from_model_interleaved_fallback():
     assert rotary_embedding._sin_cache is not None
 
 
+def test_restore_global_cos_sin_cache_from_model_prefers_split_cache_candidate():
+    model = torch.nn.Module()
+    model.rotary_a = _DummyRotaryModule(with_split_cache=False)
+    model.rotary_b = _DummyRotaryModule(with_split_cache=True)
+    model.rotary_a.cos_sin_cache = torch.randn(4, 16)
+    model.rotary_b.cos_sin_cache = torch.randn(8, 16)
+    model.rotary_b.cos_cached = torch.randn(8, 16)
+    model.rotary_b.sin_cached = torch.randn(8, 16)
+    _clear_all_global_caches()
+
+    restored = rotary_embedding.restore_global_cos_sin_cache_from_model(model)
+
+    assert restored is True
+    assert rotary_embedding._cos_sin_cache is model.rotary_b.cos_sin_cache
+    assert rotary_embedding._cos_cache is model.rotary_b.cos_cached
+    assert rotary_embedding._sin_cache is model.rotary_b.sin_cached
+
+
 def test_rebuild_global_cos_sin_cache_for_wakeup_rebuilds_destroyed_module_cache(monkeypatch):
     model = _DummyModel(with_split_cache=False)
     rotary_embedding.clear_global_cos_sin_runtime_cache(model)
