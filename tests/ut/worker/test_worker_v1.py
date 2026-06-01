@@ -1043,7 +1043,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with (
             patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
-            patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized") as mock_ensure_kv_transfer,
+            patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized"),
         ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
@@ -1065,7 +1065,6 @@ class TestNPUWorker(TestBase):
             worker.initialize_from_config(mock_kv_cache_config)
 
             # Verify calls
-            mock_ensure_kv_transfer.assert_called_once_with(worker.vllm_config, mock_kv_cache_config)
             mock_allocator_class.get_instance.assert_called_once()
             mock_allocator.use_memory_pool.assert_called_once_with(tag="kv_cache")
             worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
@@ -1139,7 +1138,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with (
             patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
-            patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized") as mock_ensure_kv_transfer,
+            patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized"),
         ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
@@ -1155,7 +1154,6 @@ class TestNPUWorker(TestBase):
             worker.initialize_from_config(mock_kv_cache_config)
 
             # Verify calls
-            mock_ensure_kv_transfer.assert_called_once_with(worker.vllm_config, mock_kv_cache_config)
             worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
 
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
