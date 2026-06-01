@@ -177,9 +177,16 @@ def _rebuild_model_cos_sin_cache(model: torch.nn.Module | None, dtype: torch.dty
 def rebuild_global_cos_sin_cache_for_wakeup(
     model: torch.nn.Module | None, dtype: torch.dtype, device: torch.device
 ) -> bool:
-    rebuilt = _rebuild_model_cos_sin_cache(model, dtype, device)
+    # Fast path: if module-level caches already exist, just restore global refs.
     restored = restore_global_cos_sin_cache_from_model(model)
-    return rebuilt or restored
+    if restored:
+        return True
+
+    # Slow path: rebuild module-level caches, then restore globals again.
+    rebuilt = _rebuild_model_cos_sin_cache(model, dtype, device)
+    if not rebuilt:
+        return False
+    return restore_global_cos_sin_cache_from_model(model)
 
 
 def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device):

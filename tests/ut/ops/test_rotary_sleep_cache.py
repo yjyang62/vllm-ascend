@@ -141,3 +141,17 @@ def test_rebuild_global_cos_sin_cache_for_wakeup_rebuilds_destroyed_module_cache
     assert model.rotary.cos_sin_cache is not None
     assert rotary_embedding._cos_sin_cache is model.rotary.cos_sin_cache
 
+
+def test_rebuild_global_cos_sin_cache_for_wakeup_restores_without_rebuild(monkeypatch):
+    model = _DummyModel(with_split_cache=True)
+    _clear_all_global_caches()
+
+    def _unexpected_rebuild(*args, **kwargs):
+        raise AssertionError("rebuild should not be called when restore succeeds")
+
+    monkeypatch.setattr(rotary_embedding, "_rebuild_model_cos_sin_cache", _unexpected_rebuild)
+    restored = rotary_embedding.rebuild_global_cos_sin_cache_for_wakeup(model, torch.float16, torch.device("cpu"))
+
+    assert restored is True
+    assert rotary_embedding._cos_sin_cache is model.rotary.cos_sin_cache
+
