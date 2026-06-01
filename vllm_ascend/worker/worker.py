@@ -308,7 +308,7 @@ class NPUWorker(WorkerBase):
         if not self._sleep_cos_sin_cache_cleared:
             return
 
-        from vllm_ascend.ops.rotary_embedding import restore_global_cos_sin_cache_from_model, set_cos_and_sin
+        from vllm_ascend.ops.rotary_embedding import rebuild_global_cos_sin_cache_for_wakeup, set_cos_and_sin
 
         model_runner = self.model_runner
         max_num_reqs = getattr(model_runner, "max_num_reqs", None)
@@ -321,7 +321,7 @@ class NPUWorker(WorkerBase):
             logger.warning("Skip restoring global cos/sin cache after sleep due to incomplete model runner state.")
             return
 
-        restore_global_cos_sin_cache_from_model(getattr(model_runner, "model", None))
+        rebuild_global_cos_sin_cache_for_wakeup(getattr(model_runner, "model", None), dtype, device)
         set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
         self._sleep_cos_sin_cache_cleared = False
 

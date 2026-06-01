@@ -59,39 +59,6 @@ _cos_slice: torch.Tensor = None
 _sin_slice: torch.Tensor = None
 
 
-def _offload_module_cache_tensor(
-    module: torch.nn.Module,
-    cache_name: str,
-) -> bool:
-    cache = getattr(module, cache_name, None)
-    if cache is None or not isinstance(cache, torch.Tensor) or cache.device.type == "cpu":
-        return False
-
-    setattr(module, f"{cache_name}_cpu", cache.detach().cpu())
-    setattr(module, f"{cache_name}_device", cache.device)
-    setattr(module, cache_name, None)
-    return True
-
-
-def _restore_module_cache_tensor(
-    module: torch.nn.Module,
-    cache_name: str,
-    device: torch.device | str | None = None,
-) -> bool:
-    backup_name = f"{cache_name}_cpu"
-    device_name = f"{cache_name}_device"
-    cache = getattr(module, backup_name, None)
-    if cache is None:
-        return False
-
-    target_device = device if device is not None else getattr(module, device_name)
-    setattr(module, cache_name, cache.to(device=target_device))
-    delattr(module, backup_name)
-    if hasattr(module, device_name):
-        delattr(module, device_name)
-    return True
-
-
 def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> bool:
     global _cos_mla
     global _sin_mla
@@ -102,8 +69,8 @@ def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> 
     global _sin
     global _cos_slice
     global _sin_slice
-    cleared = False
 
+    cleared = False
     for cache_name in (
         "_cos_mla",
         "_sin_mla",
@@ -115,30 +82,22 @@ def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> 
         "_cos_slice",
         "_sin_slice",
     ):
-        cache = globals()[cache_name]
-        if cache is not None:
+        if globals()[cache_name] is not None:
             globals()[cache_name] = None
             cleared = True
 
     if model is not None:
         for module in model.modules():
             for cache_name in ("cos_sin_cache", "cos_cached", "sin_cached", "cos", "sin"):
-                if _offload_module_cache_tensor(module, cache_name):
+                if hasattr(module, cache_name) and getattr(module, cache_name) is not None:
+                    setattr(module, cache_name, None)
                     cleared = True
     return cleared
 
 
-def restore_global_cos_sin_cache_from_model(
-    model: torch.nn.Module | None = None,
-    device: torch.device | str | None = None,
-) -> bool:
+def restore_global_cos_sin_cache_from_model(model: torch.nn.Module | None = None):
     if model is None:
         return False
-
-    restored = False
-    for module in model.modules():
-        for cache_name in ("cos_sin_cache", "cos_cached", "sin_cached", "cos", "sin"):
-            restored = _restore_module_cache_tensor(module, cache_name, device) or restored
 
     for module in model.modules():
         cos_sin_cache = getattr(module, "cos_sin_cache", None)
@@ -151,8 +110,37 @@ def restore_global_cos_sin_cache_from_model(
             _record_cos_and_sin_cache(cos_cached, sin_cached)
         elif _cos_cache is None or _sin_cache is None:
             _record_cos_and_sin_cache_interleaved(cos_sin_cache)
-        return True
-    return restored
+
+
+def _rebuild_rotary_module_cache(module: torch.nn.Module, dtype: torch.dtype, device: torch.device):
+    """Rebuild module-level rotary cache after sleep-time cache destruction."""
+    if getattr(module, "cos_sin_cache", None) is not None:
+        return
+
+    rebuilt = False
+    set_cache_fn = getattr(module, "_set_cos_sin_cache", None)
+    max_seq_len = getattr(module, "max_seq_len", getattr(module, "max_position_embeddings", None))
+    if callable(set_cache_fn) and max_seq_len is not None:
+        set_cache_fn(max_seq_len, device=device, dtype=dtype)
+        rebuilt = getattr(module, "cos_sin_cache", None) is not None
+
+    if rebuilt:
+        return
+
+    compute_cache_fn = getattr(module, "_compute_cos_sin_cache", None)
+    if callable(compute_cache_fn):
+        cache = compute_cache_fn()
+        if not getattr(module, "use_flashinfer", False):
+            cache = cache.to(dtype)
+        module.cos_sin_cache = cache.to(device)
+
+
+def rebuild_global_cos_sin_cache_for_wakeup(
+    model: torch.nn.Module | None, dtype: torch.dtype, device: torch.device
+):
+    for module in model.modules():
+        _rebuild_rotary_module_cache(module, dtype, device)
+    restore_global_cos_sin_cache_from_model(model)
 
 
 def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device):
