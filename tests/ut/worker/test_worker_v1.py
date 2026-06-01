@@ -1075,16 +1075,16 @@ class TestNPUWorker(TestBase):
 
     def test_invalidate_acl_graphs_for_sleep_handles_missing_model_runner(self):
         worker = self._make_worker_for_sleep_helpers()
+        mock_acl_graph = MagicMock()
 
         with (
-            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep") as mock_clear_workspaces,
-            patch("vllm_ascend.compilation.acl_graph.reset_graph_params_for_sleep") as mock_reset_graph_params,
+            patch.dict("sys.modules", {"vllm_ascend.compilation.acl_graph": mock_acl_graph}),
             patch.object(worker, "_reset_model_runner_graph_manager") as mock_reset_graph_manager,
         ):
             worker._invalidate_acl_graphs_for_sleep()
 
-        mock_clear_workspaces.assert_called_once()
-        mock_reset_graph_params.assert_not_called()
+        mock_acl_graph.clear_attention_workspaces_for_sleep.assert_called_once()
+        mock_acl_graph.reset_graph_params_for_sleep.assert_not_called()
         mock_reset_graph_manager.assert_not_called()
         self.assertFalse(worker._sleep_acl_graph_invalidated)
 
@@ -1092,16 +1092,16 @@ class TestNPUWorker(TestBase):
         worker = self._make_worker_for_sleep_helpers()
         worker.model_runner = MagicMock()
         worker.model_runner.use_aclgraph = True
+        mock_acl_graph = MagicMock()
 
         with (
-            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep") as mock_clear_workspaces,
-            patch("vllm_ascend.compilation.acl_graph.reset_graph_params_for_sleep") as mock_reset_graph_params,
+            patch.dict("sys.modules", {"vllm_ascend.compilation.acl_graph": mock_acl_graph}),
             patch.object(worker, "_reset_model_runner_graph_manager") as mock_reset_graph_manager,
         ):
             worker._invalidate_acl_graphs_for_sleep()
 
-        mock_clear_workspaces.assert_called_once()
-        mock_reset_graph_params.assert_called_once()
+        mock_acl_graph.clear_attention_workspaces_for_sleep.assert_called_once()
+        mock_acl_graph.reset_graph_params_for_sleep.assert_called_once()
         mock_reset_graph_manager.assert_called_once()
         self.assertTrue(worker._sleep_acl_graph_invalidated)
 

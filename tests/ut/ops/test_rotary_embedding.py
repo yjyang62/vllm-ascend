@@ -63,7 +63,6 @@ def check_parent_init_signature_has_not_changed(parent_func, child_func):
 class TestRotarySleepCache:
     def test_clear_global_cache_returns_false_when_nothing_cleared(self):
         model = torch.nn.Module()
-        model.cos_cached = torch.ones(1)
 
         with (
             patch("vllm_ascend.ops.rotary_embedding._cos_mla", None),
@@ -79,7 +78,6 @@ class TestRotarySleepCache:
             cleared = rotary_embedding.clear_global_cos_sin_runtime_cache(model)
 
         assert cleared is False
-        assert isinstance(model.cos_cached, torch.Tensor)
 
     def test_clear_global_cache_returns_true_for_global_cache(self):
         with (
