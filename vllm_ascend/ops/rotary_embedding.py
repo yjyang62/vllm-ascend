@@ -135,9 +135,9 @@ def _rebuild_rotary_module_cache(module: torch.nn.Module, dtype: torch.dtype, de
         module.cos_sin_cache = cache.to(device)
 
 
-def rebuild_global_cos_sin_cache_for_wakeup(
-    model: torch.nn.Module | None, dtype: torch.dtype, device: torch.device
-):
+def rebuild_global_cos_sin_cache_for_wakeup(model: torch.nn.Module | None, dtype: torch.dtype, device: torch.device):
+    if model is None:
+        return
     for module in model.modules():
         _rebuild_rotary_module_cache(module, dtype, device)
     restore_global_cos_sin_cache_from_model(model)
