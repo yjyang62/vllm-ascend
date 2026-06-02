@@ -370,6 +370,10 @@ class NPUWorker(WorkerBase):
     def _restore_acl_graphs_after_sleep(self, tags: list[str] | None) -> None:
         if not self._sleep_acl_graph_invalidated:
             return
+        if tags is not None and "kv_cache" not in tags:
+            # Level-2 wakeup restores weights before external weight loading;
+            # recapture graphs only after KV cache is restored.
+            return
         if self.model_runner is None:
             return
         capture_model = self.model_runner.capture_model
