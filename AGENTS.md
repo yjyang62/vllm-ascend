@@ -412,6 +412,94 @@ Before merging, verify:
 
 ---
 
+## Cursor Cloud specific instructions
+
+This VM has **no Ascend NPU**. Use the split workflow below: lint and package import on the host venv; unit tests and anything touching `torch_npu` inside the CANN Docker image.
+
+### Python version
+
+Ubuntu ships Python 3.12, but vLLM Ascend requires **Python 3.10–3.11**. Install 3.11 with [uv](https://github.com/astral-sh/uv) and create the project venv:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+uv python install 3.11
+python3.11 -m venv .venv
+source .venv/bin/activate
+```
+
+### One-time native build deps (host)
+
+Building `arctic-inference` (a vllm-ascend dependency) needs a working C++ toolchain:
+
+```bash
+sudo apt-get install -y build-essential libstdc++-14-dev cmake ninja-build git libnuma-dev
+pip install nanobind setuptools-scm pybind11 ninja cmake
+```
+
+### Install vLLM + vllm-ascend (host, CPU / empty device)
+
+Match upstream vLLM **v0.20.2** (see `Dockerfile` / CI):
+
+```bash
+source .venv/bin/activate
+git clone --depth 1 -b v0.20.2 https://github.com/vllm-project/vllm.git vllm-empty
+cd vllm-empty && VLLM_TARGET_DEVICE=empty pip install . --extra-index-url https://download.pytorch.org/whl/cpu/
+pip uninstall -y triton
+cd ..
+
+export SOC_VERSION=ascend910b1
+export COMPILE_CUSTOM_KERNELS=0
+pip install arctic-inference==0.1.1 --no-build-isolation --extra-index-url https://download.pytorch.org/whl/cpu/
+pip install -e . --no-build-isolation \
+  --extra-index-url https://download.pytorch.org/whl/cpu/ \
+  --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple \
+  --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+pip install pytest==8.3.2 pytest-mock pytest-asyncio
+```
+
+Host-side `pytest tests/ut/` will fail without CANN libraries (`libhccl.so`). That is expected.
+
+### Lint
+
+Works on the host venv without CANN:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-lint.txt
+bash format.sh ci
+```
+
+### Unit tests without NPU (CANN Docker)
+
+Pull the image once (matches `docs/source/conf.py` `cann_image_tag`):
+
+```bash
+sudo docker pull quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.11
+```
+
+Run smart UT inside the container (mount repo at `/vllm-project`, set `git safe.directory`, source `set_env.sh`, install vLLM + vllm-ascend as above). After install, if `scipy` fails to import, run `pip install --force-reinstall numpy scipy` (do **not** downgrade to `numpy<2`).
+
+Example test invocation:
+
+```bash
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+export SOC_VERSION=ascend910b1
+export COMPILE_CUSTOM_KERNELS=0
+pytest -sv tests/ut/test_envs.py tests/ut/test_platform.py
+```
+
+Tests decorated with `@npu_test` fail without hardware; that is normal on CPU runners.
+
+### Running the application (`vllm serve`)
+
+**Requires a physical Ascend NPU**, CANN 9.0.0, and device passthrough (see `docs/source/quick_start.md`). It cannot be exercised end-to-end on this Cloud VM. Use the prebuilt runtime image `quay.io/ascend/vllm-ascend:<tag>` on NPU hardware for serving demos.
+
+### Docker on Cloud VMs
+
+If Docker is not running: install Docker CE, set `fuse-overlayfs` in `/etc/docker/daemon.json`, use `iptables-legacy`, and start `dockerd`. Use `sudo docker` unless your user is in the `docker` group.
+
+---
+
 ## References
 
 - [vLLM Hardware Plugin RFC](https://github.com/vllm-project/vllm/issues/11162)
