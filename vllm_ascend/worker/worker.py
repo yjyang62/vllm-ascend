@@ -256,10 +256,11 @@ class NPUWorker(WorkerBase):
                 "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
             )
         allocator = CaMemAllocator.get_instance()
-        if self._sleep_memory_cleanup_enabled():
+        cleanup_enabled = self._sleep_memory_cleanup_enabled()
+        if cleanup_enabled:
             self.hccl_group_mem_saver.wakeup()
         allocator.wake_up(tags=tags)
-        if self._sleep_memory_cleanup_enabled():
+        if cleanup_enabled:
             self.rotary_eemb_mem_saver.wakeup()
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
@@ -289,7 +290,7 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
-        if self._sleep_memory_cleanup_enabled():
+        if cleanup_enabled:
             self.acl_graph_mem_saver.wakeup(tags)
 
     def _sleep_memory_cleanup_enabled(self) -> bool:

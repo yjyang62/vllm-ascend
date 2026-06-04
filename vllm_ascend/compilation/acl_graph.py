@@ -372,6 +372,8 @@ class AclGraphMemSaver:
     def __init__(self, vllm_config: VllmConfig, model_runner_getter: Callable[[], Any]):
         self.vllm_config = vllm_config
         self._model_runner_getter = model_runner_getter
+        self._invalidated = False
+
     def sleep(self) -> None:
         clear_attention_workspaces_for_sleep()
         model_runner = self._model_runner_getter()
@@ -379,8 +381,11 @@ class AclGraphMemSaver:
             return
         reset_graph_params_for_sleep()
         self._reset_model_runner_graph_manager(model_runner)
+        self._invalidated = True
 
     def wakeup(self, tags: list[str] | None = None) -> None:
+        if not self._invalidated:
+            return
         if tags is not None and "kv_cache" not in tags:
             # Level-2 wakeup restores weights before external weight loading;
             # recapture graphs only after KV cache is restored.
@@ -391,6 +396,8 @@ class AclGraphMemSaver:
         capture_model = model_runner.capture_model
         with set_current_vllm_config(self.vllm_config):
             capture_model()
+        self._invalidated = False
+
     @staticmethod
     def _reset_model_runner_graph_manager(model_runner: Any) -> None:
         manager = getattr(model_runner, "cudagraph_manager", None)
