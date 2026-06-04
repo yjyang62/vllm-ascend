@@ -22,6 +22,7 @@ from typing import Any, cast
 import torch
 import vllm
 from torch.distributed import Backend
+from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _groups, _register_group
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
@@ -292,28 +293,69 @@ _patch_destroy_distributed_environment()
 
 
 def _iter_alive_group_coordinators():
-    seen: set[int] = set()
-    for group_ref in list(_groups.values()):
-        group = group_ref()
-        if group is None or id(group) in seen:
-            continue
-        seen.add(id(group))
-        yield group
+    yield from HcclGroupMemSaver.iter_alive_group_coordinators()
 
 
 def destroy_hccl_for_sleep() -> int:
-    num_destroyed = 0
-    for group in _iter_alive_group_coordinators():
-        destroy = group.destroy_hccl_for_sleep
-        if destroy is not None and destroy():
-            num_destroyed += 1
-    return num_destroyed
+    return HcclGroupMemSaver.destroy_hccl_for_sleep()
 
 
 def restore_hccl_after_sleep() -> int:
-    num_restored = 0
-    for group in _iter_alive_group_coordinators():
-        restore = group.restore_hccl_after_sleep
-        if restore is not None and restore():
-            num_restored += 1
-    return num_restored
+    return HcclGroupMemSaver.restore_hccl_after_sleep()
+
+
+class HcclGroupMemSaver:
+    def __init__(self, vllm_config: Any, worker: Any):
+        self.vllm_config = vllm_config
+        self.worker = worker
+        self._destroyed = False
+
+    @staticmethod
+    def iter_alive_group_coordinators():
+        seen: set[int] = set()
+        for group_ref in list(_groups.values()):
+            group = group_ref()
+            if group is None or id(group) in seen:
+                continue
+            seen.add(id(group))
+            yield group
+
+    @classmethod
+    def destroy_hccl_for_sleep(cls) -> int:
+        num_destroyed = 0
+        for group in cls.iter_alive_group_coordinators():
+            destroy = group.destroy_hccl_for_sleep
+            if destroy is not None and destroy():
+                num_destroyed += 1
+        return num_destroyed
+
+    @classmethod
+    def restore_hccl_after_sleep(cls) -> int:
+        num_restored = 0
+        for group in cls.iter_alive_group_coordinators():
+            restore = group.restore_hccl_after_sleep
+            if restore is not None and restore():
+                num_restored += 1
+        return num_restored
+
+    def sleep(self) -> None:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            for handle in getattr(self.worker, "_pp_send_work", []):
+                handle.wait()
+            self.worker._pp_send_work = []
+            torch.npu.synchronize()
+            num_destroyed = self.destroy_hccl_for_sleep()
+            self._destroyed = num_destroyed > 0
+            if self._destroyed:
+                logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)
+
+    def wakeup(self) -> None:
+        if not self._destroyed:
+            return
+        with set_current_vllm_config(self.vllm_config):
+            num_restored = self.restore_hccl_after_sleep()
+            from vllm_ascend.ops.fused_moe.moe_comm_method import refresh_moe_comm_method_after_hccl_restore
+
+            refresh_moe_comm_method_after_hccl_restore()
+        self._destroyed = False
+        logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
