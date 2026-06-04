@@ -63,39 +63,7 @@ _sin_slice: torch.Tensor = None
 
 
 def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> bool:
-    global _cos_mla
-    global _sin_mla
-    global _cos_cache
-    global _sin_cache
-    global _cos_sin_cache
-    global _cos
-    global _sin
-    global _cos_slice
-    global _sin_slice
-
-    cleared = False
-    for cache_name in (
-        "_cos_mla",
-        "_sin_mla",
-        "_cos_cache",
-        "_sin_cache",
-        "_cos_sin_cache",
-        "_cos",
-        "_sin",
-        "_cos_slice",
-        "_sin_slice",
-    ):
-        if globals()[cache_name] is not None:
-            globals()[cache_name] = None
-            cleared = True
-
-    if model is not None:
-        for module in model.modules():
-            for cache_name in ("cos_sin_cache", "cos_cached", "sin_cached", "cos", "sin"):
-                if hasattr(module, cache_name) and getattr(module, cache_name) is not None:
-                    setattr(module, cache_name, None)
-                    cleared = True
-    return cleared
+    return RotaryEembMemSaver.clear_global_cos_sin_runtime_cache(model)
 
 
 def restore_global_cos_sin_cache_from_model(model: torch.nn.Module | None = None):
@@ -139,38 +107,11 @@ def _rebuild_rotary_module_cache(module: torch.nn.Module, dtype: torch.dtype, de
 
 
 def rebuild_global_cos_sin_cache_for_wakeup(model: torch.nn.Module | None, dtype: torch.dtype, device: torch.device):
-    if model is None:
-        return
-    for module in model.modules():
-        _rebuild_rotary_module_cache(module, dtype, device)
-    restore_global_cos_sin_cache_from_model(model)
+    RotaryEembMemSaver.rebuild_global_cos_sin_cache_for_wakeup(model, dtype, device)
 
 
 def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device):
-    global _cos_mla
-    global _sin_mla
-    global _cos
-    global _sin
-
-    if _cos_mla is not None or _sin_mla is not None or _cos is not None or _sin is not None:
-        return
-
-    model_config = vllm_config.model_config
-    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-
-    if model_config.use_mla:
-        rope_dim = model_config.hf_text_config.qk_rope_head_dim
-        _cos_mla = torch.ones(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
-        _sin_mla = torch.zeros(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
-    elif not is_vl_model(vllm_config) and has_rope(vllm_config):
-        rope_dim = model_config.get_head_size()
-        # For models using partial rope like Qwen3-Next.
-        if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
-            rope_dim = int(rope_dim * model_config.hf_text_config.partial_rotary_factor)
-        elif hasattr(model_config.hf_text_config, "rotary_dim"):
-            rope_dim = int(model_config.hf_text_config.rotary_dim)
-        _cos = torch.ones(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
-        _sin = torch.zeros(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
+    RotaryEembMemSaver.set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
 
 
 class RotaryEembMemSaver:
@@ -179,6 +120,79 @@ class RotaryEembMemSaver:
         self._model_runner_getter = model_runner_getter
         self._cleared = False
 
+    @staticmethod
+    def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> bool:
+        global _cos_mla
+        global _sin_mla
+        global _cos_cache
+        global _sin_cache
+        global _cos_sin_cache
+        global _cos
+        global _sin
+        global _cos_slice
+        global _sin_slice
+
+        cleared = False
+        for cache_name in (
+            "_cos_mla",
+            "_sin_mla",
+            "_cos_cache",
+            "_sin_cache",
+            "_cos_sin_cache",
+            "_cos",
+            "_sin",
+            "_cos_slice",
+            "_sin_slice",
+        ):
+            if globals()[cache_name] is not None:
+                globals()[cache_name] = None
+                cleared = True
+
+        if model is not None:
+            for module in model.modules():
+                for cache_name in ("cos_sin_cache", "cos_cached", "sin_cached", "cos", "sin"):
+                    if hasattr(module, cache_name) and getattr(module, cache_name) is not None:
+                        setattr(module, cache_name, None)
+                        cleared = True
+        return cleared
+
+    @staticmethod
+    def rebuild_global_cos_sin_cache_for_wakeup(
+        model: torch.nn.Module | None, dtype: torch.dtype, device: torch.device
+    ) -> None:
+        if model is None:
+            return
+        for module in model.modules():
+            _rebuild_rotary_module_cache(module, dtype, device)
+        restore_global_cos_sin_cache_from_model(model)
+
+    @staticmethod
+    def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device):
+        global _cos_mla
+        global _sin_mla
+        global _cos
+        global _sin
+
+        if _cos_mla is not None or _sin_mla is not None or _cos is not None or _sin is not None:
+            return
+
+        model_config = vllm_config.model_config
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+
+        if model_config.use_mla:
+            rope_dim = model_config.hf_text_config.qk_rope_head_dim
+            _cos_mla = torch.ones(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
+            _sin_mla = torch.zeros(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
+        elif not is_vl_model(vllm_config) and has_rope(vllm_config):
+            rope_dim = model_config.get_head_size()
+            # For models using partial rope like Qwen3-Next.
+            if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
+                rope_dim = int(rope_dim * model_config.hf_text_config.partial_rotary_factor)
+            elif hasattr(model_config.hf_text_config, "rotary_dim"):
+                rope_dim = int(model_config.hf_text_config.rotary_dim)
+            _cos = torch.ones(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
+            _sin = torch.zeros(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
+
     def sleep(self) -> None:
         model_runner = self._model_runner_getter()
         if model_runner is None:
@@ -186,7 +200,7 @@ class RotaryEembMemSaver:
         model = getattr(model_runner, "model", None)
         if model is None:
             return
-        self._cleared = clear_global_cos_sin_runtime_cache(model)
+        self._cleared = self.clear_global_cos_sin_runtime_cache(model)
 
     def wakeup(self) -> None:
         if not self._cleared:
@@ -202,8 +216,8 @@ class RotaryEembMemSaver:
             logger.warning("Skip restoring global cos/sin cache after sleep due to incomplete model runner state.")
             return
 
-        rebuild_global_cos_sin_cache_for_wakeup(getattr(model_runner, "model", None), dtype, device)
-        set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
+        self.rebuild_global_cos_sin_cache_for_wakeup(getattr(model_runner, "model", None), dtype, device)
+        self.set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
         self._cleared = False
 
 
