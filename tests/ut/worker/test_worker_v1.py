@@ -1236,7 +1236,10 @@ class TestNPUWorker(TestBase):
         saver = RotaryEembMemSaver(vllm_config, lambda: model_runner)
 
         with (
-            patch("vllm_ascend.ops.rotary_embedding.clear_global_cos_sin_runtime_cache", return_value=True) as mock_clear,
+            patch(
+                "vllm_ascend.ops.rotary_embedding.clear_global_cos_sin_runtime_cache",
+                return_value=True,
+            ) as mock_clear,
             patch("vllm_ascend.ops.rotary_embedding.rebuild_global_cos_sin_cache_for_wakeup") as mock_rebuild,
             patch("vllm_ascend.ops.rotary_embedding.set_cos_and_sin") as mock_set_cos_sin,
         ):

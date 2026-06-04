@@ -142,7 +142,8 @@ class NPUWorker(WorkerBase):
         self.hccl_group_mem_saver = HcclGroupMemSaver(vllm_config, self)
         self.rotary_eemb_mem_saver = RotaryEembMemSaver(vllm_config, lambda: getattr(self, "model_runner", None))
 
-        # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
+        # FixMe: this is a patch to fix the issue caused by
+        # https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:

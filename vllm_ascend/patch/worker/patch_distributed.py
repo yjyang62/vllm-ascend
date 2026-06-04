@@ -21,8 +21,8 @@ from typing import Any, cast
 
 import torch
 import vllm
-from vllm.config import set_current_vllm_config
 from torch.distributed import Backend
+from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _groups, _register_group
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
