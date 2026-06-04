@@ -1154,8 +1154,6 @@ class TestNPUWorker(TestBase):
 
         mock_clear.assert_called_once()
         mock_reset.assert_not_called()
-        self.assertFalse(saver._invalidated)
-
     def test_acl_graph_mem_saver_sleep_resets_acl_graph_state(self):
         from vllm_ascend.compilation.acl_graph import AclGraphMemSaver
 
@@ -1175,33 +1173,24 @@ class TestNPUWorker(TestBase):
         mock_reset.assert_called_once()
         model_runner.cudagraph_manager.graphs.clear.assert_called_once()
         self.assertEqual(model_runner.cudagraph_manager.pool, mock_platform.get_global_graph_pool.return_value)
-        self.assertTrue(saver._invalidated)
-
     def test_acl_graph_mem_saver_wakeup_handles_missing_model_runner(self):
         from vllm_ascend.compilation.acl_graph import AclGraphMemSaver
 
         saver = AclGraphMemSaver(MagicMock(), lambda: None)
-        saver._invalidated = True
-
         saver.wakeup(tags=None)
-
-        self.assertTrue(saver._invalidated)
 
     def test_acl_graph_mem_saver_wakeup_recaptures_model(self):
         from vllm_ascend.compilation.acl_graph import AclGraphMemSaver
 
         vllm_config = MagicMock()
         model_runner = MagicMock()
+        model_runner.use_aclgraph = True
         saver = AclGraphMemSaver(vllm_config, lambda: model_runner)
-        saver._invalidated = True
-
         with patch("vllm_ascend.compilation.acl_graph.set_current_vllm_config") as mock_set_config:
             saver.wakeup(tags=None)
 
         mock_set_config.assert_called_once_with(vllm_config)
         model_runner.capture_model.assert_called_once()
-        self.assertFalse(saver._invalidated)
-
     def test_hccl_group_mem_saver_sleep_waits_and_destroys(self):
         from vllm_ascend.patch.worker.patch_distributed import HcclGroupMemSaver
 
@@ -1222,7 +1211,6 @@ class TestNPUWorker(TestBase):
         self.assertEqual(worker._pp_send_work, [])
         mock_synchronize.assert_called_once()
         mock_destroy.assert_called_once()
-        self.assertTrue(saver._destroyed)
 
     def test_rotary_eemb_mem_saver_sleep_and_wakeup(self):
         from vllm_ascend.ops.rotary_embedding import RotaryEembMemSaver
@@ -1249,7 +1237,6 @@ class TestNPUWorker(TestBase):
         mock_clear.assert_called_once_with(model_runner.model)
         mock_rebuild.assert_called_once_with(model_runner.model, torch.float16, torch.device("cpu"))
         mock_set_cos_sin.assert_called_once_with(vllm_config, 2, 1, torch.float16, torch.device("cpu"))
-        self.assertFalse(saver._cleared)
 
     def test_initialize_from_config_without_sleep_mode(self):
         """Test initialize_from_config method - without sleep mode enabled"""

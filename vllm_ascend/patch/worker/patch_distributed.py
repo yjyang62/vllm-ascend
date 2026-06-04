@@ -324,19 +324,15 @@ class HcclGroupMemSaver:
     def __init__(self, vllm_config: Any, worker: Any):
         self.vllm_config = vllm_config
         self.worker = worker
-        self._destroyed = False
 
     def sleep(self) -> None:
-        if self._destroyed:
-            return
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             for handle in getattr(self.worker, "_pp_send_work", []):
                 handle.wait()
             self.worker._pp_send_work = []
             torch.npu.synchronize()
             num_destroyed = destroy_hccl_for_sleep()
-            self._destroyed = num_destroyed > 0
-            if self._destroyed:
+            if num_destroyed > 0:
                 logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)
 
     def wakeup(self) -> None:
@@ -345,5 +341,4 @@ class HcclGroupMemSaver:
             from vllm_ascend.ops.fused_moe.moe_comm_method import refresh_moe_comm_method_after_hccl_restore
 
             refresh_moe_comm_method_after_hccl_restore()
-        self._destroyed = False
         logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)

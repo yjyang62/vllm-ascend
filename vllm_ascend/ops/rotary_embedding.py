@@ -177,23 +177,17 @@ class RotaryEembMemSaver:
     def __init__(self, vllm_config: Any, model_runner_getter: Callable[[], Any]):
         self.vllm_config = vllm_config
         self._model_runner_getter = model_runner_getter
-        self._cleared = False
 
     def sleep(self) -> None:
-        if self._cleared:
-            return
         model_runner = self._model_runner_getter()
         if model_runner is None:
             return
         model = getattr(model_runner, "model", None)
         if model is None:
             return
-        self._cleared = clear_global_cos_sin_runtime_cache(model)
+        clear_global_cos_sin_runtime_cache(model)
 
     def wakeup(self) -> None:
-        if not self._cleared:
-            return
-
         model_runner = self._model_runner_getter()
         max_num_reqs = getattr(model_runner, "max_num_reqs", None)
         decode_token_per_req = getattr(
@@ -207,7 +201,6 @@ class RotaryEembMemSaver:
 
         rebuild_global_cos_sin_cache_for_wakeup(getattr(model_runner, "model", None), dtype, device)
         set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
-        self._cleared = False
 
 
 def get_cos_and_sin_mla(positions, use_cache=False):

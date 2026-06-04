@@ -213,11 +213,22 @@ class NPUWorker(WorkerBase):
         global_cos_sin_cache_freed_bytes = 0
         hccl_freed_bytes = 0
         if self._sleep_memory_cleanup_enabled():
-            attention_workspace_freed_bytes = self._measure_sleep_cleanup_memory(self.acl_graph_mem_saver.sleep)()
-            global_cos_sin_cache_freed_bytes = self._measure_sleep_cleanup_memory(
-                self.rotary_eemb_mem_saver.sleep
-            )()
-            hccl_freed_bytes = self._measure_sleep_cleanup_memory(self.hccl_group_mem_saver.sleep)()
+
+            @self._measure_sleep_cleanup_memory
+            def cleanup_attention_workspace() -> None:
+                self.acl_graph_mem_saver.sleep()
+
+            @self._measure_sleep_cleanup_memory
+            def cleanup_global_cos_sin_cache() -> None:
+                self.rotary_eemb_mem_saver.sleep()
+
+            @self._measure_sleep_cleanup_memory
+            def cleanup_hccl_group() -> None:
+                self.hccl_group_mem_saver.sleep()
+
+            attention_workspace_freed_bytes = cleanup_attention_workspace()
+            global_cos_sin_cache_freed_bytes = cleanup_global_cos_sin_cache()
+            hccl_freed_bytes = cleanup_hccl_group()
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
