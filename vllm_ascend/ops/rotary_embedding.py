@@ -17,10 +17,13 @@
 
 import math
 import os
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.logger import logger
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
     MRotaryEmbedding,
@@ -168,6 +171,43 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
             rope_dim = int(model_config.hf_text_config.rotary_dim)
         _cos = torch.ones(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
         _sin = torch.zeros(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
+
+
+class RotaryEembMemSaver:
+    def __init__(self, vllm_config: Any, model_runner_getter: Callable[[], Any]):
+        self.vllm_config = vllm_config
+        self._model_runner_getter = model_runner_getter
+        self._cleared = False
+
+    def sleep(self) -> None:
+        if self._cleared:
+            return
+        model_runner = self._model_runner_getter()
+        if model_runner is None:
+            return
+        model = getattr(model_runner, "model", None)
+        if model is None:
+            return
+        self._cleared = clear_global_cos_sin_runtime_cache(model)
+
+    def wakeup(self) -> None:
+        if not self._cleared:
+            return
+
+        model_runner = self._model_runner_getter()
+        max_num_reqs = getattr(model_runner, "max_num_reqs", None)
+        decode_token_per_req = getattr(
+            model_runner, "uniform_decode_query_len", getattr(model_runner, "decode_query_len", None)
+        )
+        dtype = getattr(model_runner, "dtype", None)
+        device = getattr(model_runner, "device", None)
+        if None in (max_num_reqs, decode_token_per_req, dtype, device):
+            logger.warning("Skip restoring global cos/sin cache after sleep due to incomplete model runner state.")
+            return
+
+        rebuild_global_cos_sin_cache_for_wakeup(getattr(model_runner, "model", None), dtype, device)
+        set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
+        self._cleared = False
 
 
 def get_cos_and_sin_mla(positions, use_cache=False):

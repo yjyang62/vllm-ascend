@@ -207,6 +207,7 @@ class TestNPUWorker(TestBase):
     def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class):
         mock_config = MagicMock()
         mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_memory_cleanup = True
         mock_get_config.return_value = mock_config
         """Test wake_up method when sleep mode is enabled"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -232,12 +233,83 @@ class TestNPUWorker(TestBase):
             worker.model_runner = mock_model_runner
             worker.vllm_config = mock_vllm_config
             worker._sleep_saved_buffers = {}
-            worker._sleep_cos_sin_cache_cleared = False
-            worker._sleep_acl_graph_invalidated = False
+            worker.hccl_group_mem_saver = MagicMock()
+            worker.rotary_eemb_mem_saver = MagicMock()
+            worker.acl_graph_mem_saver = MagicMock()
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
 
+            worker.hccl_group_mem_saver.wakeup.assert_called_once_with()
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
+            worker.rotary_eemb_mem_saver.wakeup.assert_called_once_with()
+            worker.acl_graph_mem_saver.wakeup.assert_called_once_with(["test_tag"])
+
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("torch.npu.empty_cache")
+    @patch("torch.npu.mem_get_info")
+    def test_sleep_invokes_mem_savers_when_cleanup_enabled(
+        self, mock_mem_get_info, mock_empty_cache, mock_get_config, mock_allocator_class
+    ):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_config = MagicMock()
+        mock_config.enable_sleep_mode_memory_cleanup = True
+        mock_get_config.return_value = mock_config
+        mock_allocator = MagicMock()
+        mock_allocator_class.get_instance.return_value = mock_allocator
+        mock_mem_get_info.side_effect = [
+            (100, 1000),
+            (100, 1000),
+            (120, 1000),
+            (120, 1000),
+            (130, 1000),
+            (130, 1000),
+            (140, 1000),
+            (500, 1000),
+        ]
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.acl_graph_mem_saver = MagicMock()
+            worker.rotary_eemb_mem_saver = MagicMock()
+            worker.hccl_group_mem_saver = MagicMock()
+
+            worker.sleep(level=1)
+
+        worker.acl_graph_mem_saver.sleep.assert_called_once_with()
+        worker.rotary_eemb_mem_saver.sleep.assert_called_once_with()
+        worker.hccl_group_mem_saver.sleep.assert_called_once_with()
+        mock_allocator.sleep.assert_called_once_with(offload_tags=("weights",))
+        self.assertEqual(mock_empty_cache.call_count, 3)
+
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("torch.npu.mem_get_info")
+    def test_sleep_skips_mem_savers_when_cleanup_disabled(
+        self, mock_mem_get_info, mock_get_config, mock_allocator_class
+    ):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_config = MagicMock()
+        mock_config.enable_sleep_mode_memory_cleanup = False
+        mock_get_config.return_value = mock_config
+        mock_allocator = MagicMock()
+        mock_allocator_class.get_instance.return_value = mock_allocator
+        mock_mem_get_info.side_effect = [(100, 1000), (500, 1000)]
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.acl_graph_mem_saver = MagicMock()
+            worker.rotary_eemb_mem_saver = MagicMock()
+            worker.hccl_group_mem_saver = MagicMock()
+
+            worker.sleep(level=1)
+
+        worker.acl_graph_mem_saver.sleep.assert_not_called()
+        worker.rotary_eemb_mem_saver.sleep.assert_not_called()
+        worker.hccl_group_mem_saver.sleep.assert_not_called()
+        mock_allocator.sleep.assert_called_once_with(offload_tags=("weights",))
 
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
     @patch("vllm_ascend.worker.worker.init_device_properties_triton")
@@ -1070,67 +1142,111 @@ class TestNPUWorker(TestBase):
             mock_allocator.use_memory_pool.assert_called_once_with(tag="kv_cache")
             worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
 
-    def _make_worker_for_sleep_helpers(self):
-        from vllm_ascend.worker.worker import NPUWorker
+    def test_acl_graph_mem_saver_sleep_handles_missing_model_runner(self):
+        from vllm_ascend.compilation.acl_graph import AclGraphMemSaver
 
-        worker = NPUWorker.__new__(NPUWorker)
-        worker.vllm_config = MagicMock()
-        worker.model_runner = None
-        worker._sleep_acl_graph_invalidated = False
-        worker._sleep_cos_sin_cache_cleared = False
-        return worker
+        saver = AclGraphMemSaver(MagicMock(), lambda: None)
+        with (
+            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep") as mock_clear,
+            patch("vllm_ascend.compilation.acl_graph.reset_graph_params_for_sleep") as mock_reset,
+        ):
+            saver.sleep()
 
-    def test_invalidate_acl_graphs_for_sleep_handles_missing_model_runner(self):
-        worker = self._make_worker_for_sleep_helpers()
-        mock_acl_graph = MagicMock()
+        mock_clear.assert_called_once()
+        mock_reset.assert_not_called()
+        self.assertFalse(saver._invalidated)
+
+    def test_acl_graph_mem_saver_sleep_resets_acl_graph_state(self):
+        from vllm_ascend.compilation.acl_graph import AclGraphMemSaver
+
+        model_runner = MagicMock()
+        model_runner.use_aclgraph = True
+        model_runner.cudagraph_manager.graphs = MagicMock()
+        saver = AclGraphMemSaver(MagicMock(), lambda: model_runner)
 
         with (
-            patch.dict("sys.modules", {"vllm_ascend.compilation.acl_graph": mock_acl_graph}),
-            patch.object(worker, "_reset_model_runner_graph_manager") as mock_reset_graph_manager,
+            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep") as mock_clear,
+            patch("vllm_ascend.compilation.acl_graph.reset_graph_params_for_sleep") as mock_reset,
+            patch("vllm_ascend.compilation.acl_graph.current_platform") as mock_platform,
         ):
-            worker._invalidate_acl_graphs_for_sleep()
+            saver.sleep()
 
-        mock_acl_graph.clear_attention_workspaces_for_sleep.assert_called_once()
-        mock_acl_graph.reset_graph_params_for_sleep.assert_not_called()
-        mock_reset_graph_manager.assert_not_called()
-        self.assertFalse(worker._sleep_acl_graph_invalidated)
+        mock_clear.assert_called_once()
+        mock_reset.assert_called_once()
+        model_runner.cudagraph_manager.graphs.clear.assert_called_once()
+        self.assertEqual(model_runner.cudagraph_manager.pool, mock_platform.get_global_graph_pool.return_value)
+        self.assertTrue(saver._invalidated)
 
-    def test_invalidate_acl_graphs_for_sleep_resets_acl_graph_state(self):
-        worker = self._make_worker_for_sleep_helpers()
-        worker.model_runner = MagicMock()
-        worker.model_runner.use_aclgraph = True
-        mock_acl_graph = MagicMock()
+    def test_acl_graph_mem_saver_wakeup_handles_missing_model_runner(self):
+        from vllm_ascend.compilation.acl_graph import AclGraphMemSaver
+
+        saver = AclGraphMemSaver(MagicMock(), lambda: None)
+        saver._invalidated = True
+
+        saver.wakeup(tags=None)
+
+        self.assertTrue(saver._invalidated)
+
+    def test_acl_graph_mem_saver_wakeup_recaptures_model(self):
+        from vllm_ascend.compilation.acl_graph import AclGraphMemSaver
+
+        vllm_config = MagicMock()
+        model_runner = MagicMock()
+        saver = AclGraphMemSaver(vllm_config, lambda: model_runner)
+        saver._invalidated = True
+
+        with patch("vllm_ascend.compilation.acl_graph.set_current_vllm_config") as mock_set_config:
+            saver.wakeup(tags=None)
+
+        mock_set_config.assert_called_once_with(vllm_config)
+        model_runner.capture_model.assert_called_once()
+        self.assertFalse(saver._invalidated)
+
+    def test_hccl_group_mem_saver_sleep_waits_and_destroys(self):
+        from vllm_ascend.patch.worker.patch_distributed import HcclGroupMemSaver
+
+        worker = MagicMock()
+        handle = MagicMock()
+        worker._pp_send_work = [handle]
+        saver = HcclGroupMemSaver(MagicMock(), worker)
 
         with (
-            patch.dict("sys.modules", {"vllm_ascend.compilation.acl_graph": mock_acl_graph}),
-            patch.object(worker, "_reset_model_runner_graph_manager") as mock_reset_graph_manager,
+            patch("vllm_ascend.patch.worker.patch_distributed.torch.distributed.is_available", return_value=True),
+            patch("vllm_ascend.patch.worker.patch_distributed.torch.distributed.is_initialized", return_value=True),
+            patch("vllm_ascend.patch.worker.patch_distributed.torch.npu.synchronize") as mock_synchronize,
+            patch("vllm_ascend.patch.worker.patch_distributed.destroy_hccl_for_sleep", return_value=2) as mock_destroy,
         ):
-            worker._invalidate_acl_graphs_for_sleep()
+            saver.sleep()
 
-        mock_acl_graph.clear_attention_workspaces_for_sleep.assert_called_once()
-        mock_acl_graph.reset_graph_params_for_sleep.assert_called_once()
-        mock_reset_graph_manager.assert_called_once()
-        self.assertTrue(worker._sleep_acl_graph_invalidated)
+        handle.wait.assert_called_once()
+        self.assertEqual(worker._pp_send_work, [])
+        mock_synchronize.assert_called_once()
+        mock_destroy.assert_called_once()
+        self.assertTrue(saver._destroyed)
 
-    def test_restore_acl_graphs_after_sleep_handles_missing_model_runner(self):
-        worker = self._make_worker_for_sleep_helpers()
-        worker._sleep_acl_graph_invalidated = True
+    def test_rotary_eemb_mem_saver_sleep_and_wakeup(self):
+        from vllm_ascend.ops.rotary_embedding import RotaryEembMemSaver
 
-        worker._restore_acl_graphs_after_sleep(tags=None)
+        vllm_config = MagicMock()
+        model_runner = MagicMock()
+        model_runner.max_num_reqs = 2
+        model_runner.uniform_decode_query_len = 1
+        model_runner.dtype = torch.float16
+        model_runner.device = torch.device("cpu")
+        saver = RotaryEembMemSaver(vllm_config, lambda: model_runner)
 
-        self.assertTrue(worker._sleep_acl_graph_invalidated)
+        with (
+            patch("vllm_ascend.ops.rotary_embedding.clear_global_cos_sin_runtime_cache", return_value=True) as mock_clear,
+            patch("vllm_ascend.ops.rotary_embedding.rebuild_global_cos_sin_cache_for_wakeup") as mock_rebuild,
+            patch("vllm_ascend.ops.rotary_embedding.set_cos_and_sin") as mock_set_cos_sin,
+        ):
+            saver.sleep()
+            saver.wakeup()
 
-    def test_restore_acl_graphs_after_sleep_recaptures_model(self):
-        worker = self._make_worker_for_sleep_helpers()
-        worker._sleep_acl_graph_invalidated = True
-        worker.model_runner = MagicMock()
-
-        with patch("vllm_ascend.worker.worker.set_current_vllm_config") as mock_set_config:
-            worker._restore_acl_graphs_after_sleep(tags=None)
-
-        mock_set_config.assert_called_once_with(worker.vllm_config)
-        worker.model_runner.capture_model.assert_called_once()
-        self.assertFalse(worker._sleep_acl_graph_invalidated)
+        mock_clear.assert_called_once_with(model_runner.model)
+        mock_rebuild.assert_called_once_with(model_runner.model, torch.float16, torch.device("cpu"))
+        mock_set_cos_sin.assert_called_once_with(vllm_config, 2, 1, torch.float16, torch.device("cpu"))
+        self.assertFalse(saver._cleared)
 
     def test_initialize_from_config_without_sleep_mode(self):
         """Test initialize_from_config method - without sleep mode enabled"""

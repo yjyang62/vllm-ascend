@@ -15,7 +15,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
@@ -366,6 +366,49 @@ def reset_graph_params_for_sleep() -> None:
     for wrapper in list(_acl_graph_wrappers):
         wrapper.concrete_aclgraph_entries.clear()
         wrapper.first_run_finished = False
+
+
+class AclGraphMemSaver:
+    def __init__(self, vllm_config: VllmConfig, model_runner_getter: Callable[[], Any]):
+        self.vllm_config = vllm_config
+        self._model_runner_getter = model_runner_getter
+        self._invalidated = False
+
+    def sleep(self) -> None:
+        clear_attention_workspaces_for_sleep()
+        model_runner = self._model_runner_getter()
+        if model_runner is None or not getattr(model_runner, "use_aclgraph", False):
+            return
+        reset_graph_params_for_sleep()
+        self._reset_model_runner_graph_manager(model_runner)
+        self._invalidated = True
+
+    def wakeup(self, tags: list[str] | None = None) -> None:
+        if not self._invalidated:
+            return
+        if tags is not None and "kv_cache" not in tags:
+            # Level-2 wakeup restores weights before external weight loading;
+            # recapture graphs only after KV cache is restored.
+            return
+        model_runner = self._model_runner_getter()
+        if model_runner is None:
+            return
+        capture_model = model_runner.capture_model
+        with set_current_vllm_config(self.vllm_config):
+            capture_model()
+        self._invalidated = False
+
+    @staticmethod
+    def _reset_model_runner_graph_manager(model_runner: Any) -> None:
+        manager = getattr(model_runner, "cudagraph_manager", None)
+        if manager is None:
+            return
+        if hasattr(manager, "graphs"):
+            manager.graphs.clear()
+        if hasattr(manager, "_graphs_captured"):
+            manager._graphs_captured = False
+        if hasattr(manager, "pool"):
+            manager.pool = current_platform.get_global_graph_pool()
 
 
 _draft_graph_prefill_params: GraphParams | None = None
