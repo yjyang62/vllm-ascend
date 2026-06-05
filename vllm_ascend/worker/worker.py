@@ -213,22 +213,9 @@ class NPUWorker(WorkerBase):
         global_cos_sin_cache_freed_bytes = 0
         hccl_freed_bytes = 0
         if self._sleep_memory_cleanup_enabled():
-
-            @self._measure_sleep_cleanup_memory
-            def cleanup_attention_workspace() -> None:
-                self.acl_graph_mem_saver.sleep()
-
-            @self._measure_sleep_cleanup_memory
-            def cleanup_global_cos_sin_cache() -> None:
-                self.rotary_eemb_mem_saver.sleep()
-
-            @self._measure_sleep_cleanup_memory
-            def cleanup_hccl_group() -> None:
-                self.hccl_group_mem_saver.sleep()
-
-            attention_workspace_freed_bytes = cleanup_attention_workspace()
-            global_cos_sin_cache_freed_bytes = cleanup_global_cos_sin_cache()
-            hccl_freed_bytes = cleanup_hccl_group()
+            attention_workspace_freed_bytes = self._cleanup_attention_workspace_for_sleep()
+            global_cos_sin_cache_freed_bytes = self._cleanup_global_cos_sin_cache_for_sleep()
+            hccl_freed_bytes = self._cleanup_hccl_group_for_sleep()
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
@@ -296,7 +283,8 @@ class NPUWorker(WorkerBase):
     def _sleep_memory_cleanup_enabled(self) -> bool:
         return getattr(get_ascend_config(), "enable_sleep_mode_memory_cleanup", True)
 
-    def _measure_sleep_cleanup_memory(self, cleanup):
+    @staticmethod
+    def _measure_sleep_cleanup_memory(cleanup):
         @wraps(cleanup)
         def wrapper(*args, **kwargs) -> int:
             free_bytes_before_cleanup = torch.npu.mem_get_info()[0]
@@ -308,6 +296,18 @@ class NPUWorker(WorkerBase):
             return max(free_bytes, 0)
 
         return wrapper
+
+    @_measure_sleep_cleanup_memory
+    def _cleanup_attention_workspace_for_sleep(self) -> None:
+        self.acl_graph_mem_saver.sleep()
+
+    @_measure_sleep_cleanup_memory
+    def _cleanup_global_cos_sin_cache_for_sleep(self) -> None:
+        self.rotary_eemb_mem_saver.sleep()
+
+    @_measure_sleep_cleanup_memory
+    def _cleanup_hccl_group_for_sleep(self) -> None:
+        self.hccl_group_mem_saver.sleep()
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
