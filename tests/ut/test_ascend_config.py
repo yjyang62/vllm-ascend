@@ -42,7 +42,7 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
-        self.assertTrue(ascend_config.sleep_mode_config.enable_sleep_mode_memory_cleanup)
+        self.assertTrue(ascend_config.enable_sleep_mode_memory_cleanup)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -65,7 +65,7 @@ class TestAscendConfig(TestBase):
             "eplb_config": {"num_redundant_experts": 2},
             "refresh": True,
             "enable_kv_nz": False,
-            "sleep_mode_config": {"enable_sleep_mode_memory_cleanup": False},
+            "enable_sleep_mode_memory_cleanup": False,
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
@@ -74,25 +74,12 @@ class TestAscendConfig(TestBase):
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertFalse(ascend_compilation_config.fuse_norm_quant)
         self.assertFalse(ascend_config.enable_kv_nz)
-        self.assertFalse(ascend_config.sleep_mode_config.enable_sleep_mode_memory_cleanup)
+        self.assertFalse(ascend_config.enable_sleep_mode_memory_cleanup)
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
         self.assertFalse(ascend_compilation_config.enable_static_kernel)
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
-    def test_sleep_mode_config_accepts_legacy_cleanup_key(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {
-            "refresh": True,
-            "enable_sleep_mode_memory_cleanup": False,
-        }
-
-        ascend_config = init_ascend_config(test_vllm_config)
-
-        self.assertFalse(ascend_config.sleep_mode_config.enable_sleep_mode_memory_cleanup)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")

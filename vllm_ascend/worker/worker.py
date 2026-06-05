@@ -294,7 +294,7 @@ class NPUWorker(WorkerBase):
             self.acl_graph_mem_saver.wakeup(tags)
 
     def _sleep_memory_cleanup_enabled(self) -> bool:
-        return get_ascend_config().sleep_mode_config.enable_sleep_mode_memory_cleanup
+        return getattr(get_ascend_config(), "enable_sleep_mode_memory_cleanup", True)
 
     def _measure_sleep_cleanup_memory(self, cleanup):
         @wraps(cleanup)
