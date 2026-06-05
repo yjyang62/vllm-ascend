@@ -101,7 +101,13 @@ class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
 class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.refresh_hccl_group_for_sleep_wakeup()
+        device_group = get_mc2_group().device_group
+        # TODO: Try local_rank = ep_group.rank_in_group
+        local_rank = torch.distributed.get_rank(group=device_group)
+        backend = device_group._get_backend(torch.device("npu"))
+        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+        self.ep_rank_id = get_mc2_group().rank_in_group
+        self.ep_world_size = get_mc2_group().world_size
         self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = get_ascend_device_type() in [AscendDeviceType.A3, AscendDeviceType.A5]
         self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
@@ -145,7 +151,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
     def refresh_hccl_group_for_sleep_wakeup(self) -> None:
         """Refresh MC2 communicator metadata after HCCL groups are recreated."""
         device_group = get_mc2_group().device_group
-        # TODO: Try local_rank = ep_group.rank_in_group
         local_rank = torch.distributed.get_rank(group=device_group)
         backend = device_group._get_backend(torch.device("npu"))
         self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
