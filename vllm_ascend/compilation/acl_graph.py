@@ -330,19 +330,42 @@ def get_draft_graph_params():
 
 
 def _clear_attention_workspaces_for_sleep(params: GraphParams | None) -> None:
-    AclGraphMemSaver.clear_attention_workspaces_for_sleep(params)
+    if params is None:
+        return
+    for num_tokens in params.workspaces:
+        params.workspaces[num_tokens] = None
 
 
 def clear_attention_workspaces_for_sleep() -> None:
-    AclGraphMemSaver.clear_all_attention_workspaces_for_sleep()
+    _clear_attention_workspaces_for_sleep(_graph_params)
+    _clear_attention_workspaces_for_sleep(_draft_graph_params)
+    _clear_attention_workspaces_for_sleep(_draft_graph_prefill_params)
 
 
 def _reset_graph_params(params: GraphParams | None) -> None:
-    AclGraphMemSaver.reset_graph_params(params)
+    if params is None:
+        return
+    for num_tokens in params.events:
+        params.events[num_tokens] = []
+    for num_tokens in params.handles:
+        params.handles[num_tokens] = []
+    for num_tokens in params.attn_params:
+        params.attn_params[num_tokens] = []
+    for num_tokens in params.conv1d_params:
+        params.conv1d_params[num_tokens] = []
+    for num_tokens in params.conv1d_handles:
+        params.conv1d_handles[num_tokens] = []
+    for num_tokens in params.conv1d_events:
+        params.conv1d_events[num_tokens] = []
 
 
 def reset_graph_params_for_sleep() -> None:
-    AclGraphMemSaver.reset_all_graph_params_for_sleep()
+    _reset_graph_params(_graph_params)
+    _reset_graph_params(_draft_graph_params)
+    _reset_graph_params(_draft_graph_prefill_params)
+    for wrapper in list(_acl_graph_wrappers):
+        wrapper.concrete_aclgraph_entries.clear()
+        wrapper.first_run_finished = False
 
 
 class AclGraphMemSaver:
@@ -351,51 +374,12 @@ class AclGraphMemSaver:
         self._model_runner_getter = model_runner_getter
         self._invalidated = False
 
-    @staticmethod
-    def clear_attention_workspaces_for_sleep(params: GraphParams | None) -> None:
-        if params is None:
-            return
-        for num_tokens in params.workspaces:
-            params.workspaces[num_tokens] = None
-
-    @classmethod
-    def clear_all_attention_workspaces_for_sleep(cls) -> None:
-        cls.clear_attention_workspaces_for_sleep(_graph_params)
-        cls.clear_attention_workspaces_for_sleep(_draft_graph_params)
-        cls.clear_attention_workspaces_for_sleep(_draft_graph_prefill_params)
-
-    @staticmethod
-    def reset_graph_params(params: GraphParams | None) -> None:
-        if params is None:
-            return
-        for num_tokens in params.events:
-            params.events[num_tokens] = []
-        for num_tokens in params.handles:
-            params.handles[num_tokens] = []
-        for num_tokens in params.attn_params:
-            params.attn_params[num_tokens] = []
-        for num_tokens in params.conv1d_params:
-            params.conv1d_params[num_tokens] = []
-        for num_tokens in params.conv1d_handles:
-            params.conv1d_handles[num_tokens] = []
-        for num_tokens in params.conv1d_events:
-            params.conv1d_events[num_tokens] = []
-
-    @classmethod
-    def reset_all_graph_params_for_sleep(cls) -> None:
-        cls.reset_graph_params(_graph_params)
-        cls.reset_graph_params(_draft_graph_params)
-        cls.reset_graph_params(_draft_graph_prefill_params)
-        for wrapper in list(_acl_graph_wrappers):
-            wrapper.concrete_aclgraph_entries.clear()
-            wrapper.first_run_finished = False
-
     def sleep(self) -> None:
-        self.clear_all_attention_workspaces_for_sleep()
+        clear_attention_workspaces_for_sleep()
         model_runner = self._model_runner_getter()
         if model_runner is None or not getattr(model_runner, "use_aclgraph", False):
             return
-        self.reset_all_graph_params_for_sleep()
+        reset_graph_params_for_sleep()
         self._reset_model_runner_graph_manager(model_runner)
         self._invalidated = True
 

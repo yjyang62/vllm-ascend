@@ -293,15 +293,31 @@ _patch_destroy_distributed_environment()
 
 
 def _iter_alive_group_coordinators():
-    yield from HcclGroupMemSaver.iter_alive_group_coordinators()
+    seen: set[int] = set()
+    for group_ref in list(_groups.values()):
+        group = group_ref()
+        if group is None or id(group) in seen:
+            continue
+        seen.add(id(group))
+        yield group
 
 
 def destroy_hccl_for_sleep() -> int:
-    return HcclGroupMemSaver.destroy_hccl_for_sleep()
+    num_destroyed = 0
+    for group in _iter_alive_group_coordinators():
+        destroy = group.destroy_hccl_for_sleep
+        if destroy is not None and destroy():
+            num_destroyed += 1
+    return num_destroyed
 
 
 def restore_hccl_after_sleep() -> int:
-    return HcclGroupMemSaver.restore_hccl_after_sleep()
+    num_restored = 0
+    for group in _iter_alive_group_coordinators():
+        restore = group.restore_hccl_after_sleep
+        if restore is not None and restore():
+            num_restored += 1
+    return num_restored
 
 
 class HcclGroupMemSaver:
@@ -310,41 +326,13 @@ class HcclGroupMemSaver:
         self.worker = worker
         self._destroyed = False
 
-    @staticmethod
-    def iter_alive_group_coordinators():
-        seen: set[int] = set()
-        for group_ref in list(_groups.values()):
-            group = group_ref()
-            if group is None or id(group) in seen:
-                continue
-            seen.add(id(group))
-            yield group
-
-    @classmethod
-    def destroy_hccl_for_sleep(cls) -> int:
-        num_destroyed = 0
-        for group in cls.iter_alive_group_coordinators():
-            destroy = group.destroy_hccl_for_sleep
-            if destroy is not None and destroy():
-                num_destroyed += 1
-        return num_destroyed
-
-    @classmethod
-    def restore_hccl_after_sleep(cls) -> int:
-        num_restored = 0
-        for group in cls.iter_alive_group_coordinators():
-            restore = group.restore_hccl_after_sleep
-            if restore is not None and restore():
-                num_restored += 1
-        return num_restored
-
     def sleep(self) -> None:
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             for handle in getattr(self.worker, "_pp_send_work", []):
                 handle.wait()
             self.worker._pp_send_work = []
             torch.npu.synchronize()
-            num_destroyed = self.destroy_hccl_for_sleep()
+            num_destroyed = destroy_hccl_for_sleep()
             self._destroyed = num_destroyed > 0
             if self._destroyed:
                 logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)
@@ -353,7 +341,7 @@ class HcclGroupMemSaver:
         if not self._destroyed:
             return
         with set_current_vllm_config(self.vllm_config):
-            num_restored = self.restore_hccl_after_sleep()
+            num_restored = restore_hccl_after_sleep()
             from vllm_ascend.ops.fused_moe.moe_comm_method import refresh_moe_comm_method_after_hccl_restore
 
             refresh_moe_comm_method_after_hccl_restore()

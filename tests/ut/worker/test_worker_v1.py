@@ -1147,10 +1147,8 @@ class TestNPUWorker(TestBase):
 
         saver = AclGraphMemSaver(MagicMock(), lambda: None)
         with (
-            patch(
-                "vllm_ascend.compilation.acl_graph.AclGraphMemSaver.clear_all_attention_workspaces_for_sleep"
-            ) as mock_clear,
-            patch("vllm_ascend.compilation.acl_graph.AclGraphMemSaver.reset_all_graph_params_for_sleep") as mock_reset,
+            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep") as mock_clear,
+            patch("vllm_ascend.compilation.acl_graph.reset_graph_params_for_sleep") as mock_reset,
         ):
             saver.sleep()
 
@@ -1167,10 +1165,8 @@ class TestNPUWorker(TestBase):
         saver = AclGraphMemSaver(MagicMock(), lambda: model_runner)
 
         with (
-            patch(
-                "vllm_ascend.compilation.acl_graph.AclGraphMemSaver.clear_all_attention_workspaces_for_sleep"
-            ) as mock_clear,
-            patch("vllm_ascend.compilation.acl_graph.AclGraphMemSaver.reset_all_graph_params_for_sleep") as mock_reset,
+            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep") as mock_clear,
+            patch("vllm_ascend.compilation.acl_graph.reset_graph_params_for_sleep") as mock_reset,
             patch("vllm_ascend.compilation.acl_graph.current_platform") as mock_platform,
         ):
             saver.sleep()
@@ -1223,10 +1219,7 @@ class TestNPUWorker(TestBase):
             patch("vllm_ascend.patch.worker.patch_distributed.torch.distributed.is_available", return_value=True),
             patch("vllm_ascend.patch.worker.patch_distributed.torch.distributed.is_initialized", return_value=True),
             patch("vllm_ascend.patch.worker.patch_distributed.torch.npu.synchronize") as mock_synchronize,
-            patch(
-                "vllm_ascend.patch.worker.patch_distributed.HcclGroupMemSaver.destroy_hccl_for_sleep",
-                return_value=2,
-            ) as mock_destroy,
+            patch("vllm_ascend.patch.worker.patch_distributed.destroy_hccl_for_sleep", return_value=2) as mock_destroy,
         ):
             saver.sleep()
 
@@ -1268,13 +1261,11 @@ class TestNPUWorker(TestBase):
 
         with (
             patch(
-                "vllm_ascend.ops.rotary_embedding.RotaryEembMemSaver.clear_global_cos_sin_runtime_cache",
+                "vllm_ascend.ops.rotary_embedding.clear_global_cos_sin_runtime_cache",
                 return_value=True,
             ) as mock_clear,
-            patch(
-                "vllm_ascend.ops.rotary_embedding.RotaryEembMemSaver.rebuild_global_cos_sin_cache_for_wakeup"
-            ) as mock_rebuild,
-            patch("vllm_ascend.ops.rotary_embedding.RotaryEembMemSaver.set_cos_and_sin") as mock_set_cos_sin,
+            patch("vllm_ascend.ops.rotary_embedding.rebuild_global_cos_sin_cache_for_wakeup") as mock_rebuild,
+            patch("vllm_ascend.ops.rotary_embedding.set_cos_and_sin") as mock_set_cos_sin,
         ):
             saver.sleep()
             saver.wakeup()
