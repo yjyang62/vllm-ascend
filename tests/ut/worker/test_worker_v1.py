@@ -1147,8 +1147,10 @@ class TestNPUWorker(TestBase):
 
         saver = AclGraphMemSaver(MagicMock(), lambda: None)
         with (
-            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep") as mock_clear,
-            patch("vllm_ascend.compilation.acl_graph.reset_graph_params_for_sleep") as mock_reset,
+            patch(
+                "vllm_ascend.compilation.acl_graph.AclGraphMemSaver.clear_all_attention_workspaces_for_sleep"
+            ) as mock_clear,
+            patch("vllm_ascend.compilation.acl_graph.AclGraphMemSaver.reset_all_graph_params_for_sleep") as mock_reset,
         ):
             saver.sleep()
 
@@ -1165,8 +1167,10 @@ class TestNPUWorker(TestBase):
         saver = AclGraphMemSaver(MagicMock(), lambda: model_runner)
 
         with (
-            patch("vllm_ascend.compilation.acl_graph.clear_attention_workspaces_for_sleep") as mock_clear,
-            patch("vllm_ascend.compilation.acl_graph.reset_graph_params_for_sleep") as mock_reset,
+            patch(
+                "vllm_ascend.compilation.acl_graph.AclGraphMemSaver.clear_all_attention_workspaces_for_sleep"
+            ) as mock_clear,
+            patch("vllm_ascend.compilation.acl_graph.AclGraphMemSaver.reset_all_graph_params_for_sleep") as mock_reset,
             patch("vllm_ascend.compilation.acl_graph.current_platform") as mock_platform,
         ):
             saver.sleep()
