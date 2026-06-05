@@ -1259,7 +1259,7 @@ class TestNPUWorker(TestBase):
             patch("vllm_ascend.patch.worker.patch_distributed.torch.distributed.is_initialized", return_value=True),
             patch("vllm_ascend.patch.worker.patch_distributed.torch.npu.synchronize") as mock_synchronize,
             patch(
-                "vllm_ascend.patch.worker.patch_distributed.HcclGroupMemSaver.destroy_hccl_for_sleep",
+                "vllm_ascend.patch.worker.patch_distributed.HcclGroupMemSaver.destroy_hccl",
                 return_value=2,
             ) as mock_destroy,
         ):
@@ -1279,7 +1279,7 @@ class TestNPUWorker(TestBase):
         with (
             patch("vllm_ascend.patch.worker.patch_distributed.set_current_vllm_config"),
             patch(
-                "vllm_ascend.patch.worker.patch_distributed.HcclGroupMemSaver.restore_hccl_after_sleep",
+                "vllm_ascend.patch.worker.patch_distributed.HcclGroupMemSaver.restore_hccl",
                 return_value=1,
             ) as mock_restore,
             patch("vllm_ascend.ops.fused_moe.moe_comm_method.refresh_moe_comm_method_after_hccl_restore"),
