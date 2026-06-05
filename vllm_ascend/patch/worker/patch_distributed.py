@@ -297,14 +297,18 @@ def _iter_alive_group_coordinators():
 
 
 def destroy_hccl_for_sleep() -> int:
+    """Destroy sleep-mode HCCL resources for all live group coordinators."""
     return HcclGroupMemSaver.destroy_hccl_for_sleep()
 
 
 def restore_hccl_after_sleep() -> int:
+    """Restore sleep-mode HCCL resources for all live group coordinators."""
     return HcclGroupMemSaver.restore_hccl_after_sleep()
 
 
 class HcclGroupMemSaver:
+    """Manage HCCL process groups and communicators across sleep/wakeup."""
+
     def __init__(self, vllm_config: Any, worker: Any):
         self.vllm_config = vllm_config
         self.worker = worker
@@ -312,6 +316,7 @@ class HcclGroupMemSaver:
 
     @staticmethod
     def iter_alive_group_coordinators():
+        """Yield unique live group coordinators tracked by vLLM."""
         seen: set[int] = set()
         for group_ref in list(_groups.values()):
             group = group_ref()
@@ -322,6 +327,7 @@ class HcclGroupMemSaver:
 
     @classmethod
     def destroy_hccl_for_sleep(cls) -> int:
+        """Destroy HCCL resources for every live group coordinator."""
         num_destroyed = 0
         for group in cls.iter_alive_group_coordinators():
             destroy = group.destroy_hccl_for_sleep
@@ -331,6 +337,7 @@ class HcclGroupMemSaver:
 
     @classmethod
     def restore_hccl_after_sleep(cls) -> int:
+        """Restore HCCL resources for every live group coordinator."""
         num_restored = 0
         for group in cls.iter_alive_group_coordinators():
             restore = group.restore_hccl_after_sleep
@@ -339,6 +346,7 @@ class HcclGroupMemSaver:
         return num_restored
 
     def sleep(self) -> None:
+        """Wait for pending pipeline sends and destroy HCCL resources."""
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             for handle in getattr(self.worker, "_pp_send_work", []):
                 handle.wait()
@@ -350,6 +358,7 @@ class HcclGroupMemSaver:
                 logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)
 
     def wakeup(self) -> None:
+        """Restore HCCL resources once after a sleep-time destroy."""
         if not self._destroyed:
             return
         with set_current_vllm_config(self.vllm_config):

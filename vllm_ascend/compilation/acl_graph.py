@@ -334,6 +334,7 @@ def _clear_attention_workspaces_for_sleep(params: GraphParams | None) -> None:
 
 
 def clear_attention_workspaces_for_sleep() -> None:
+    """Clear all attention workspaces held by graph parameter caches."""
     AclGraphMemSaver.clear_all_attention_workspaces_for_sleep()
 
 
@@ -342,10 +343,13 @@ def _reset_graph_params(params: GraphParams | None) -> None:
 
 
 def reset_graph_params_for_sleep() -> None:
+    """Reset ACL graph runtime parameters invalidated by sleep mode."""
     AclGraphMemSaver.reset_all_graph_params_for_sleep()
 
 
 class AclGraphMemSaver:
+    """Manage ACL graph and attention workspace memory across sleep/wakeup."""
+
     def __init__(self, vllm_config: VllmConfig, model_runner_getter: Callable[[], Any]):
         self.vllm_config = vllm_config
         self._model_runner_getter = model_runner_getter
@@ -353,6 +357,7 @@ class AclGraphMemSaver:
 
     @staticmethod
     def clear_attention_workspaces_for_sleep(params: GraphParams | None) -> None:
+        """Clear attention workspaces for one graph-parameter container."""
         if params is None:
             return
         for num_tokens in params.workspaces:
@@ -360,12 +365,14 @@ class AclGraphMemSaver:
 
     @classmethod
     def clear_all_attention_workspaces_for_sleep(cls) -> None:
+        """Clear attention workspaces for all registered graph parameter caches."""
         cls.clear_attention_workspaces_for_sleep(_graph_params)
         cls.clear_attention_workspaces_for_sleep(_draft_graph_params)
         cls.clear_attention_workspaces_for_sleep(_draft_graph_prefill_params)
 
     @staticmethod
     def reset_graph_params(params: GraphParams | None) -> None:
+        """Reset event, handle, and attention parameter lists for one cache."""
         if params is None:
             return
         for num_tokens in params.events:
@@ -383,6 +390,7 @@ class AclGraphMemSaver:
 
     @classmethod
     def reset_all_graph_params_for_sleep(cls) -> None:
+        """Reset all graph parameter caches and captured ACL graph wrappers."""
         cls.reset_graph_params(_graph_params)
         cls.reset_graph_params(_draft_graph_params)
         cls.reset_graph_params(_draft_graph_prefill_params)
@@ -391,6 +399,7 @@ class AclGraphMemSaver:
             wrapper.first_run_finished = False
 
     def sleep(self) -> None:
+        """Release attention workspaces and invalidate captured ACL graphs."""
         self.clear_all_attention_workspaces_for_sleep()
         model_runner = self._model_runner_getter()
         if model_runner is None or not getattr(model_runner, "use_aclgraph", False):
@@ -400,6 +409,7 @@ class AclGraphMemSaver:
         self._invalidated = True
 
     def wakeup(self, tags: list[str] | None = None) -> None:
+        """Recapture ACL graphs once KV cache is restored after sleep."""
         if not self._invalidated:
             return
         if tags is not None and "kv_cache" not in tags:

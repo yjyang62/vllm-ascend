@@ -63,10 +63,12 @@ _sin_slice: torch.Tensor = None
 
 
 def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> bool:
+    """Clear global and module-level rotary cos/sin runtime caches."""
     return RotaryEembMemSaver.clear_global_cos_sin_runtime_cache(model)
 
 
 def restore_global_cos_sin_cache_from_model(model: torch.nn.Module | None = None):
+    """Record rebuilt module-level rotary caches back into globals."""
     return RotaryEembMemSaver.restore_global_cos_sin_cache_from_model(model)
 
 
@@ -75,6 +77,7 @@ def _rebuild_rotary_module_cache(module: torch.nn.Module, dtype: torch.dtype, de
 
 
 def rebuild_global_cos_sin_cache_for_wakeup(model: torch.nn.Module | None, dtype: torch.dtype, device: torch.device):
+    """Rebuild rotary cos/sin caches after sleep-mode cleanup."""
     RotaryEembMemSaver.rebuild_global_cos_sin_cache_for_wakeup(model, dtype, device)
 
 
@@ -106,6 +109,8 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
 
 
 class RotaryEembMemSaver:
+    """Manage rotary embedding cos/sin runtime caches across sleep/wakeup."""
+
     def __init__(self, vllm_config: Any, model_runner_getter: Callable[[], Any]):
         self.vllm_config = vllm_config
         self._model_runner_getter = model_runner_getter
@@ -113,6 +118,7 @@ class RotaryEembMemSaver:
 
     @staticmethod
     def clear_global_cos_sin_runtime_cache(model: torch.nn.Module | None = None) -> bool:
+        """Clear global and model-owned rotary cos/sin runtime caches."""
         global _cos_mla
         global _sin_mla
         global _cos_cache
@@ -149,6 +155,7 @@ class RotaryEembMemSaver:
 
     @staticmethod
     def restore_global_cos_sin_cache_from_model(model: torch.nn.Module | None = None):
+        """Restore global rotary cache references from model modules."""
         if model is None:
             return False
 
@@ -191,6 +198,7 @@ class RotaryEembMemSaver:
     def rebuild_global_cos_sin_cache_for_wakeup(
         cls, model: torch.nn.Module | None, dtype: torch.dtype, device: torch.device
     ) -> None:
+        """Rebuild model rotary caches and restore global cache references."""
         if model is None:
             return
         for module in model.modules():
@@ -198,6 +206,7 @@ class RotaryEembMemSaver:
         cls.restore_global_cos_sin_cache_from_model(model)
 
     def sleep(self) -> None:
+        """Clear rotary cos/sin caches for sleep mode."""
         model_runner = self._model_runner_getter()
         if model_runner is None:
             return
@@ -207,6 +216,7 @@ class RotaryEembMemSaver:
         self._cleared = self.clear_global_cos_sin_runtime_cache(model)
 
     def wakeup(self) -> None:
+        """Rebuild rotary cos/sin caches once after sleep mode."""
         if not self._cleared:
             return
         model_runner = self._model_runner_getter()
