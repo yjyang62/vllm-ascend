@@ -1219,7 +1219,10 @@ class TestNPUWorker(TestBase):
             patch("vllm_ascend.patch.worker.patch_distributed.torch.distributed.is_available", return_value=True),
             patch("vllm_ascend.patch.worker.patch_distributed.torch.distributed.is_initialized", return_value=True),
             patch("vllm_ascend.patch.worker.patch_distributed.torch.npu.synchronize") as mock_synchronize,
-            patch("vllm_ascend.patch.worker.patch_distributed.destroy_hccl_for_sleep", return_value=2) as mock_destroy,
+            patch(
+                "vllm_ascend.patch.worker.patch_distributed.HcclGroupMemSaver.destroy_hccl_for_sleep",
+                return_value=2,
+            ) as mock_destroy,
         ):
             saver.sleep()
 
