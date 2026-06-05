@@ -29,12 +29,11 @@ from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetad
 from vllm_ascend.compilation import acl_graph
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphEntry,
+    ACLGraphMemSaver,
     ACLGraphWrapper,
     GraphParams,
-    clear_attention_workspaces_for_sleep,
     get_draft_graph_params,
     get_graph_params,
-    reset_graph_params_for_sleep,
     set_draft_graph_params,
     set_graph_params,
     update_draft_graph_params_workspaces,
@@ -783,7 +782,7 @@ class TestSleepGraphParams(TestBase):
             patch("vllm_ascend.compilation.acl_graph._draft_graph_params", None),
             patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params", None),
         ):
-            clear_attention_workspaces_for_sleep()
+            ACLGraphMemSaver.clear_all_attention_workspaces_for_sleep()
 
         self.assertEqual(set(graph_params.workspaces), {4, 8})
         self.assertIsNone(graph_params.workspaces[4])
@@ -794,13 +793,23 @@ class TestSleepGraphParams(TestBase):
         wrapper.concrete_aclgraph_entries = {"entry": object()}
         wrapper.first_run_finished = True
 
+        empty_params = GraphParams(
+            events={},
+            workspaces={},
+            handles={},
+            attn_params={},
+            conv1d_params={},
+            conv1d_handles={},
+            conv1d_events={},
+        )
+
         with (
-            patch("vllm_ascend.compilation.acl_graph._graph_params", None),
-            patch("vllm_ascend.compilation.acl_graph._draft_graph_params", None),
-            patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params", None),
+            patch("vllm_ascend.compilation.acl_graph._graph_params", empty_params),
+            patch("vllm_ascend.compilation.acl_graph._draft_graph_params", empty_params),
+            patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params", empty_params),
             patch("vllm_ascend.compilation.acl_graph._acl_graph_wrappers", [wrapper]),
         ):
-            reset_graph_params_for_sleep()
+            ACLGraphMemSaver.reset_all_graph_params_for_sleep()
 
         self.assertEqual(wrapper.concrete_aclgraph_entries, {})
         self.assertFalse(wrapper.first_run_finished)

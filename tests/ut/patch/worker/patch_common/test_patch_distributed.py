@@ -574,7 +574,7 @@ def test_hccl_sleep_destroy_and_restore_shared_group(module_env):
 
     assert len(_calls_with_backend(module_env, "hccl")) == 1
 
-    assert group.destroy_hccl_for_sleep() is True
+    assert group.destroy_hccl() is True
 
     original_communicator.destroy.assert_called_once()
     assert group.device_communicator is None
@@ -582,10 +582,10 @@ def test_hccl_sleep_destroy_and_restore_shared_group(module_env):
     assert group._acquired_hccl_keys == []
     assert module_env.destroy_process_group.call_args_list == [call(original_device_group)]
 
-    assert group.destroy_hccl_for_sleep() is False
+    assert group.destroy_hccl() is False
     assert module_env.destroy_process_group.call_args_list == [call(original_device_group)]
 
-    assert group.restore_hccl_after_sleep() is True
+    assert group.restore_hccl() is True
 
     assert len(_calls_with_backend(module_env, "hccl")) == 2
     assert group.device_group is not None
@@ -594,7 +594,7 @@ def test_hccl_sleep_destroy_and_restore_shared_group(module_env):
     assert group.device_communicator is not original_communicator
     assert group.device == "npu:0"
 
-    assert group.restore_hccl_after_sleep() is False
+    assert group.restore_hccl() is False
 
 
 def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):

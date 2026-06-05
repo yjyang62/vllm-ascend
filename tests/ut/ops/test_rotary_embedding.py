@@ -22,7 +22,7 @@ import torch
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
 
 from vllm_ascend.ops import rotary_embedding
-from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, AscendYaRNRotaryEmbedding
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, AscendYaRNRotaryEmbedding, RotaryEembMemSaver
 
 HEAD_SIZE = 64
 ROTARY_DIM = 64
@@ -75,7 +75,7 @@ class TestRotarySleepCache:
             patch("vllm_ascend.ops.rotary_embedding._cos_slice", None),
             patch("vllm_ascend.ops.rotary_embedding._sin_slice", None),
         ):
-            cleared = rotary_embedding.clear_global_cos_sin_runtime_cache(model)
+            cleared = RotaryEembMemSaver.clear_global_cos_sin_runtime_cache(model)
 
         assert cleared is False
 
@@ -91,7 +91,7 @@ class TestRotarySleepCache:
             patch("vllm_ascend.ops.rotary_embedding._cos_slice", None),
             patch("vllm_ascend.ops.rotary_embedding._sin_slice", None),
         ):
-            cleared = rotary_embedding.clear_global_cos_sin_runtime_cache()
+            cleared = RotaryEembMemSaver.clear_global_cos_sin_runtime_cache()
             assert rotary_embedding._cos_mla is None
 
         assert cleared is True
