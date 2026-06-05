@@ -51,6 +51,12 @@ class AscendConfig:
         weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
 
+        sleep_mode_config = additional_config.get("sleep_mode_config", {})
+        self.sleep_mode_config = SleepModeConfig(
+            sleep_mode_config,
+            additional_config.get("enable_sleep_mode_memory_cleanup"),
+        )
+
         profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
         self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
         if self.profiling_chunk_config.enabled:
@@ -133,7 +139,6 @@ class AscendConfig:
         # PD-disaggregated only (kv_producer/kv_consumer); invalid in PD-mixed (kv_both / no kv_transfer_config).
         self.recompute_scheduler_enable = additional_config.get("recompute_scheduler_enable", False)
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
-        self.enable_sleep_mode_memory_cleanup = additional_config.get("enable_sleep_mode_memory_cleanup", True)
         self.multistream_dsa_preprocess = additional_config.get("multistream_dsa_preprocess", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", False)
         self.prefill_comm_compute_overlap = additional_config.get("prefill_comm_compute_overlap", False)
@@ -563,6 +568,23 @@ class XliteGraphConfig:
                     "The recommended block size for xlite graph mode is 128.",
                     vllm_config.cache_config.block_size,
                 )
+
+
+class SleepModeConfig:
+    """Configuration for Ascend sleep-mode cleanup behavior.
+
+    The sleep level itself is a runtime sleep/wakeup API argument in vLLM.
+    This additional_config section stores Ascend-specific behavior used by
+    that sleep path.
+    """
+
+    def __init__(self, config: dict | None = None, legacy_enable_memory_cleanup: bool | None = None):
+        if config is None:
+            config = {}
+        self.enable_sleep_mode_memory_cleanup = config.get(
+            "enable_sleep_mode_memory_cleanup",
+            True if legacy_enable_memory_cleanup is None else legacy_enable_memory_cleanup,
+        )
 
 
 class WeightPrefetchConfig:
