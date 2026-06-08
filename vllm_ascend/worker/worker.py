@@ -216,15 +216,15 @@ class NPUWorker(WorkerBase):
         return wrapper
 
     @_measure_sleep_cleanup_memory
-    def _cleanup_attention_workspace_for_sleep(self) -> int:
+    def _cleanup_attention_workspace_for_sleep(self):
         self.acl_graph_mem_saver.sleep()
 
     @_measure_sleep_cleanup_memory
-    def _cleanup_global_cos_sin_cache_for_sleep(self) -> int:
+    def _cleanup_global_cos_sin_cache_for_sleep(self):
         self.rotary_eemb_mem_saver.sleep()
 
     @_measure_sleep_cleanup_memory
-    def _cleanup_hccl_group_for_sleep(self) -> int:
+    def _cleanup_hccl_group_for_sleep(self):
         self.hccl_group_mem_saver.sleep()
 
     def sleep(self, level: int = 1) -> None:
