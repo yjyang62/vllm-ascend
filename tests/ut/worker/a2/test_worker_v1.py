@@ -1195,6 +1195,7 @@ class TestNPUWorker(TestBase):
 
     def test_acl_graph_mem_saver_sleep_resets_acl_graph_state(self):
         from vllm_ascend.compilation.acl_graph import AclGraphMemSaver
+
         model_runner = MagicMock()
         model_runner.use_aclgraph = True
         model_runner.cudagraph_manager.graphs = MagicMock()
@@ -1206,7 +1207,6 @@ class TestNPUWorker(TestBase):
             patch("vllm_ascend.compilation.acl_graph.AclGraphMemSaver.reset_all_graph_params_for_sleep") as mock_reset,
             patch("vllm_ascend.compilation.acl_graph.current_platform") as mock_platform,
         ):
-
             saver.sleep()
         mock_clear.assert_called_once()
         mock_reset.assert_called_once()
@@ -1239,10 +1239,9 @@ class TestNPUWorker(TestBase):
         mock_destroy.assert_called_once()
         self.assertTrue(saver._destroyed)
 
-
-
     def test_rotary_eemb_mem_saver_sleep_and_wakeup(self):
         from vllm_ascend.ops.rotary_embedding import RotaryEembMemSaver
+
         vllm_config = MagicMock()
         model_runner = MagicMock()
         model_runner.max_num_reqs = 2

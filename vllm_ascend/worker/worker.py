@@ -269,7 +269,7 @@ class NPUWorker(WorkerBase):
                 "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
             )
         allocator = CaMemAllocator.get_instance()
-        cleanup_enabled = self._sleep_memory_cleanup_enabled()
+        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_memory_cleanup", True)
         allocator.wake_up(tags=tags)
         if cleanup_enabled:
             self.hccl_group_mem_saver.wakeup()
@@ -304,20 +304,6 @@ class NPUWorker(WorkerBase):
             self._sleep_saved_buffers = {}
         if cleanup_enabled:
             self.acl_graph_mem_saver.wakeup(tags)
-
-    def _sleep_memory_cleanup_enabled(self) -> bool:
-        return getattr(get_ascend_config(), "enable_sleep_mode_memory_cleanup", True)
-
-    def _measure_sleep_cleanup_memory(self, cleanup):
-        @wraps(cleanup)
-        def wrapper(*args, **kwargs) -> int:
-            free_bytes_before_cleanup = torch.npu.mem_get_info()[0]
-            cleanup(*args, **kwargs)
-            free_bytes_after_cleanup = torch.npu.mem_get_info()[0]
-            free_bytes = free_bytes_after_cleanup - free_bytes_before_cleanup
-            return max(free_bytes, 0)
-
-        return wrapper
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks

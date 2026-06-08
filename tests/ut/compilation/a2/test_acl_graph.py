@@ -791,7 +791,7 @@ class TestSleepGraphParams(TestBase):
     def test_reset_graph_params_for_sleep_clears_registered_wrappers(self):
         wrapper = MagicMock()
         wrapper.concrete_aclgraph_entries = {"entry": object()}
-        wrapper.first_run_finished = True       
+        wrapper.first_run_finished = True      
         empty_params = GraphParams(
             events={},
             workspaces={},

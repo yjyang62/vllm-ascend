@@ -349,12 +349,12 @@ class AClGraphMemSaver:
         cls.clear_attention_workspaces_for_sleep(_draft_graph_params)
         cls.clear_attention_workspaces_for_sleep(_draft_graph_prefill_params)
 
-    @staticmethod
-    def reset_graph_params(params: GraphParams | None) -> None:
+    @classmethod
+    def reset_graph_params(cls, params: GraphParams | None) -> None:
         if params is None:
             logger.warning("reset_graph_params called with None params, skipping")
             return
-    
+
         attributes = [
             "events",
             "handles",
@@ -365,15 +365,13 @@ class AClGraphMemSaver:
         ]
 
         for attr_name in attributes:
-        # Use getattr with default None to avoid AttributeError
             attr_dict = getattr(params, attr_name, None)
-        
-        # Skip if attribute doesn't exist or is None
+            
             if attr_dict is None:
                 continue
+                
             for num_tokens in list(attr_dict.keys()):
                 attr_dict[num_tokens] = []
-
 
     @classmethod
     def reset_all_graph_params_for_sleep(cls) -> None:

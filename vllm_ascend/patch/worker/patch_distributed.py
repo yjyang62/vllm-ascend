@@ -347,3 +347,4 @@ class HcclGroupMemSaver:
             refresh_moe_comm_method_after_hccl_restore()
         self._destroyed = False
         logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
+
