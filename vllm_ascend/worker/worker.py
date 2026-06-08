@@ -138,9 +138,6 @@ class NPUWorker(WorkerBase):
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
-        self._sleep_hccl_destroyed = False
-        self._sleep_acl_graph_invalidated = False
-        self._sleep_cos_sin_cache_cleared = False
         self.acl_graph_mem_saver = AClGraphMemSaver(vllm_config, lambda: getattr(self, "model_runner", None))
         self.hccl_group_mem_saver = HcclGroupMemSaver(vllm_config, self)
         self.rotary_eemb_mem_saver = RotaryEembMemSaver(vllm_config, lambda: getattr(self, "model_runner", None))
@@ -213,8 +210,6 @@ class NPUWorker(WorkerBase):
         def wrapper(*args, **kwargs) -> int:
             free_bytes_before_cleanup = torch.npu.mem_get_info()[0]
             cleanup(*args, **kwargs)
-            gc.collect()
-            torch.npu.empty_cache()
             free_bytes_after_cleanup = torch.npu.mem_get_info()[0]
             return max(free_bytes_after_cleanup - free_bytes_before_cleanup, 0)
 
