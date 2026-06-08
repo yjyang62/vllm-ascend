@@ -51,7 +51,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
-from vllm_ascend.compilation.acl_graph import AclGraphMemSaver
+from vllm_ascend.compilation.acl_graph import AClGraphMemSaver
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
@@ -141,7 +141,7 @@ class NPUWorker(WorkerBase):
         self._sleep_hccl_destroyed = False
         self._sleep_acl_graph_invalidated = False
         self._sleep_cos_sin_cache_cleared = False
-        self.acl_graph_mem_saver = AclGraphMemSaver(vllm_config, lambda: getattr(self, "model_runner", None))
+        self.acl_graph_mem_saver = AClGraphMemSaver(vllm_config, lambda: getattr(self, "model_runner", None))
         self.hccl_group_mem_saver = HcclGroupMemSaver(vllm_config, self)
         self.rotary_eemb_mem_saver = RotaryEembMemSaver(vllm_config, lambda: getattr(self, "model_runner", None))
 
@@ -217,6 +217,7 @@ class NPUWorker(WorkerBase):
             torch.npu.empty_cache()
             free_bytes_after_cleanup = torch.npu.mem_get_info()[0]
             return max(free_bytes_after_cleanup - free_bytes_before_cleanup, 0)
+
         return wrapper
 
     @_measure_sleep_cleanup_memory

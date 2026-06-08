@@ -329,7 +329,7 @@ def get_draft_graph_params():
     return _draft_graph_params
 
 
-class AclGraphMemSaver:
+class AClGraphMemSaver:
     def __init__(self, vllm_config: VllmConfig, model_runner_getter: Callable[[], Any]):
         self.vllm_config = vllm_config
         self._model_runner_getter = model_runner_getter
