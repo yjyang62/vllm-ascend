@@ -366,10 +366,10 @@ class AClGraphMemSaver:
 
         for attr_name in attributes:
             attr_dict = getattr(params, attr_name, None)
-            
+
             if attr_dict is None:
                 continue
-                
+
             for num_tokens in list(attr_dict.keys()):
                 attr_dict[num_tokens] = []
 

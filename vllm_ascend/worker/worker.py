@@ -234,7 +234,8 @@ class NPUWorker(WorkerBase):
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
-        if self._sleep_memory_cleanup_enabled():
+        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_memory_cleanup", True)
+        if cleanup_enabled:
             attention_workspace_freed_bytes = self._cleanup_attention_workspace_for_sleep()
             global_cos_sin_cache_freed_bytes = self._cleanup_global_cos_sin_cache_for_sleep()
             hccl_freed_bytes = self._cleanup_hccl_group_for_sleep()
