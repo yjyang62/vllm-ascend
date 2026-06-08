@@ -177,22 +177,10 @@ class RotaryEembMemSaver:
         if getattr(module, "cos_sin_cache", None) is not None:
             return
 
-        rebuilt = False
         set_cache_fn = getattr(module, "_set_cos_sin_cache", None)
         max_seq_len = getattr(module, "max_seq_len", getattr(module, "max_position_embeddings", None))
         if callable(set_cache_fn) and max_seq_len is not None:
             set_cache_fn(max_seq_len, device=device, dtype=dtype)
-            rebuilt = getattr(module, "cos_sin_cache", None) is not None
-
-        if rebuilt:
-            return
-
-        compute_cache_fn = getattr(module, "_compute_cos_sin_cache", None)
-        if callable(compute_cache_fn):
-            cache = compute_cache_fn()
-            if not getattr(module, "use_flashinfer", False):
-                cache = cache.to(dtype)
-            module.cos_sin_cache = cache.to(device)
 
     @classmethod
     def rebuild_global_cos_sin_cache_for_wakeup(
