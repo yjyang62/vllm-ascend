@@ -96,6 +96,21 @@ class TestRotarySleepCache:
 
         assert cleared is True
 
+    def test_rebuild_rotary_module_cache_uses_compute_fallback(self):
+        module = torch.nn.Module()
+        expected_cache = torch.ones(2, 4, dtype=torch.float32)
+        module._compute_cos_sin_cache = MagicMock(return_value=expected_cache)
+
+        rotary_embedding.RotaryEembMemSaver.rebuild_rotary_module_cache(
+            module,
+            dtype=torch.float16,
+            device=torch.device("cpu"),
+        )
+
+        module._compute_cos_sin_cache.assert_called_once_with()
+        assert module.cos_sin_cache.dtype == torch.float16
+        assert module.cos_sin_cache.device == torch.device("cpu")
+
 
 @pytest.fixture(autouse=True)
 def patch_init_side_effects():
