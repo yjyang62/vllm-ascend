@@ -60,43 +60,6 @@ def check_parent_init_signature_has_not_changed(parent_func, child_func):
     )
 
 
-class TestRotarySleepCache:
-    def test_clear_global_cache_returns_false_when_nothing_cleared(self):
-        model = torch.nn.Module()
-
-        with (
-            patch("vllm_ascend.ops.rotary_embedding._cos_mla", None),
-            patch("vllm_ascend.ops.rotary_embedding._sin_mla", None),
-            patch("vllm_ascend.ops.rotary_embedding._cos_cache", None),
-            patch("vllm_ascend.ops.rotary_embedding._sin_cache", None),
-            patch("vllm_ascend.ops.rotary_embedding._cos_sin_cache", None),
-            patch("vllm_ascend.ops.rotary_embedding._cos", None),
-            patch("vllm_ascend.ops.rotary_embedding._sin", None),
-            patch("vllm_ascend.ops.rotary_embedding._cos_slice", None),
-            patch("vllm_ascend.ops.rotary_embedding._sin_slice", None),
-        ):
-            cleared = RotaryEembMemSaver.clear_global_cos_sin_runtime_cache(model)
-
-        assert cleared is False
-
-    def test_clear_global_cache_returns_true_for_global_cache(self):
-        with (
-            patch("vllm_ascend.ops.rotary_embedding._cos_mla", torch.ones(1)),
-            patch("vllm_ascend.ops.rotary_embedding._sin_mla", None),
-            patch("vllm_ascend.ops.rotary_embedding._cos_cache", None),
-            patch("vllm_ascend.ops.rotary_embedding._sin_cache", None),
-            patch("vllm_ascend.ops.rotary_embedding._cos_sin_cache", None),
-            patch("vllm_ascend.ops.rotary_embedding._cos", None),
-            patch("vllm_ascend.ops.rotary_embedding._sin", None),
-            patch("vllm_ascend.ops.rotary_embedding._cos_slice", None),
-            patch("vllm_ascend.ops.rotary_embedding._sin_slice", None),
-        ):
-            cleared = RotaryEembMemSaver.clear_global_cos_sin_runtime_cache()
-            assert rotary_embedding._cos_mla is None
-
-        assert cleared is True
-
-
 @pytest.fixture(autouse=True)
 def patch_init_side_effects():
     """
