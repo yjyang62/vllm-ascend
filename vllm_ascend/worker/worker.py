@@ -277,8 +277,6 @@ class NPUWorker(WorkerBase):
             self.rotary_eemb_mem_saver.wakeup()
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        local_hidden_size = hidden_size // tp_size if hidden_size % tp_size == 0 else hidden_size
         model = self.model_runner.model
         if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
             for name, param in list(model.named_parameters()):
