@@ -134,9 +134,9 @@ class NPUWorker(WorkerBase):
         self.torch_reserved = 0
         self.torch_allocated = 0
         self.npugraph_memory_bytes = 0
-        if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
-            # Buffers saved before sleep
-            self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        # Buffers saved before level-2 sleep. Keep this initialized even when
+        # sleep mode setup is bypassed by tests or worker construction changes.
+        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._pp_send_work: list[Handle] = []
         self.acl_graph_mem_saver = AclGraphMemSaver(vllm_config, lambda: getattr(self, "model_runner", None))
         self.hccl_group_mem_saver = HcclGroupMemSaver(vllm_config, self)
@@ -271,11 +271,12 @@ class NPUWorker(WorkerBase):
                     w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
                     setattr(parent_module, param_name, w13_data)
 
-        # Restore the buffers after level 2 sleep
-        if len(self._sleep_saved_buffers):
+        # Restore the buffers after level 2 sleep.
+        sleep_saved_buffers = getattr(self, "_sleep_saved_buffers", {})
+        if sleep_saved_buffers:
             for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
+                if name in sleep_saved_buffers:
+                    buffer.data.copy_(sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
         if cleanup_enabled:
             self.acl_graph_mem_saver.wakeup(tags)
