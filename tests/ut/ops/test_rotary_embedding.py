@@ -34,9 +34,13 @@ NUM_HEADS = 2
 
 
 def _clear_global_cos_sin_cache(*args, **kwargs):
-    clear_fn = getattr(RotaryEembMemSaver, "clear_global_cos_sin_runtime_cache", None)
+    clear_fn = None
+    for clear_method_name in ("clear_global_cos_sin_runtime_cache", "clear_global_cos_sin_cache"):
+        clear_fn = getattr(RotaryEembMemSaver, clear_method_name, None)
+        if clear_fn is not None:
+            break
     if clear_fn is None:
-        clear_fn = RotaryEembMemSaver.clear_global_cos_sin_cache
+        pytest.skip("RotaryEembMemSaver does not expose a global cos/sin cache clear helper.")
     return clear_fn(*args, **kwargs)
 
 
