@@ -174,7 +174,11 @@ class RotaryEembMemSaver:
     @staticmethod
     def rebuild_rotary_module_cache(module: torch.nn.Module, dtype: torch.dtype, device: torch.device) -> None:
         """Rebuild module-level rotary cache after sleep-time cache destruction."""
-        if getattr(module, "cos_sin_cache", None) is not None:
+        cache_names = ("cos_sin_cache", "cos_cached", "sin_cached", "cos", "sin")
+        module_vars = vars(module)
+        module_buffers = getattr(module, "_buffers", {})
+        has_rotary_cache_slot = any(name in module_vars or name in module_buffers for name in cache_names)
+        if not has_rotary_cache_slot or getattr(module, "cos_sin_cache", None) is not None:
             return
 
         set_cache_fn = getattr(module, "_set_cos_sin_cache", None)
