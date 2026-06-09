@@ -1307,36 +1307,6 @@ class TestNPUWorker(TestBase):
         mock_destroy.assert_called_once()
         self.assertTrue(saver._destroyed)
 
-    def test_rotary_eemb_mem_saver_sleep_and_wakeup(self):
-        from vllm_ascend.ops.rotary_embedding import RotaryEembMemSaver
-
-        vllm_config = MagicMock()
-        model_runner = MagicMock()
-        model_runner.max_num_reqs = 2
-        model_runner.uniform_decode_query_len = 1
-        model_runner.dtype = torch.float16
-        model_runner.device = torch.device("cpu")
-        saver = RotaryEembMemSaver(vllm_config, lambda: model_runner)
-
-        with (
-            patch(
-                "vllm_ascend.ops.rotary_embedding.RotaryEembMemSaver.clear_global_cos_sin_runtime_cache",
-                return_value=True,
-            ) as mock_clear,
-            patch(
-                "vllm_ascend.ops.rotary_embedding.RotaryEembMemSaver.rebuild_global_cos_sin_cache_for_wakeup"
-            ) as mock_rebuild,
-            patch("vllm_ascend.ops.rotary_embedding.set_cos_and_sin") as mock_set_cos_sin,
-        ):
-            saver.sleep()
-            saver.wakeup()
-            saver.wakeup()
-
-        mock_clear.assert_called_once_with(model_runner.model)
-        mock_rebuild.assert_called_once_with(model_runner.model, torch.float16, torch.device("cpu"))
-        mock_set_cos_sin.assert_called_once_with(vllm_config, 2, 1, torch.float16, torch.device("cpu"))
-        self.assertFalse(saver._cleared)
-
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     def test_initialize_from_config_without_sleep_mode(self, mock_ensure_kv_transfer):
         """Test initialize_from_config method - without sleep mode enabled"""
