@@ -21,8 +21,7 @@ import pytest
 import torch
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
 
-from vllm_ascend.ops import rotary_embedding
-from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, AscendYaRNRotaryEmbedding, RotaryEembMemSaver
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, AscendYaRNRotaryEmbedding
 
 HEAD_SIZE = 64
 ROTARY_DIM = 64
