@@ -981,6 +981,7 @@ class TestPCPDCPGraphParams(TestBase):
                 2,
                 0,
                 0,
+                None,
             )
         )
 

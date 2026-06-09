@@ -30,7 +30,7 @@ from vllm_ascend.utils import vllm_version_is
 
 os.environ["HCCL_BUFFSIZE"] = "768"
 
-E2E_ROOT = Path(__file__).resolve().parents[4]
+E2E_ROOT = Path(__file__).resolve().parents[3]
 QWEN_IMAGE_PATH = E2E_ROOT / "prompts" / "qwen.png"
 
 
@@ -124,7 +124,7 @@ def test_models_pcp_dcp_basic():
     torch.npu.device_count() < 4,
     reason="DeepSeek V4 DSA CP e2e test requires at least 4 NPUs.",
 )
-@pytest.mark.skipif(not vllm_version_is("0.20.2"), reason="broken in main")
+@pytest.mark.skipif(not vllm_version_is("0.21.0"), reason="broken in main")
 def test_deepseek_v4_w4a8_dsa_cp_basic_greedy():
     prompts = [
         "Hello, my name is",

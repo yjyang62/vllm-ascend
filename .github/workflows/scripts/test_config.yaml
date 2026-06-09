@@ -33,6 +33,13 @@
 #                paths after directory scanning)
 
 # === Modules ===
+# Default CPU UT module - always runs all CPU UTs in every PR
+- name: default_cpu_ut
+  optional: false
+  cpu_only: true
+  tests:
+    - tests/ut
+
 # 310P
 - name: 310p
   optional: true
@@ -312,7 +319,10 @@
     - vllm_ascend/ops/weight_prefetch.py
   tests:
     - tests/ut/ops
-    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py
+    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_moe_fc2_oshard_tp2
+    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_deepseek_v2_lite_fc1_tp2
+    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_fc1_tp2
+    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
 
 - name: ops_gdn
   optional: true
@@ -369,6 +379,7 @@
   tests:
     - tests/ut/quantization
     - tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
+    - tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py
 
 # Sample
 - name: sample
@@ -378,6 +389,14 @@
   tests:
     - tests/ut/sample
     - tests/e2e/pull_request/one_card/test_sampler.py
+
+- name: simple_kv_offload
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/simple_kv_offload
+    - vllm_ascend/distributed/kv_transfer/kv_pool/simple_cpu_offload
+  tests:
+    - tests/e2e/pull_request/one_card/test_simple_cpu_offload.py
 
 # Spec Decode
 - name: spec_decode_base
@@ -547,6 +566,7 @@
     - tests/ut/test_meta_registration.py
     - tests/ut/test_profiling_config.py
     - tests/ut/test_utils.py
+    - tests/ut/test_platform.py
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
 
@@ -574,6 +594,7 @@
     - vllm_ascend/ops/fused_moe/token_dispatcher.py
   tests:
     - tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
+    - tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py
 
 # === Others ===
 - name: _tools
