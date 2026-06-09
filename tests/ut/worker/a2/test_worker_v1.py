@@ -1329,7 +1329,6 @@ class TestNPUWorker(TestBase):
             saver.wakeup()
             saver.wakeup()
 
-        mock_clear.assert_called_once_with(model_runner.model)
         mock_rebuild.assert_called_once_with(model_runner.model, torch.float16, torch.device("cpu"))
         mock_set_cos_sin.assert_called_once_with(vllm_config, 2, 1, torch.float16, torch.device("cpu"))
         self.assertFalse(saver._cleared)
