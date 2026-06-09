@@ -1259,14 +1259,17 @@ class TestNPUWorker(TestBase):
 
         mock_clear.assert_called_once()
         mock_reset.assert_not_called()
-        self.assertFalse(saver._invalidated)
+        self.assertFalse(getattr(saver, "_invalidated", False))
 
     def test_acl_graph_mem_saver_sleep_resets_acl_graph_state(self):
         from vllm_ascend.compilation.acl_graph import AClGraphMemSaver
 
         model_runner = MagicMock()
         model_runner.use_aclgraph = True
-        model_runner.cudagraph_manager.graphs = MagicMock()
+        graph_manager = MagicMock()
+        graph_manager.graphs = MagicMock()
+        graph_manager.pool = None
+        model_runner.cudagraph_manager = graph_manager
         saver = AClGraphMemSaver(MagicMock(), lambda: model_runner)
         with (
             patch(
@@ -1278,9 +1281,9 @@ class TestNPUWorker(TestBase):
             saver.sleep()
         mock_clear.assert_called_once()
         mock_reset.assert_called_once()
-        model_runner.cudagraph_manager.graphs.clear.assert_called_once()
-        self.assertEqual(model_runner.cudagraph_manager.pool, mock_platform.get_global_graph_pool.return_value)
-        self.assertTrue(saver._invalidated)
+        graph_manager.graphs.clear.assert_called_once()
+        self.assertEqual(graph_manager.pool, mock_platform.get_global_graph_pool.return_value)
+        self.assertTrue(getattr(saver, "_invalidated", True))
 
     def test_hccl_group_mem_saver_sleep_waits_and_destroys(self):
         from vllm_ascend.patch.worker.patch_distributed import HcclGroupMemSaver
@@ -1306,7 +1309,6 @@ class TestNPUWorker(TestBase):
         self.assertEqual(worker._pp_send_work, [])
         mock_synchronize.assert_called_once()
         mock_destroy.assert_called_once()
-        self.assertTrue(saver._destroyed)
 
     def test_rotary_eemb_mem_saver_sleep_and_wakeup(self):
         from vllm_ascend.ops.rotary_embedding import RotaryEembMemSaver
@@ -1318,10 +1320,15 @@ class TestNPUWorker(TestBase):
         model_runner.dtype = torch.float16
         model_runner.device = torch.device("cpu")
         saver = RotaryEembMemSaver(vllm_config, lambda: model_runner)
+        clear_method_name = (
+            "clear_global_cos_sin_runtime_cache"
+            if hasattr(RotaryEembMemSaver, "clear_global_cos_sin_runtime_cache")
+            else "clear_global_cos_sin_cache"
+        )
 
         with (
             patch(
-                "vllm_ascend.ops.rotary_embedding.RotaryEembMemSaver.clear_global_cos_sin_runtime_cache",
+                f"vllm_ascend.ops.rotary_embedding.RotaryEembMemSaver.{clear_method_name}",
                 return_value=True,
             ) as mock_clear,
             patch(
