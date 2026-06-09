@@ -387,7 +387,7 @@ class AClGraphMemSaver:
         self._model_runner_getter = model_runner_getter
 
     @staticmethod
-    def clear_attention_workspaces_for_sleep(params: GraphParams | None) -> None:
+    def clear_attention_workspaces(params: GraphParams | None) -> None:
         """Clear attention workspaces for one graph-parameter container."""
         if params is None:
             return
@@ -395,10 +395,10 @@ class AClGraphMemSaver:
             params.workspaces[num_tokens] = None
 
     @classmethod
-    def clear_all_attention_workspaces_for_sleep(cls) -> None:
-        cls.clear_attention_workspaces_for_sleep(_graph_params)
-        cls.clear_attention_workspaces_for_sleep(_draft_graph_params)
-        cls.clear_attention_workspaces_for_sleep(_draft_graph_prefill_params)
+    def clear_all_attention_workspaces(cls) -> None:
+        cls.clear_attention_workspaces(_graph_params)
+        cls.clear_attention_workspaces(_draft_graph_params)
+        cls.clear_attention_workspaces(_draft_graph_prefill_params)
 
     @classmethod
     def reset_graph_params(cls, params: GraphParams | None) -> None:
@@ -424,7 +424,7 @@ class AClGraphMemSaver:
                 attr_dict[num_tokens] = []
 
     @classmethod
-    def reset_all_graph_params_for_sleep(cls) -> None:
+    def reset_all_graph_params(cls) -> None:
         cls.reset_graph_params(_graph_params)
         cls.reset_graph_params(_draft_graph_params)
         cls.reset_graph_params(_draft_graph_prefill_params)
@@ -433,11 +433,11 @@ class AClGraphMemSaver:
             wrapper.first_run_finished = False
 
     def sleep(self) -> None:
-        self.clear_all_attention_workspaces_for_sleep()
+        self.clear_all_attention_workspaces()
         model_runner = self._model_runner_getter()
         if not getattr(model_runner, "use_aclgraph", False):
             return
-        self.reset_all_graph_params_for_sleep()
+        self.reset_all_graph_params()
         self._reset_model_runner_graph_manager(model_runner)
 
     def wakeup(self, tags: list[str] | None = None) -> None:
