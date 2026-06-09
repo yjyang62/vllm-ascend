@@ -97,6 +97,9 @@ class RotaryEembMemSaver:
     @staticmethod
     def restore_global_cos_sin_cache_from_model(model: torch.nn.Module | None = None):
         """Restore global rotary cache references from model modules."""
+        model = getattr(model_runner, "model", None)
+        if model is None:
+            return
         for module in model.modules():
             cos_sin_cache = getattr(module, "cos_sin_cache", None)
             if cos_sin_cache is None:
