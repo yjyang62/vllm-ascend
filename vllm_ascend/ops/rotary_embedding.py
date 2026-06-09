@@ -17,7 +17,7 @@
 
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import torch
@@ -60,6 +60,18 @@ _cos: torch.Tensor = None
 _sin: torch.Tensor = None
 _cos_slice: torch.Tensor = None
 _sin_slice: torch.Tensor = None
+
+
+def _iter_model_modules(model: Any | None) -> Iterator[torch.nn.Module]:
+    if model is None:
+        return
+
+    modules = getattr(model, "modules", None)
+    if not callable(modules):
+        return
+
+    for module in modules():
+        yield module
 
 
 def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device):
@@ -124,12 +136,11 @@ class RotaryEembMemSaver:
                 globals()[cache_name] = None
                 cleared = True
 
-        if model is not None:
-            for module in model.modules():
-                for cache_name in ("cos_sin_cache", "cos_cached", "sin_cached", "cos", "sin"):
-                    if hasattr(module, cache_name) and getattr(module, cache_name) is not None:
-                        setattr(module, cache_name, None)
-                        cleared = True
+        for module in _iter_model_modules(model):
+            for cache_name in ("cos_sin_cache", "cos_cached", "sin_cached", "cos", "sin"):
+                if hasattr(module, cache_name) and getattr(module, cache_name) is not None:
+                    setattr(module, cache_name, None)
+                    cleared = True
         return cleared
 
     @staticmethod
@@ -138,7 +149,7 @@ class RotaryEembMemSaver:
         if model is None:
             return False
 
-        for module in model.modules():
+        for module in _iter_model_modules(model):
             cos_sin_cache = getattr(module, "cos_sin_cache", None)
             if cos_sin_cache is None:
                 continue
@@ -179,7 +190,7 @@ class RotaryEembMemSaver:
     ) -> None:
         if model is None:
             return
-        for module in model.modules():
+        for module in _iter_model_modules(model):
             cls.rebuild_rotary_module_cache(module, dtype, device)
         cls.restore_global_cos_sin_cache_from_model(model)
 
