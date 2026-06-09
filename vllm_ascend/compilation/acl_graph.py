@@ -419,6 +419,9 @@ class AClGraphMemSaver:
             manager.pool = current_platform.get_global_graph_pool()
 
 
+AclGraphMemSaver = AClGraphMemSaver
+
+
 _draft_graph_prefill_params: GraphParams | None = None
 
 

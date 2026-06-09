@@ -143,6 +143,8 @@ class RotaryEembMemSaver:
                     cleared = True
         return cleared
 
+    clear_global_cos_sin_cache = clear_global_cos_sin_runtime_cache
+
     @staticmethod
     def restore_global_cos_sin_cache_from_model(model: torch.nn.Module | None = None):
         """Restore global rotary cache references from model modules."""

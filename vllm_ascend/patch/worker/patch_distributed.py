@@ -293,6 +293,8 @@ _patch_destroy_distributed_environment()
 
 
 class HcclGroupMemSaver:
+    _destroyed = False
+
     def __init__(self, vllm_config: Any, worker: Any):
         self.vllm_config = vllm_config
         self.worker = worker
@@ -338,7 +340,7 @@ class HcclGroupMemSaver:
                 logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)
 
     def wakeup(self) -> None:
-        if not self._destroyed:
+        if not getattr(self, "_destroyed", False):
             return
         with set_current_vllm_config(self.vllm_config):
             num_restored = self.restore_hccl()
