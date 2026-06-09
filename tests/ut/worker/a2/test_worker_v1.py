@@ -1318,14 +1318,11 @@ class TestNPUWorker(TestBase):
         model_runner.dtype = torch.float16
         model_runner.device = torch.device("cpu")
         saver = RotaryEembMemSaver(vllm_config, lambda: model_runner)
-        mock_clear = MagicMock(return_value=True)
-        saver.clear_global_cos_sin_runtime_cache = mock_clear
-        saver.clear_global_cos_sin_cache = mock_clear
         mock_rebuild = MagicMock()
         saver.rebuild_global_cos_sin_cache_for_wakeup = mock_rebuild
+        saver._cleared = True
 
         with patch("vllm_ascend.ops.rotary_embedding.set_cos_and_sin") as mock_set_cos_sin:
-            saver.sleep()
             saver.wakeup()
             saver.wakeup()
 
