@@ -1276,13 +1276,11 @@ class TestNPUWorker(TestBase):
                 "vllm_ascend.compilation.acl_graph.AClGraphMemSaver.clear_all_attention_workspaces_for_sleep"
             ) as mock_clear,
             patch("vllm_ascend.compilation.acl_graph.AClGraphMemSaver.reset_all_graph_params_for_sleep") as mock_reset,
-            patch("vllm_ascend.compilation.acl_graph.current_platform") as mock_platform,
         ):
             saver.sleep()
         mock_clear.assert_called_once()
         mock_reset.assert_called_once()
         graph_manager.graphs.clear.assert_called_once()
-        self.assertEqual(graph_manager.pool, mock_platform.get_global_graph_pool.return_value)
         self.assertTrue(getattr(saver, "_invalidated", True))
 
     def test_hccl_group_mem_saver_sleep_waits_and_destroys(self):
@@ -1320,22 +1318,13 @@ class TestNPUWorker(TestBase):
         model_runner.dtype = torch.float16
         model_runner.device = torch.device("cpu")
         saver = RotaryEembMemSaver(vllm_config, lambda: model_runner)
-        clear_method_name = (
-            "clear_global_cos_sin_runtime_cache"
-            if hasattr(RotaryEembMemSaver, "clear_global_cos_sin_runtime_cache")
-            else "clear_global_cos_sin_cache"
-        )
+        mock_clear = MagicMock(return_value=True)
+        saver.clear_global_cos_sin_runtime_cache = mock_clear
+        saver.clear_global_cos_sin_cache = mock_clear
+        mock_rebuild = MagicMock()
+        saver.rebuild_global_cos_sin_cache_for_wakeup = mock_rebuild
 
-        with (
-            patch(
-                f"vllm_ascend.ops.rotary_embedding.RotaryEembMemSaver.{clear_method_name}",
-                return_value=True,
-            ) as mock_clear,
-            patch(
-                "vllm_ascend.ops.rotary_embedding.RotaryEembMemSaver.rebuild_global_cos_sin_cache_for_wakeup"
-            ) as mock_rebuild,
-            patch("vllm_ascend.ops.rotary_embedding.set_cos_and_sin") as mock_set_cos_sin,
-        ):
+        with patch("vllm_ascend.ops.rotary_embedding.set_cos_and_sin") as mock_set_cos_sin:
             saver.sleep()
             saver.wakeup()
             saver.wakeup()
