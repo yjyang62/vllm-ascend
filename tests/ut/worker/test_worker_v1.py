@@ -216,13 +216,14 @@ class TestNPUWorker(TestBase):
         mock_allocator = MagicMock()
         mock_allocator_class.get_instance.return_value = mock_allocator
 
-        mock_hidden_size = MagicMock()
+        mock_hidden_size = 4096
         mock_hf_config = MagicMock()
         mock_hf_config.hidden_size = mock_hidden_size
         mock_model_config = MagicMock()
-        mock_model_config.hf_config = mock_hf_config
+        mock_model_config.hf_text_config = mock_hf_config
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config = mock_model_config
+        mock_vllm_config.parallel_config.tensor_parallel_size = 1
 
         mock_model_runner = MagicMock()
         mock_model_runner.model = MagicMock()
@@ -243,6 +244,43 @@ class TestNPUWorker(TestBase):
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
             worker.rotary_eemb_mem_saver.wakeup.assert_called_once_with()
             worker.acl_graph_mem_saver.wakeup.assert_called_once_with(["test_tag"])
+
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_transposes_moe_weights_with_local_hidden_size(self, mock_get_config, mock_allocator_class):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_memory_cleanup = False
+        mock_get_config.return_value = mock_config
+        mock_allocator_class.get_instance.return_value = MagicMock()
+
+        from vllm_ascend.worker.worker import NPUWorker
+
+        class MoeLayer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w13_weight = torch.nn.Parameter(torch.empty(1, 1024, 2048), requires_grad=False)
+                self.w2_weight = torch.nn.Parameter(torch.empty(1, 1024, 2048), requires_grad=False)
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layer = MoeLayer()
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.model_runner.model = Model()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.model_config.hf_text_config.hidden_size = 4096
+            worker.vllm_config.parallel_config.tensor_parallel_size = 2
+            worker.vllm_config.quant_config = None
+            worker._sleep_saved_buffers = {}
+
+            worker.wake_up(tags=["weights"])
+
+        self.assertEqual(tuple(worker.model_runner.model.layer.w13_weight.shape), (1, 2048, 1024))
+        self.assertEqual(tuple(worker.model_runner.model.layer.w2_weight.shape), (1, 2048, 1024))
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
