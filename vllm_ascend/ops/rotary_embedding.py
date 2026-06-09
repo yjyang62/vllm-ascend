@@ -178,7 +178,7 @@ class RotaryEembMemSaver:
 
         for module in model_runner.model.modules():
             self.rebuild_rotary_module_cache(module, dtype, device)
-        self.restore_global_cos_sin_cache_from_model(model_runner.model)        
+        self.restore_global_cos_sin_cache_from_model(model_runner.model)
         set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
 
 
