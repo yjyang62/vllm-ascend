@@ -33,17 +33,6 @@ SEQ_LEN = 4
 NUM_HEADS = 2
 
 
-def _clear_global_cos_sin_cache(*args, **kwargs):
-    clear_fn = None
-    for clear_method_name in ("clear_global_cos_sin_runtime_cache", "clear_global_cos_sin_cache"):
-        clear_fn = getattr(RotaryEembMemSaver, clear_method_name, None)
-        if clear_fn is not None:
-            break
-    if clear_fn is None:
-        pytest.skip("RotaryEembMemSaver does not expose a global cos/sin cache clear helper.")
-    return clear_fn(*args, **kwargs)
-
-
 def _make_tensors(seq_len=SEQ_LEN, num_heads=NUM_HEADS, head_size=HEAD_SIZE):
     positions = torch.arange(seq_len, dtype=torch.long)
     query = torch.randn(seq_len, num_heads * head_size)
@@ -86,7 +75,7 @@ class TestRotarySleepCache:
             patch("vllm_ascend.ops.rotary_embedding._cos_slice", None),
             patch("vllm_ascend.ops.rotary_embedding._sin_slice", None),
         ):
-            cleared = _clear_global_cos_sin_cache(model)
+            cleared = RotaryEembMemSaver.clear_global_cos_sin_runtime_cache(model)
 
         assert cleared is False
 
@@ -102,7 +91,7 @@ class TestRotarySleepCache:
             patch("vllm_ascend.ops.rotary_embedding._cos_slice", None),
             patch("vllm_ascend.ops.rotary_embedding._sin_slice", None),
         ):
-            cleared = _clear_global_cos_sin_cache()
+            cleared = RotaryEembMemSaver.clear_global_cos_sin_runtime_cache()
             assert rotary_embedding._cos_mla is None
 
         assert cleared is True

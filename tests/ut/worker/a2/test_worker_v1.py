@@ -1259,29 +1259,28 @@ class TestNPUWorker(TestBase):
 
         mock_clear.assert_called_once()
         mock_reset.assert_not_called()
-        self.assertFalse(getattr(saver, "_invalidated", False))
+        self.assertFalse(saver._invalidated)
 
     def test_acl_graph_mem_saver_sleep_resets_acl_graph_state(self):
         from vllm_ascend.compilation.acl_graph import AClGraphMemSaver
 
         model_runner = MagicMock()
         model_runner.use_aclgraph = True
-        graph_manager = MagicMock()
-        graph_manager.graphs = MagicMock()
-        graph_manager.pool = None
-        model_runner.cudagraph_manager = graph_manager
+        model_runner.cudagraph_manager.graphs = MagicMock()
         saver = AClGraphMemSaver(MagicMock(), lambda: model_runner)
         with (
             patch(
                 "vllm_ascend.compilation.acl_graph.AClGraphMemSaver.clear_all_attention_workspaces_for_sleep"
             ) as mock_clear,
             patch("vllm_ascend.compilation.acl_graph.AClGraphMemSaver.reset_all_graph_params_for_sleep") as mock_reset,
+            patch("vllm_ascend.compilation.acl_graph.current_platform") as mock_platform,
         ):
             saver.sleep()
         mock_clear.assert_called_once()
         mock_reset.assert_called_once()
-        graph_manager.graphs.clear.assert_called_once()
-        self.assertTrue(getattr(saver, "_invalidated", True))
+        model_runner.cudagraph_manager.graphs.clear.assert_called_once()
+        self.assertEqual(model_runner.cudagraph_manager.pool, mock_platform.get_global_graph_pool.return_value)
+        self.assertTrue(saver._invalidated)
 
     def test_hccl_group_mem_saver_sleep_waits_and_destroys(self):
         from vllm_ascend.patch.worker.patch_distributed import HcclGroupMemSaver
@@ -1290,7 +1289,6 @@ class TestNPUWorker(TestBase):
         handle = MagicMock()
         worker._pp_send_work = [handle]
         saver = HcclGroupMemSaver(MagicMock(), worker)
-        saver._destroyed = False
 
         with (
             patch("vllm_ascend.patch.worker.patch_distributed.torch.distributed.is_available", return_value=True),
@@ -1307,6 +1305,7 @@ class TestNPUWorker(TestBase):
         self.assertEqual(worker._pp_send_work, [])
         mock_synchronize.assert_called_once()
         mock_destroy.assert_called_once()
+        self.assertTrue(saver._destroyed)
 
     def test_rotary_eemb_mem_saver_sleep_and_wakeup(self):
         from vllm_ascend.ops.rotary_embedding import RotaryEembMemSaver
@@ -1318,14 +1317,22 @@ class TestNPUWorker(TestBase):
         model_runner.dtype = torch.float16
         model_runner.device = torch.device("cpu")
         saver = RotaryEembMemSaver(vllm_config, lambda: model_runner)
-        mock_rebuild = MagicMock()
-        saver.rebuild_global_cos_sin_cache_for_wakeup = mock_rebuild
-        saver._cleared = True
 
-        with patch("vllm_ascend.ops.rotary_embedding.set_cos_and_sin") as mock_set_cos_sin:
+        with (
+            patch(
+                "vllm_ascend.ops.rotary_embedding.RotaryEembMemSaver.clear_global_cos_sin_runtime_cache",
+                return_value=True,
+            ) as mock_clear,
+            patch(
+                "vllm_ascend.ops.rotary_embedding.RotaryEembMemSaver.rebuild_global_cos_sin_cache_for_wakeup"
+            ) as mock_rebuild,
+            patch("vllm_ascend.ops.rotary_embedding.set_cos_and_sin") as mock_set_cos_sin,
+        ):
+            saver.sleep()
             saver.wakeup()
             saver.wakeup()
 
+        mock_clear.assert_called_once_with(model_runner.model)
         mock_rebuild.assert_called_once_with(model_runner.model, torch.float16, torch.device("cpu"))
         mock_set_cos_sin.assert_called_once_with(vllm_config, 2, 1, torch.float16, torch.device("cpu"))
         self.assertFalse(saver._cleared)
