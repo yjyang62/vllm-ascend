@@ -252,6 +252,74 @@ class TestNPUWorker(TestBase):
             worker.rotary_eemb_mem_saver.wakeup.assert_called_once_with()
             worker.acl_graph_mem_saver.wakeup.assert_called_once_with(["test_tag"])
 
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_restores_unquantized_moe_weight_layout(self, mock_get_config, mock_allocator_class):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_memory_cleanup = False
+        mock_get_config.return_value = mock_config
+
+        from vllm_ascend.worker.worker import NPUWorker
+
+        hidden_size = 2048
+        intermediate_size = 128
+        num_experts = 2
+
+        class DummyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.raw_moe = torch.nn.Module()
+                self.raw_moe.w13_weight = torch.nn.Parameter(
+                    torch.empty(num_experts, 2 * intermediate_size, hidden_size),
+                    requires_grad=False,
+                )
+                self.raw_moe.w2_weight = torch.nn.Parameter(
+                    torch.empty(num_experts, hidden_size, intermediate_size),
+                    requires_grad=False,
+                )
+                self.runtime_moe = torch.nn.Module()
+                self.runtime_moe.w13_weight = torch.nn.Parameter(
+                    torch.empty(num_experts, hidden_size, 2 * intermediate_size),
+                    requires_grad=False,
+                )
+                self.runtime_moe.w2_weight = torch.nn.Parameter(
+                    torch.empty(num_experts, intermediate_size, hidden_size),
+                    requires_grad=False,
+                )
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.model_runner.model = DummyModel()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.quant_config = None
+            worker.vllm_config.model_config.hf_text_config.hidden_size = hidden_size
+            worker._sleep_saved_buffers = {}
+            worker.hccl_group_mem_saver = MagicMock()
+            worker.rotary_eemb_mem_saver = MagicMock()
+            worker.acl_graph_mem_saver = MagicMock()
+
+            worker.wake_up(tags=["weights"])
+
+            mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(tags=["weights"])
+            self.assertEqual(
+                tuple(worker.model_runner.model.raw_moe.w13_weight.shape),
+                (num_experts, hidden_size, 2 * intermediate_size),
+            )
+            self.assertEqual(
+                tuple(worker.model_runner.model.raw_moe.w2_weight.shape),
+                (num_experts, intermediate_size, hidden_size),
+            )
+            self.assertEqual(
+                tuple(worker.model_runner.model.runtime_moe.w13_weight.shape),
+                (num_experts, hidden_size, 2 * intermediate_size),
+            )
+            self.assertEqual(
+                tuple(worker.model_runner.model.runtime_moe.w2_weight.shape),
+                (num_experts, intermediate_size, hidden_size),
+            )
+
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
     @patch("vllm_ascend.worker.worker.init_device_properties_triton")
