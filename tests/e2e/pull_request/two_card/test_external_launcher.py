@@ -20,6 +20,7 @@ Compare the outputs of vLLM with and without aclgraph.
 Run `pytest tests/multicard/test_external_launcher.py`.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -191,6 +192,8 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
         "16",
         "--sleep-mode-level",
         "2",
+        "--additional-config",
+        json.dumps({"enable_sleep_mode_memory_cleanup": False}),
     ]
 
     print(f"Running subprocess: {' '.join(cmd)}")

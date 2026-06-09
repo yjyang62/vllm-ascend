@@ -58,6 +58,7 @@ Multi-node:
 import argparse
 import contextlib
 import gc
+import json
 import os
 from multiprocessing import Process
 from time import sleep
@@ -139,6 +140,12 @@ def parse_args():
         default=1,
         help="Sleep mode level: 1 or 2. This example of level 2 is only supported for dense model.",
     )
+    parser.add_argument(
+        "--additional-config",
+        type=json.loads,
+        default={},
+        help="Additional config JSON passed to vLLM, e.g. '{\"enable_sleep_mode_memory_cleanup\": false}'.",
+    )
 
     args = parser.parse_args()
     if args.enable_sleep_mode:
@@ -169,6 +176,7 @@ def main(
     enable_sleep_mode: bool = False,
     temperature: float = 0.8,
     sleep_mode_level: int = 1,
+    additional_config: dict | None = None,
 ):
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = str(master_port)
@@ -201,6 +209,7 @@ def main(
         distributed_executor_backend="external_launcher",
         seed=0,
         enable_sleep_mode=enable_sleep_mode,
+        additional_config=additional_config or {},
     )
     tp_ranks = get_tp_group().ranks
     print(f"TP RANKS: {tp_ranks}")
@@ -294,6 +303,7 @@ if __name__ == "__main__":
                 args.enable_sleep_mode,
                 args.temperature,
                 args.sleep_mode_level,
+                args.additional_config,
             ),
         )
 
