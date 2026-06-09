@@ -154,8 +154,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         local_rank = torch.distributed.get_rank(group=device_group)
         backend = device_group._get_backend(torch.device("npu"))
         self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
-        self.ep_rank_id = get_mc2_group().rank_in_group
-        self.ep_world_size = get_mc2_group().world_size
 
     def get_dispatch_mc2_kwargs(
         self,

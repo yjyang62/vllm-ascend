@@ -234,7 +234,7 @@ class NPUWorker(WorkerBase):
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_memory_cleanup", True)
+        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", True)
         if cleanup_enabled:
             attention_workspace_freed_bytes = self._cleanup_attention_workspace_for_sleep()
             global_cos_sin_cache_freed_bytes = self._cleanup_global_cos_sin_cache_for_sleep()
@@ -270,32 +270,36 @@ class NPUWorker(WorkerBase):
                 "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
             )
         allocator = CaMemAllocator.get_instance()
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_memory_cleanup", True)
+        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", True)
         allocator.wake_up(tags=tags)
         if cleanup_enabled:
             self.hccl_group_mem_saver.wakeup()
             self.rotary_eemb_mem_saver.wakeup()
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        local_hidden_size = hidden_size // tp_size if hidden_size % tp_size == 0 else hidden_size
         model = self.model_runner.model
         if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
-            for name, param in model.named_parameters():
-                if "w2_weight" in name and param.shape[2] == hidden_size:
-                    parts = name.split(".")
-                    param_name = parts[-1]
-                    parent_module = model.get_submodule(".".join(parts[:-1]))
+            for name, param in list(model.named_parameters()):
+                if param.ndim != 3:
+                    continue
 
-                    w2_data = param.transpose(1, 2)
-                    w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
-                    setattr(parent_module, param_name, w2_data)
-                elif "w13_weight" in name and param.shape[1] == hidden_size:
-                    parts = name.split(".")
-                    param_name = parts[-1]
-                    parent_module = model.get_submodule(".".join(parts[:-1]))
+                parts = name.split(".")
+                param_name = parts[-1]
+                if param_name == "w13_weight":
+                    should_transpose = param.shape[2] == hidden_size
+                elif param_name == "w2_weight":
+                    should_transpose = param.shape[1] == hidden_size
+                else:
+                    continue
 
-                    w13_data = param.transpose(1, 2)
-                    w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
-                    setattr(parent_module, param_name, w13_data)
+                if not should_transpose:
+                    continue
+
+                parent_module = model.get_submodule(".".join(parts[:-1]))
+                weight = param.transpose(1, 2).contiguous()
+                setattr(parent_module, param_name, torch.nn.Parameter(weight, requires_grad=False))
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
