@@ -35,6 +35,7 @@ from tests.e2e.conftest import wait_until_npu_memory_free
 MODELS = ["Qwen/Qwen3-0.6B"]
 MOE_MODELS = ["Qwen/Qwen3-30B-A3B"]
 DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
+DEVICE_COUNT = torch_npu.npu.device_count()
 REPO_ROOT = Path(__file__).resolve().parents[5]
 EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.py"
 
@@ -161,6 +162,10 @@ def test_qwen3_external_launcher_with_sleepmode():
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
+@pytest.mark.skipif(
+    DEVICE_COUNT < 4,
+    reason="Qwen3.5-35B-A3B level-2 sleep external-launcher test requires four visible NPUs.",
+)
 @wait_until_npu_memory_free(target_free_percentage=0.95)
 def test_qwen3_external_launcher_with_sleepmode_level2():
     env = os.environ.copy()
