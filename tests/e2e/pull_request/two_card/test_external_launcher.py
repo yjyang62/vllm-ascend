@@ -27,10 +27,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import huggingface_hub
 import pytest
 import torch_npu
-from modelscope import snapshot_download  # type: ignore
 
 from tests.e2e.conftest import wait_until_npu_memory_free
 
@@ -166,30 +164,26 @@ def test_qwen3_external_launcher_with_sleepmode():
 @wait_until_npu_memory_free(target_free_percentage=0.95)
 def test_qwen3_external_launcher_with_sleepmode_level2():
     env = os.environ.copy()
-    model_path = snapshot_download(
-        "Qwen/Qwen3-8B",
-        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-    )
-    # TODO: Add moe model test
+    model_path = "/mnt/share/weights/Qwen3.5-35B-A3B"
     cmd = [
         sys.executable,
         str(EXTERNAL_LAUNCHER_SCRIPT),
         "--model",
         model_path,
         "--tp-size",
-        "1",
+        "4",
         "--node-size",
         "1",
         "--node-rank",
         "0",
         "--proc-per-node",
-        "2",
+        "4",
         "--trust-remote-code",
         "--enable-sleep-mode",
         "--temperature",
         "0",
         "--model-weight-gib",
-        "16",
+        "60",
         "--sleep-mode-level",
         "2",
         "--additional-config",
