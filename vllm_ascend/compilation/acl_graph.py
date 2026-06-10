@@ -385,7 +385,7 @@ class AClGraphMemSaver:
     def sleep(self) -> None:
         self.clear_all_attention_workspaces_for_sleep()
         model_runner = self._model_runner_getter()
-        if model_runner is None or not getattr(model_runner, "use_aclgraph", False):
+        if model_runner is None:
             return
         self.reset_all_graph_params_for_sleep()
         self._reset_model_runner_graph_manager(model_runner)
@@ -399,7 +399,7 @@ class AClGraphMemSaver:
             # recapture graphs only after KV cache is restored.
             return
         model_runner = self._model_runner_getter()
-        if model_runner is None or not getattr(model_runner, "use_aclgraph", False):
+        if model_runner is None:
             return
         capture_model = model_runner.capture_model
         with set_current_vllm_config(self.vllm_config):

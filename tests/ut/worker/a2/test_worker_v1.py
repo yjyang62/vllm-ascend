@@ -234,6 +234,7 @@ class TestNPUWorker(TestBase):
 
         mock_model_runner = MagicMock()
         mock_model_runner.model = MagicMock()
+        mock_model_runner.use_aclgraph = True
 
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
@@ -251,6 +252,34 @@ class TestNPUWorker(TestBase):
             worker.hccl_group_mem_saver.wakeup.assert_called_once_with()
             worker.rotary_eemb_mem_saver.wakeup.assert_called_once_with()
             worker.acl_graph_mem_saver.wakeup.assert_called_once_with(["test_tag"])
+
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_skips_acl_graph_when_disabled(self, mock_get_config, mock_allocator_class):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_memory_cleanup = True
+        mock_get_config.return_value = mock_config
+
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.model_runner.model = MagicMock()
+            worker.model_runner.use_aclgraph = False
+            worker.vllm_config = MagicMock()
+            worker._sleep_saved_buffers = {}
+            worker.hccl_group_mem_saver = MagicMock()
+            worker.rotary_eemb_mem_saver = MagicMock()
+            worker.acl_graph_mem_saver = MagicMock()
+
+            worker.wake_up(tags=["kv_cache"])
+
+            mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(tags=["kv_cache"])
+            worker.hccl_group_mem_saver.wakeup.assert_called_once_with()
+            worker.rotary_eemb_mem_saver.wakeup.assert_called_once_with()
+            worker.acl_graph_mem_saver.wakeup.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")

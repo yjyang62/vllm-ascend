@@ -239,6 +239,8 @@ class NPUWorker(WorkerBase):
 
     @_measure_sleep_cleanup_memory
     def _cleanup_attention_workspace_for_sleep(self):
+        if not self._use_aclgraph():
+            return
         self.acl_graph_mem_saver.sleep()
 
     @_measure_sleep_cleanup_memory
@@ -309,12 +311,16 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
-        if cleanup_enabled:
+        if cleanup_enabled and self._use_aclgraph():
             self.acl_graph_mem_saver.wakeup(tags)
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+    def _use_aclgraph(self) -> bool:
+        model_runner = getattr(self, "model_runner", None)
+        return bool(model_runner is not None and getattr(model_runner, "use_aclgraph", False))
 
     def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
