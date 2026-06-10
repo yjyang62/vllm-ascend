@@ -1205,9 +1205,7 @@ class TestNPUWorker(TestBase):
         model_runner.cudagraph_manager = graph_manager
         saver = AClGraphMemSaver(MagicMock(), lambda: model_runner)
         with (
-            patch(
-                "vllm_ascend.compilation.acl_graph.AClGraphMemSaver.clear_all_attention_workspaces"
-            ) as mock_clear,
+            patch("vllm_ascend.compilation.acl_graph.AClGraphMemSaver.clear_all_attention_workspaces") as mock_clear,
             patch("vllm_ascend.compilation.acl_graph.AClGraphMemSaver.reset_all_graph_params") as mock_reset,
         ):
             saver.sleep()
