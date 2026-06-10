@@ -107,6 +107,36 @@ def patch_vllm_moe_model_weight_loader(model):
         raise ValueError("No MoE w13_weight/w2_weight parameters with a weight_loader were found.")
 
 
+def _transpose_unquantized_moe_weight(model, hidden_size: int, *, to_runtime_layout: bool):
+    for name, param in list(model.named_parameters()):
+        if param.ndim != 3:
+            continue
+
+        parts = name.split(".")
+        param_name = parts[-1]
+        if param_name == "w13_weight":
+            should_transpose = param.shape[2] == hidden_size if to_runtime_layout else param.shape[1] == hidden_size
+        elif param_name == "w2_weight":
+            should_transpose = param.shape[1] == hidden_size if to_runtime_layout else param.shape[2] == hidden_size
+        else:
+            continue
+
+        if not should_transpose:
+            continue
+
+        parent_module = model.get_submodule(".".join(parts[:-1]))
+        weight = param.transpose(1, 2).contiguous()
+        setattr(parent_module, param_name, torch.nn.Parameter(weight, requires_grad=False))
+
+
+def restore_unquantized_moe_weight_loader_layout(model, hidden_size: int):
+    _transpose_unquantized_moe_weight(model, hidden_size, to_runtime_layout=False)
+
+
+def restore_unquantized_moe_weight_runtime_layout(model, hidden_size: int):
+    _transpose_unquantized_moe_weight(model, hidden_size, to_runtime_layout=True)
+
+
 def load_and_merge_safetensors(directory):
     merged_dict = {}
 
@@ -233,9 +263,12 @@ def main(
 
         model_path = model
         runmodel = llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        hidden_size = llm.llm_engine.vllm_config.model_config.hf_text_config.hidden_size
+        restore_unquantized_moe_weight_loader_layout(runmodel, hidden_size)
         patch_vllm_moe_model_weight_loader(runmodel)
         sd = load_and_merge_safetensors(model_path)
         runmodel.load_weights(sd.items())
+        restore_unquantized_moe_weight_runtime_layout(runmodel, hidden_size)
         print("load state dict done")
         tp_ranks = get_tp_group().ranks
         print(f"TP RANKS: {tp_ranks}")
