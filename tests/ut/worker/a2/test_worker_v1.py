@@ -1194,21 +1194,6 @@ class TestNPUWorker(TestBase):
             mock_allocator.use_memory_pool.assert_called_once_with(tag="kv_cache")
             worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
 
-    def test_acl_graph_mem_saver_sleep_handles_missing_model_runner(self):
-        from vllm_ascend.compilation.acl_graph import AClGraphMemSaver
-
-        saver = AClGraphMemSaver(MagicMock(), lambda: None)
-        with (
-            patch(
-                "vllm_ascend.compilation.acl_graph.AClGraphMemSaver.clear_all_attention_workspaces_for_sleep"
-            ) as mock_clear,
-            patch("vllm_ascend.compilation.acl_graph.AClGraphMemSaver.reset_all_graph_params_for_sleep") as mock_reset,
-        ):
-            saver.sleep()
-
-        mock_clear.assert_called_once()
-        mock_reset.assert_not_called()
-
     def test_acl_graph_mem_saver_sleep_resets_acl_graph_state(self):
         from vllm_ascend.compilation.acl_graph import AClGraphMemSaver
 
@@ -1221,9 +1206,9 @@ class TestNPUWorker(TestBase):
         saver = AClGraphMemSaver(MagicMock(), lambda: model_runner)
         with (
             patch(
-                "vllm_ascend.compilation.acl_graph.AClGraphMemSaver.clear_all_attention_workspaces_for_sleep"
+                "vllm_ascend.compilation.acl_graph.AClGraphMemSaver.clear_all_attention_workspaces"
             ) as mock_clear,
-            patch("vllm_ascend.compilation.acl_graph.AClGraphMemSaver.reset_all_graph_params_for_sleep") as mock_reset,
+            patch("vllm_ascend.compilation.acl_graph.AClGraphMemSaver.reset_all_graph_params") as mock_reset,
         ):
             saver.sleep()
         mock_clear.assert_called_once()

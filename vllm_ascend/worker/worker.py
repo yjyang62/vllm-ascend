@@ -236,7 +236,8 @@ class NPUWorker(WorkerBase):
 
         cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", True)
         if cleanup_enabled:
-            attention_workspace_freed_bytes = self._cleanup_attention_workspace_for_sleep()
+            if self.model_runner.use_aclgraph:
+                attention_workspace_freed_bytes = self._cleanup_attention_workspace_for_sleep()
             global_cos_sin_cache_freed_bytes = self._cleanup_global_cos_sin_cache_for_sleep()
             hccl_freed_bytes = self._cleanup_hccl_group_for_sleep()
             logger.info(
@@ -301,7 +302,7 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
-        if cleanup_enabled:
+        if cleanup_enabled and self.model_runner.use_aclgraph:
             self.acl_graph_mem_saver.wakeup(tags)
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:

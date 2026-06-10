@@ -782,7 +782,7 @@ class TestSleepGraphParams(TestBase):
             patch("vllm_ascend.compilation.acl_graph._draft_graph_params", None),
             patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params", None),
         ):
-            AClGraphMemSaver.clear_all_attention_workspaces_for_sleep()
+            AClGraphMemSaver.clear_all_attention_workspaces()
 
         self.assertEqual(set(graph_params.workspaces), {4, 8})
         self.assertIsNone(graph_params.workspaces[4])
@@ -807,7 +807,7 @@ class TestSleepGraphParams(TestBase):
             patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params", empty_params),
             patch("vllm_ascend.compilation.acl_graph._acl_graph_wrappers", [wrapper]),
         ):
-            AClGraphMemSaver.reset_all_graph_params_for_sleep()
+            AClGraphMemSaver.reset_all_graph_params()
 
         self.assertEqual(wrapper.concrete_aclgraph_entries, {})
         self.assertFalse(wrapper.first_run_finished)
