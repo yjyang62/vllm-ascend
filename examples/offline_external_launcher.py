@@ -79,16 +79,32 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def patch_vllm_moe_model_weight_loader(model):
-    model = getattr(model, "model", None) or getattr(model, "language_model", None)
-    if model is None:
-        raise ValueError("The provided model does not have a valid 'model' or 'language_model' attribute.")
-    for layer in model.layers:
-        mlp_attr = "mlp"
-        mlp = getattr(layer, mlp_attr)
-        param_dict = dict(mlp.named_parameters())
-        for name, param in param_dict.items():
-            if "w13_weight" in name or "w2_weight" in name:
-                param.weight_loader = mlp.experts.weight_loader
+    roots = [model, getattr(model, "model", None), getattr(model, "language_model", None)]
+    seen_modules = set()
+    patched_params = 0
+
+    for root in roots:
+        if root is None or not hasattr(root, "modules"):
+            continue
+        for module in root.modules():
+            if id(module) in seen_modules:
+                continue
+            seen_modules.add(id(module))
+
+            experts = getattr(module, "experts", None)
+            weight_loader = getattr(experts, "weight_loader", None)
+            if weight_loader is None:
+                weight_loader = getattr(module, "weight_loader", None)
+            if weight_loader is None:
+                continue
+
+            for name, param in module.named_parameters():
+                if "w13_weight" in name or "w2_weight" in name:
+                    param.weight_loader = weight_loader
+                    patched_params += 1
+
+    if patched_params == 0:
+        raise ValueError("No MoE w13_weight/w2_weight parameters with a weight_loader were found.")
 
 
 def load_and_merge_safetensors(directory):
