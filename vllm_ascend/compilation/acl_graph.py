@@ -389,6 +389,8 @@ class AClGraphMemSaver:
     @staticmethod
     def clear_attention_workspaces(params) -> None:
         """Clear attention workspaces for one graph-parameter container."""
+        if params is None:
+            return
         for num_tokens in params.workspaces:
             params.workspaces[num_tokens] = None
 
