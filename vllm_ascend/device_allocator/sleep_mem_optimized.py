@@ -56,10 +56,8 @@ class SleepWakeupManager:
             free_mem / GiB_bytes,
         )
 
-    def wakeup_hccl(self) -> None:
+    def wakeup(self, tags: list[str] | None = None) -> None:
         self.hccl.wakeup()
-
-    def wakeup_acl_graph(self, tags: list[str] | None = None) -> None:
         model_runner = self._model_runner_getter()
         if model_runner.use_aclgraph:
             self.acl_graph.wakeup(tags)

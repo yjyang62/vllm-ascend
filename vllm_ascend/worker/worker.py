@@ -233,8 +233,6 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", True)
         allocator.wake_up(tags=tags)
-        if cleanup_enabled:
-            self.sleep_wakeup_manager.wakeup_hccl()
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
@@ -264,7 +262,7 @@ class NPUWorker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
         if cleanup_enabled:
-            self.sleep_wakeup_manager.wakeup_acl_graph(tags)
+            self.sleep_wakeup_manager.wakeup(tags)
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks

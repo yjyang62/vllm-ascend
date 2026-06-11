@@ -246,8 +246,7 @@ class TestNPUWorker(TestBase):
             worker.wake_up(tags=["test_tag"])
 
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
-            worker.sleep_wakeup_manager.wakeup_hccl.assert_called_once_with()
-            worker.sleep_wakeup_manager.wakeup_acl_graph.assert_called_once_with(["test_tag"])
+            worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
 
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
