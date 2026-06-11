@@ -114,7 +114,7 @@ def patch_vllm_moe_model_weight_loader(model):
                 patched_params += 1
 
     if patched_params == 0:
-        raise ValueError("No MoE expert weights were found to patch.")
+        print("No MoE expert weights were found to patch.")
 
 
 def iter_safetensors_weights(directory):
