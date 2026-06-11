@@ -22,8 +22,7 @@ from typing import Any, cast
 import torch
 import vllm
 from torch.distributed import Backend
-from vllm.config import set_current_vllm_config
-from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _groups, _register_group
+from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgRegistry, make_hccl_pg_key
@@ -290,55 +289,3 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
 _patch_destroy_distributed_environment()
-
-
-class HcclGroupMemSaver:
-    def __init__(self, vllm_config: Any, worker: Any):
-        self.vllm_config = vllm_config
-        self.worker = worker
-
-    @staticmethod
-    def iter_alive_group_coordinators():
-        seen: set[int] = set()
-        for group_ref in list(_groups.values()):
-            group = group_ref()
-            if group is None or id(group) in seen:
-                continue
-            seen.add(id(group))
-            yield group
-
-    @classmethod
-    def destroy_hccl(cls) -> int:
-        num_destroyed = 0
-        for group in cls.iter_alive_group_coordinators():
-            destroy = group.destroy_hccl
-            if destroy():
-                num_destroyed += 1
-        return num_destroyed
-
-    @classmethod
-    def restore_hccl(cls) -> int:
-        num_restored = 0
-        for group in cls.iter_alive_group_coordinators():
-            restore = group.restore_hccl
-            if restore():
-                num_restored += 1
-        return num_restored
-
-    def sleep(self) -> None:
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            for handle in getattr(self.worker, "_pp_send_work", []):
-                handle.wait()
-            self.worker._pp_send_work = []
-            torch.npu.synchronize()
-            num_destroyed = self.destroy_hccl()
-            if num_destroyed > 0:
-                logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)
-
-    def wakeup(self) -> None:
-        with set_current_vllm_config(self.vllm_config):
-            num_restored = self.restore_hccl()
-            from vllm_ascend.ops.fused_moe.moe_comm_method import refresh_moe_comm_method_after_hccl_restore
-
-            refresh_moe_comm_method_after_hccl_restore()
-        logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)

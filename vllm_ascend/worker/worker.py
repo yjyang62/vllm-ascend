@@ -20,7 +20,6 @@
 import copy
 import gc
 import logging
-from functools import wraps
 from types import NoneType
 
 import torch
@@ -51,13 +50,11 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
-from vllm_ascend.compilation.acl_graph import AClGraphMemSaver
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
+from vllm_ascend.device_allocator.sleep_wakeup import SleepWakeupManager
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
-from vllm_ascend.ops.rotary_embedding import RotaryEembMemSaver
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.patch.worker.patch_distributed import HcclGroupMemSaver
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -138,9 +135,7 @@ class NPUWorker(WorkerBase):
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
-        self.acl_graph_mem_saver = AClGraphMemSaver(vllm_config, lambda: getattr(self, "model_runner", None))
-        self.hccl_group_mem_saver = HcclGroupMemSaver(vllm_config, self)
-        self.rotary_eemb_mem_saver = RotaryEembMemSaver(vllm_config, lambda: getattr(self, "model_runner", None))
+        self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -204,29 +199,6 @@ class NPUWorker(WorkerBase):
                 except Exception:
                     return
 
-    @staticmethod
-    def _measure_sleep_cleanup_memory(cleanup):
-        @wraps(cleanup)
-        def wrapper(*args, **kwargs) -> int:
-            free_bytes_before_cleanup = torch.npu.mem_get_info()[0]
-            cleanup(*args, **kwargs)
-            free_bytes_after_cleanup = torch.npu.mem_get_info()[0]
-            return max(free_bytes_after_cleanup - free_bytes_before_cleanup, 0)
-
-        return wrapper
-
-    @_measure_sleep_cleanup_memory
-    def _cleanup_attention_workspace_for_sleep(self):
-        self.acl_graph_mem_saver.sleep()
-
-    @_measure_sleep_cleanup_memory
-    def _cleanup_global_cos_sin_cache_for_sleep(self):
-        self.rotary_eemb_mem_saver.sleep()
-
-    @_measure_sleep_cleanup_memory
-    def _cleanup_hccl_group_for_sleep(self):
-        self.hccl_group_mem_saver.sleep()
-
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Save the buffers before level 2 sleep
@@ -236,17 +208,7 @@ class NPUWorker(WorkerBase):
 
         cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", True)
         if cleanup_enabled:
-            if self.model_runner.use_aclgraph:
-                attention_workspace_freed_bytes = self._cleanup_attention_workspace_for_sleep()
-            global_cos_sin_cache_freed_bytes = self._cleanup_global_cos_sin_cache_for_sleep()
-            hccl_freed_bytes = self._cleanup_hccl_group_for_sleep()
-            logger.info(
-                "Sleep mode released HCCL memory: %.3f GiB, attention workspace memory: %.3f GiB, "
-                "global sin/cos cache memory: %.3f GiB.",
-                hccl_freed_bytes / GiB_bytes,
-                attention_workspace_freed_bytes / GiB_bytes,
-                global_cos_sin_cache_freed_bytes / GiB_bytes,
-            )
+            self.sleep_wakeup_manager.sleep()
 
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
@@ -272,8 +234,7 @@ class NPUWorker(WorkerBase):
         cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", True)
         allocator.wake_up(tags=tags)
         if cleanup_enabled:
-            self.hccl_group_mem_saver.wakeup()
-            self.rotary_eemb_mem_saver.wakeup()
+            self.sleep_wakeup_manager.wakeup_hccl()
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
@@ -302,8 +263,8 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
-        if cleanup_enabled and self.model_runner.use_aclgraph:
-            self.acl_graph_mem_saver.wakeup(tags)
+        if cleanup_enabled:
+            self.sleep_wakeup_manager.wakeup_acl_graph(tags)
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks

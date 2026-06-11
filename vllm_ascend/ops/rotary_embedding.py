@@ -17,13 +17,10 @@
 
 import math
 import os
-from collections.abc import Callable
-from typing import Any
 
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.logger import logger
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
     MRotaryEmbedding,
@@ -87,99 +84,6 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
             rope_dim = int(model_config.hf_text_config.rotary_dim)
         _cos = torch.ones(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
         _sin = torch.zeros(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
-
-
-class RotaryEembMemSaver:
-    def __init__(self, vllm_config: Any, model_runner_getter: Callable[[], Any]):
-        self.vllm_config = vllm_config
-        self._model_runner_getter = model_runner_getter
-
-    @staticmethod
-    def restore_global_cos_sin_cache_from_model(model):
-        """Restore global rotary cache references from model modules."""
-        for module in model.modules():
-            cos_sin_cache = getattr(module, "cos_sin_cache", None)
-            if cos_sin_cache is None:
-                continue
-            _record_cos_sin_cache(cos_sin_cache)
-            cos_cached = getattr(module, "cos_cached", None)
-            sin_cached = getattr(module, "sin_cached", None)
-            if cos_cached is not None and sin_cached is not None:
-                _record_cos_and_sin_cache(cos_cached, sin_cached)
-            elif _cos_cache is None or _sin_cache is None:
-                _record_cos_and_sin_cache_interleaved(cos_sin_cache)
-
-    @staticmethod
-    def rebuild_rotary_module_cache(module: torch.nn.Module, dtype: torch.dtype, device: torch.device) -> None:
-        """Rebuild module-level rotary cache after sleep-time cache destruction."""
-        if getattr(module, "cos_sin_cache", None) is not None:
-            return
-
-        rebuilt = False
-        set_cache_fn = getattr(module, "_set_cos_sin_cache", None)
-        max_seq_len = getattr(module, "max_seq_len", getattr(module, "max_position_embeddings", None))
-        if callable(set_cache_fn) and max_seq_len is not None:
-            set_cache_fn(max_seq_len, device=device, dtype=dtype)
-            rebuilt = getattr(module, "cos_sin_cache", None) is not None
-
-        if rebuilt:
-            return
-
-        compute_cache_fn = getattr(module, "_compute_cos_sin_cache", None)
-        if callable(compute_cache_fn):
-            cache = compute_cache_fn()
-            if not getattr(module, "use_flashinfer", False):
-                cache = cache.to(dtype)
-            module.cos_sin_cache = cache.to(device)
-
-    def sleep(self) -> None:
-        """Clear global and model-owned rotary cos/sin runtime caches."""
-        global _cos_mla
-        global _sin_mla
-        global _cos_cache
-        global _sin_cache
-        global _cos_sin_cache
-        global _cos
-        global _sin
-        global _cos_slice
-        global _sin_slice
-
-        for cache_name in (
-            "_cos_mla",
-            "_sin_mla",
-            "_cos_cache",
-            "_sin_cache",
-            "_cos_sin_cache",
-            "_cos",
-            "_sin",
-            "_cos_slice",
-            "_sin_slice",
-        ):
-            if globals()[cache_name] is not None:
-                globals()[cache_name] = None
-        model_runner = self._model_runner_getter()
-        model = model_runner.model
-        for module in model.modules():
-            for cache_name in ("cos_sin_cache", "cos_cached", "sin_cached", "cos", "sin"):
-                if getattr(module, cache_name, None) is not None:
-                    setattr(module, cache_name, None)
-
-    def wakeup(self) -> None:
-        model_runner = self._model_runner_getter()
-        max_num_reqs = model_runner.max_num_reqs
-        decode_token_per_req = getattr(
-            model_runner, "uniform_decode_query_len", getattr(model_runner, "decode_query_len", None)
-        )
-        dtype = model_runner.dtype
-        device = model_runner.device
-        if decode_token_per_req is None:
-            logger.warning("Skip restoring global cos/sin cache after sleep due to incomplete model runner state.")
-            return
-
-        for module in model_runner.model.modules():
-            self.rebuild_rotary_module_cache(module, dtype, device)
-        self.restore_global_cos_sin_cache_from_model(model_runner.model)
-        set_cos_and_sin(self.vllm_config, max_num_reqs, decode_token_per_req, dtype, device)
 
 
 def get_cos_and_sin_mla(positions, use_cache=False):
