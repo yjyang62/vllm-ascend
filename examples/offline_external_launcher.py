@@ -63,13 +63,14 @@ from multiprocessing import Process
 from time import sleep
 
 import torch
-from safetensors.torch import load_file
+from safetensors import safe_open
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (  # noqa E402
     destroy_distributed_environment,
     destroy_model_parallel,
     get_tp_group,
 )
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_open_port
 
@@ -90,17 +91,16 @@ def patch_vllm_moe_model_weight_loader(model):
                 param.weight_loader = mlp.experts.weight_loader
 
 
-def load_and_merge_safetensors(directory):
+def iter_safetensors_weights(directory):
     if not os.path.isdir(directory):
         raise ValueError(f"The provided directory does not exist: {directory}")
-    merged_dict = {}
-    for filename in os.listdir(directory):
+    for filename in sorted(os.listdir(directory)):
         if filename.endswith(".safetensors"):
             file_path = os.path.join(directory, filename)
             print(f"loading file: {file_path}")
-            f = load_file(file_path)
-            merged_dict.update(f)
-    return merged_dict
+            with safe_open(file_path, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    yield key, f.get_tensor(key)
 
 
 def parse_args():
@@ -132,6 +132,7 @@ def parse_args():
         default=None,
         help="Model weight memory usage in GiB (e.g., 1.0 for 0.5B model).",
     )
+    parser.add_argument("--max-model-len", type=int, default=None, help="Maximum model context length.")
     parser.add_argument(
         "--sleep-mode-level",
         type=int,
@@ -169,6 +170,7 @@ def main(
     enable_sleep_mode: bool = False,
     temperature: float = 0.8,
     sleep_mode_level: int = 1,
+    max_model_len: int | None = None,
 ):
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = str(master_port)
@@ -192,16 +194,19 @@ def main(
         top_p=0.95,
         max_tokens=10,
     )
-    llm = LLM(
-        model=model,
-        tensor_parallel_size=tensor_parallel_size,
-        enable_expert_parallel=enable_expert_parallel,
-        enforce_eager=enforce_eager,
-        trust_remote_code=trust_remote_code,
-        distributed_executor_backend="external_launcher",
-        seed=0,
-        enable_sleep_mode=enable_sleep_mode,
-    )
+    llm_kwargs = {
+        "model": model,
+        "tensor_parallel_size": tensor_parallel_size,
+        "enable_expert_parallel": enable_expert_parallel,
+        "enforce_eager": enforce_eager,
+        "trust_remote_code": trust_remote_code,
+        "distributed_executor_backend": "external_launcher",
+        "seed": 0,
+        "enable_sleep_mode": enable_sleep_mode,
+    }
+    if max_model_len is not None:
+        llm_kwargs["max_model_len"] = max_model_len
+    llm = LLM(**llm_kwargs)
     tp_ranks = get_tp_group().ranks
     print(f"TP RANKS: {tp_ranks}")
 
@@ -224,8 +229,10 @@ def main(
             llm.wake_up(tags=["weights"])
             run_model = llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
             patch_vllm_moe_model_weight_loader(run_model)
-            sd = load_and_merge_safetensors(model)
-            run_model.load_weights(sd.items())
+            run_model.load_weights(iter_safetensors_weights(model))
+            vllm_config = llm.llm_engine.vllm_config.model_config
+            device = next(run_model.parameters()).device
+            process_weights_after_loading(run_model, vllm_config, device)
             llm.wake_up(tags=["kv_cache"])
 
         outputs_after_wakeup = llm.generate(prompts, sampling_params)
@@ -294,6 +301,7 @@ if __name__ == "__main__":
                 args.enable_sleep_mode,
                 args.temperature,
                 args.sleep_mode_level,
+                args.max_model_len,
             ),
         )
 

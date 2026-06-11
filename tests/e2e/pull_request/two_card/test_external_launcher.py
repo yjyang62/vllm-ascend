@@ -166,17 +166,16 @@ def test_qwen3_external_launcher_with_sleepmode():
 def test_qwen3_external_launcher_with_sleepmode_level2():
     env = os.environ.copy()
     model_path = snapshot_download(
-        "Qwen/Qwen3-8B",
+        "Qwen/Qwen3.5-35B-A3B",
         local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
     )
-    # TODO: Add moe model test
     cmd = [
         sys.executable,
         str(EXTERNAL_LAUNCHER_SCRIPT),
         "--model",
         model_path,
         "--tp-size",
-        "1",
+        "2",
         "--node-size",
         "1",
         "--node-rank",
@@ -184,11 +183,14 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
         "--proc-per-node",
         "2",
         "--trust-remote-code",
+        "--enable-expert-parallel",
         "--enable-sleep-mode",
         "--temperature",
         "0",
         "--model-weight-gib",
         "16",
+        "--max-model-len",
+        "4096",
         "--sleep-mode-level",
         "2",
     ]
