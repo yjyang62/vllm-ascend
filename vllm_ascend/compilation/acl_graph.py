@@ -15,7 +15,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
-from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
@@ -390,84 +390,6 @@ def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
 
 def get_draft_graph_params():
     return _draft_graph_params
-
-
-class AClGraphMemSaver:
-    def __init__(self, vllm_config: VllmConfig, model_runner_getter: Callable[[], Any]):
-        self.vllm_config = vllm_config
-        self._model_runner_getter = model_runner_getter
-
-    @staticmethod
-    def clear_attention_workspaces(params) -> None:
-        """Clear attention workspaces for one graph-parameter container."""
-        if params is None:
-            return
-        for num_tokens in params.workspaces:
-            params.workspaces[num_tokens] = None
-
-    @classmethod
-    def clear_all_attention_workspaces(cls) -> None:
-        cls.clear_attention_workspaces(_graph_params)
-        cls.clear_attention_workspaces(_draft_graph_params)
-        cls.clear_attention_workspaces(_draft_graph_prefill_params)
-
-    @classmethod
-    def reset_graph_params(cls, params: GraphParams | None) -> None:
-        if params is None:
-            return
-
-        attributes = [
-            "events",
-            "handles",
-            "attn_params",
-            "conv1d_params",
-            "conv1d_handles",
-            "conv1d_events",
-        ]
-
-        for attr_name in attributes:
-            attr_dict = getattr(params, attr_name, None)
-
-            if attr_dict is None:
-                continue
-
-            for num_tokens in list(attr_dict.keys()):
-                attr_dict[num_tokens] = []
-
-    @classmethod
-    def reset_all_graph_params(cls) -> None:
-        cls.reset_graph_params(_graph_params)
-        cls.reset_graph_params(_draft_graph_params)
-        cls.reset_graph_params(_draft_graph_prefill_params)
-        for wrapper in list(_acl_graph_wrappers):
-            wrapper.concrete_aclgraph_entries.clear()
-            wrapper.first_run_finished = False
-
-    def sleep(self) -> None:
-        self.clear_all_attention_workspaces()
-        model_runner = self._model_runner_getter()
-        self.reset_all_graph_params()
-        self._reset_model_runner_graph_manager(model_runner)
-
-    def wakeup(self, tags: list[str] | None = None) -> None:
-        if tags is not None and "kv_cache" not in tags:
-            # Level-2 wakeup restores weights before external weight loading;
-            # recapture graphs only after KV cache is restored.
-            return
-        model_runner = self._model_runner_getter()
-        capture_model = model_runner.capture_model
-        with set_current_vllm_config(self.vllm_config):
-            capture_model()
-
-    @staticmethod
-    def _reset_model_runner_graph_manager(model_runner: Any) -> None:
-        manager = getattr(model_runner, "cudagraph_manager", None)
-        if manager is None:
-            return
-        if hasattr(manager, "graphs"):
-            manager.graphs.clear()
-        if hasattr(manager, "_graphs_captured"):
-            manager._graphs_captured = False
 
 
 _draft_graph_prefill_params: GraphParams | None = None

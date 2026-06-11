@@ -29,7 +29,6 @@ from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetad
 from vllm_ascend.compilation import acl_graph
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphEntry,
-    AClGraphMemSaver,
     ACLGraphWrapper,
     GraphParams,
     get_draft_graph_params,
@@ -38,6 +37,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_draft_graph_params_workspaces,
 )
+from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
 
 
 class TestACLGraphEntry(TestBase):
@@ -782,7 +782,7 @@ class TestSleepGraphParams(TestBase):
             patch("vllm_ascend.compilation.acl_graph._draft_graph_params", None),
             patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params", None),
         ):
-            AClGraphMemSaver.clear_all_attention_workspaces()
+            AclGraphSleepWakeupManager.clear_all_attention_workspaces()
 
         self.assertEqual(set(graph_params.workspaces), {4, 8})
         self.assertIsNone(graph_params.workspaces[4])
@@ -807,7 +807,7 @@ class TestSleepGraphParams(TestBase):
             patch("vllm_ascend.compilation.acl_graph._draft_graph_prefill_params", empty_params),
             patch("vllm_ascend.compilation.acl_graph._acl_graph_wrappers", [wrapper]),
         ):
-            AClGraphMemSaver.reset_all_graph_params()
+            AclGraphSleepWakeupManager.reset_all_graph_params()
 
         self.assertEqual(wrapper.concrete_aclgraph_entries, {})
         self.assertFalse(wrapper.first_run_finished)

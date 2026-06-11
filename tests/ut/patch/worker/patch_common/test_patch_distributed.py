@@ -582,9 +582,6 @@ def test_hccl_sleep_destroy_and_restore_shared_group(module_env):
     assert group._acquired_hccl_keys == []
     assert module_env.destroy_process_group.call_args_list == [call(original_device_group)]
 
-    assert group.destroy_hccl() is False
-    assert module_env.destroy_process_group.call_args_list == [call(original_device_group)]
-
     assert group.restore_hccl() is True
 
     assert len(_calls_with_backend(module_env, "hccl")) == 2
