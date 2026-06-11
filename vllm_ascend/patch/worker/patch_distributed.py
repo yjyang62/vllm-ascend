@@ -25,7 +25,7 @@ from torch.distributed import Backend
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
-from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgRegistry, make_hccl_pg_key
+from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
 from vllm_ascend.utils import create_hccl_pg_options
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
@@ -114,10 +114,10 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
         self.backend = _normalize_backend(torch_distributed_backend)
-        self._acquired_hccl_keys = []
-        self._unshared_hccl_groups = []
+        self._acquired_hccl_keys: list[HcclPgKey] = []
+        self._unshared_hccl_groups: list[object] = []
         self.use_device_communicator = use_device_communicator
-        self.device_communicator = None
+        self.device_communicator: NPUCommunicator | None = None
         self.mq_broadcaster = None
         self.cpu_group = None
         self.device_group = None
