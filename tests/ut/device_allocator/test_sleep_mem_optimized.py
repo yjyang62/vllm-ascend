@@ -16,9 +16,9 @@
 #
 
 from contextlib import nullcontext
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
-from vllm_ascend.device_allocator.sleep_wakeup import (
+from vllm_ascend.device_allocator.sleep_mem_optimized import (
     AclGraphSleepWakeupManager,
     HcclSleepWakeupManager,
     SleepWakeupManager,
@@ -42,35 +42,34 @@ def test_sleep_wakeup_manager_skips_acl_sleep_when_aclgraph_disabled():
     manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
     manager.acl_graph.sleep = MagicMock()
     manager.hccl.sleep = MagicMock()
-    manager._measure_memory_released = MagicMock(return_value=0)
 
-    manager.sleep()
+    with patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.mem_get_info", side_effect=[(10, 20), (12, 20)]):
+        manager.sleep()
 
     manager.acl_graph.sleep.assert_not_called()
-    manager._measure_memory_released.assert_called_once_with(manager.hccl.sleep)
+    manager.hccl.sleep.assert_called_once_with()
 
 
 def test_sleep_wakeup_manager_cleans_acl_before_hccl_when_aclgraph_enabled():
     model_runner = MagicMock()
     model_runner.use_aclgraph = True
     manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
-    manager.acl_graph.sleep = MagicMock()
-    manager.hccl.sleep = MagicMock()
-    manager._measure_memory_released = MagicMock(return_value=0)
+    calls = []
+    manager.acl_graph.sleep = MagicMock(side_effect=lambda: calls.append("acl"))
+    manager.hccl.sleep = MagicMock(side_effect=lambda: calls.append("hccl"))
 
-    manager.sleep()
+    mem_info = [(10, 20), (12, 20), (12, 20), (13, 20)]
+    with patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.mem_get_info", side_effect=mem_info):
+        manager.sleep()
 
-    assert manager._measure_memory_released.call_args_list == [
-        call(manager.acl_graph.sleep),
-        call(manager.hccl.sleep),
-    ]
+    assert calls == ["acl", "hccl"]
 
 
 def test_hccl_wakeup_restores_and_refreshes_moe_groups():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
 
     with (
-        patch("vllm_ascend.device_allocator.sleep_wakeup.set_current_vllm_config", return_value=nullcontext()),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config", return_value=nullcontext()),
         patch.object(manager, "restore_hccl", return_value=2) as mock_restore,
         patch.object(manager, "refresh_moe_hccl_groups") as mock_refresh,
     ):

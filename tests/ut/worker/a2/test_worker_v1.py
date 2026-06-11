@@ -1192,7 +1192,7 @@ class TestNPUWorker(TestBase):
             worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
 
     def test_acl_graph_sleep_wakeup_manager_sleep_resets_acl_graph_state(self):
-        from vllm_ascend.device_allocator.sleep_wakeup import AclGraphSleepWakeupManager
+        from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
 
         model_runner = MagicMock()
         model_runner.use_aclgraph = True
@@ -1203,11 +1203,11 @@ class TestNPUWorker(TestBase):
         saver = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
         with (
             patch(
-                "vllm_ascend.device_allocator.sleep_wakeup.AclGraphSleepWakeupManager"
+                "vllm_ascend.device_allocator.sleep_mem_optimized.AclGraphSleepWakeupManager"
                 ".clear_all_attention_workspaces"
             ) as mock_clear,
             patch(
-                "vllm_ascend.device_allocator.sleep_wakeup.AclGraphSleepWakeupManager.reset_all_graph_params"
+                "vllm_ascend.device_allocator.sleep_mem_optimized.AclGraphSleepWakeupManager.reset_all_graph_params"
             ) as mock_reset,
         ):
             saver.sleep()
@@ -1216,7 +1216,7 @@ class TestNPUWorker(TestBase):
         graph_manager.graphs.clear.assert_called_once()
 
     def test_hccl_sleep_wakeup_manager_sleep_waits_and_destroys(self):
-        from vllm_ascend.device_allocator.sleep_wakeup import HcclSleepWakeupManager
+        from vllm_ascend.device_allocator.sleep_mem_optimized import HcclSleepWakeupManager
 
         worker = MagicMock()
         handle = MagicMock()
@@ -1225,11 +1225,11 @@ class TestNPUWorker(TestBase):
         saver._destroyed = False
 
         with (
-            patch("vllm_ascend.device_allocator.sleep_wakeup.torch.distributed.is_available", return_value=True),
-            patch("vllm_ascend.device_allocator.sleep_wakeup.torch.distributed.is_initialized", return_value=True),
-            patch("vllm_ascend.device_allocator.sleep_wakeup.torch.npu.synchronize") as mock_synchronize,
+            patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_available", return_value=True),
+            patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_initialized", return_value=True),
+            patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.synchronize") as mock_synchronize,
             patch(
-                "vllm_ascend.device_allocator.sleep_wakeup.HcclSleepWakeupManager.destroy_hccl",
+                "vllm_ascend.device_allocator.sleep_mem_optimized.HcclSleepWakeupManager.destroy_hccl",
                 return_value=2,
             ) as mock_destroy,
         ):

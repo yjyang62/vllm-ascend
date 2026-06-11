@@ -37,7 +37,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_draft_graph_params_workspaces,
 )
-from vllm_ascend.device_allocator.sleep_wakeup import AclGraphSleepWakeupManager
+from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
 
 
 class TestACLGraphEntry(TestBase):
