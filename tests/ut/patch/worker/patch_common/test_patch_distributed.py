@@ -597,6 +597,25 @@ def test_hccl_sleep_destroy_and_restore_shared_group(module_env):
     assert group.restore_hccl() is False
 
 
+def test_restore_hccl_reuses_existing_cpu_group(module_env):
+    group = _make_group(
+        module_env,
+        group_ranks=[[0, 1]],
+        group_name="tp",
+        use_device_communicator=True,
+    )
+    original_cpu_group = group.cpu_group
+
+    assert len(_calls_with_backend(module_env, "gloo")) == 1
+
+    group.destroy_hccl()
+    assert group.restore_hccl() is True
+
+    assert group.cpu_group is original_cpu_group
+    assert len(_calls_with_backend(module_env, "gloo")) == 1
+    assert len(_calls_with_backend(module_env, "hccl")) == 2
+
+
 def test_non_hccl_destroy_path_destroys_device_group_directly(module_env):
     group = _make_group(
         module_env,
