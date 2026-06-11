@@ -101,7 +101,6 @@ def iter_transformer_layers(model):
 
 
 def patch_vllm_moe_model_weight_loader(model):
-    patched_params = 0
     for layer in iter_transformer_layers(model):
         mlp_attr = "mlp"
         mlp = getattr(layer, mlp_attr)
