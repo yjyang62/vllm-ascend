@@ -238,13 +238,15 @@ class NPUWorker(WorkerBase):
         if cleanup_enabled:
             if self.model_runner.use_aclgraph:
                 attention_workspace_freed_bytes = self._cleanup_attention_workspace_for_sleep()
+                logger.info(
+                    "Attention workspace memory: %.3f GiB, ",
+                    attention_workspace_freed_bytes / GiB_bytes,
+                )
             global_cos_sin_cache_freed_bytes = self._cleanup_global_cos_sin_cache_for_sleep()
             hccl_freed_bytes = self._cleanup_hccl_group_for_sleep()
             logger.info(
-                "Sleep mode released HCCL memory: %.3f GiB, attention workspace memory: %.3f GiB, "
-                "global sin/cos cache memory: %.3f GiB.",
+                "Sleep mode released HCCL memory: %.3f GiB, global sin/cos cache memory: %.3f GiB.",
                 hccl_freed_bytes / GiB_bytes,
-                attention_workspace_freed_bytes / GiB_bytes,
                 global_cos_sin_cache_freed_bytes / GiB_bytes,
             )
 
@@ -279,7 +281,7 @@ class NPUWorker(WorkerBase):
         model = self.model_runner.model
         if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
             for name, param in model.named_parameters():
-                if "w2_weight" in name and param.shape[1] == hidden_size:
+                if "w2_weight" in name and param.shape[2] == hidden_size:
                     parts = name.split(".")
                     param_name = parts[-1]
                     parent_module = model.get_submodule(".".join(parts[:-1]))
@@ -287,7 +289,7 @@ class NPUWorker(WorkerBase):
                     w2_data = param.transpose(1, 2)
                     w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
                     setattr(parent_module, param_name, w2_data)
-                elif "w13_weight" in name and param.shape[2] == hidden_size:
+                elif "w13_weight" in name and param.shape[1] == hidden_size:
                     parts = name.split(".")
                     param_name = parts[-1]
                     parent_module = model.get_submodule(".".join(parts[:-1]))
