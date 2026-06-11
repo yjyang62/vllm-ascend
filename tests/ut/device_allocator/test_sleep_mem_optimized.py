@@ -42,7 +42,10 @@ def test_sleep_wakeup_manager_skips_acl_sleep_when_aclgraph_disabled():
     manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
     manager.acl_graph.sleep = MagicMock()
     manager.hccl.sleep = MagicMock()
-    with patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.mem_get_info", side_effect=[(10, 20), (12, 20)]):
+    with patch(
+        "vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.mem_get_info",
+        side_effect=[(10, 20), (12, 20)],
+    ):
         manager.sleep()
 
     manager.acl_graph.sleep.assert_not_called()

@@ -46,7 +46,6 @@ class SleepWakeupManager:
     def sleep(self) -> None:
         model_runner = self._model_runner_getter()
         free_bytes_before_cleanup = torch.npu.mem_get_info()[0]
-        attention_workspace_freed_bytes = 0
         if model_runner.use_aclgraph:
             self.acl_graph.sleep()
         self.hccl.sleep()

@@ -266,4 +266,3 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
 _patch_destroy_distributed_environment()
-

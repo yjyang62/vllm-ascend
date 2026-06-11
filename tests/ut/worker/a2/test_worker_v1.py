@@ -1227,7 +1227,10 @@ class TestNPUWorker(TestBase):
 
         with (
             patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_available", return_value=True),
-            patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_initialized", return_value=True),
+            patch(
+                "vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_initialized",
+                return_value=True,
+            ),
             patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.synchronize") as mock_synchronize,
             patch(
                 "vllm_ascend.device_allocator.sleep_mem_optimized.HcclSleepWakeupManager.destroy_hccl",
