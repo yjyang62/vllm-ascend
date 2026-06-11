@@ -67,6 +67,19 @@ def test_sleep_wakeup_manager_cleans_acl_before_hccl_when_aclgraph_enabled():
     assert calls == ["acl", "hccl"]
 
 
+def test_sleep_wakeup_manager_wakes_hccl_before_acl_graph():
+    model_runner = MagicMock()
+    model_runner.use_aclgraph = True
+    manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
+    calls = []
+    manager.hccl.wakeup = MagicMock(side_effect=lambda: calls.append("hccl"))
+    manager.acl_graph.wakeup = MagicMock(side_effect=lambda tags: calls.append(("acl", tags)))
+
+    manager.wakeup(tags=["kv_cache"])
+
+    assert calls == ["hccl", ("acl", ["kv_cache"])]
+
+
 def test_hccl_wakeup_restores_and_refreshes_moe_groups():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
 

@@ -64,6 +64,10 @@ class SleepWakeupManager:
         if model_runner.use_aclgraph:
             self.acl_graph.wakeup(tags)
 
+    def wakeup(self, tags: list[str] | None = None) -> None:
+        self.wakeup_hccl()
+        self.wakeup_acl_graph(tags)
+
 
 class AclGraphSleepWakeupManager:
     def __init__(self, vllm_config: VllmConfig, model_runner_getter: Callable[[], Any]):
