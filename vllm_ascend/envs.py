@@ -109,9 +109,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
-    # Whether to print SFA sparse C8 Hadamard tensor diagnostics.
-    # 0: disabled (default); 1: enabled. Not sensitive.
-    "VLLM_ASCEND_DEBUG_HADAMARD": lambda: bool(int(os.getenv("VLLM_ASCEND_DEBUG_HADAMARD", "0"))),
 }
 
 # end-env-vars-definition

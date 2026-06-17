@@ -170,6 +170,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         metadata_cls: type[AscendSFAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
+        if get_ascend_config().enable_sparse_c8:
+            AscendSFAImpl.log_hadamard_debug_state("AscendSFAMetadataBuilder.__init__.before_super")
         super().__init__(
             kv_cache_spec,
             layer_names,
@@ -178,6 +180,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             metadata_cls if metadata_cls is not None else AscendSFAMetadata,
             supports_dcp_with_varlen,
         )
+        if get_ascend_config().enable_sparse_c8:
+            AscendSFAImpl.log_hadamard_debug_state("AscendSFAMetadataBuilder.__init__.after_super")
 
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
@@ -200,6 +204,8 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
         self.actual_seq_lengths_key = torch.empty_like(self.actual_seq_lengths_query)
+        if get_ascend_config().enable_sparse_c8:
+            AscendSFAImpl.log_hadamard_debug_state("AscendSFAMetadataBuilder.__init__.after_init")
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -369,11 +375,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         if tensor is None:
             return f"{name}=None"
 
-        tensor_info = (
-            f"{name}: shape={tuple(tensor.shape)} dtype={tensor.dtype} device={tensor.device} "
-            f"data_ptr={tensor.data_ptr()}"
-        )
         try:
+            tensor_info = (
+                f"{name}: shape={tuple(tensor.shape)} dtype={tensor.dtype} device={tensor.device} "
+                f"data_ptr={tensor.data_ptr()}"
+            )
             tensor_cpu = tensor.detach().float().cpu()
             nonzero_count = int(torch.count_nonzero(tensor_cpu).item())
             numel = tensor_cpu.numel()
@@ -386,13 +392,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 f"min={min_value:.6f} max={max_value:.6f}"
             )
         except Exception as exc:
-            return f"{tensor_info} stat_error={type(exc).__name__}: {exc}"
+            return f"{name}: stat_error={type(exc).__name__}: {exc}"
 
     @classmethod
     def log_hadamard_debug_state(cls, stage: str) -> None:
-        if not envs.VLLM_ASCEND_DEBUG_HADAMARD:
-            return
-
         logger.warning(
             "[SFA hadamard debug][%s] %s; %s",
             stage,
@@ -573,16 +576,19 @@ class AscendSFAImpl(MLAAttentionImpl):
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
+        hadamard_created = False
         if self.use_sparse_c8_indexer and AscendSFAImpl.q_hadamard is None:
             AscendSFAImpl.q_hadamard = torch.tensor(
                 scipy.linalg.hadamard(HADAMARD_DIM), dtype=torch.bfloat16, device="npu"
             ) / (HADAMARD_DIM**0.5)
+            hadamard_created = True
         if self.use_sparse_c8_indexer and AscendSFAImpl.k_hadamard is None:
             AscendSFAImpl.k_hadamard = torch.tensor(
                 scipy.linalg.hadamard(HADAMARD_DIM), dtype=torch.bfloat16, device="npu"
             ) / (HADAMARD_DIM**0.5)
-        if self.use_sparse_c8_indexer:
-            AscendSFAImpl.log_hadamard_debug_state("process_weights_after_loading")
+            hadamard_created = True
+        if hadamard_created:
+            AscendSFAImpl.log_hadamard_debug_state("process_weights_after_loading.after_create_hadamard")
 
     # Processing the input parameters for MLAPO by reordering and transposing
     # QKV(and part of Q) weight, applying RoPE-related dimension transformations,
@@ -948,7 +954,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
 
         if self.use_sparse_c8_indexer:
-            AscendSFAImpl.log_hadamard_debug_state("before_k_hadamard_matmul")
             k_li = k_li @ AscendSFAImpl.k_hadamard
             k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
@@ -993,7 +998,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.use_sparse_c8_indexer:
             q_li_shape_ori = q_li.shape
-            AscendSFAImpl.log_hadamard_debug_state("before_q_hadamard_matmul")
             q_li = q_li @ AscendSFAImpl.q_hadamard
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)

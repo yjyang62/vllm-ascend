@@ -188,7 +188,7 @@ class NPUWorker(WorkerBase):
                     return
 
     def _log_sfa_hadamard_debug_state(self, stage: str) -> None:
-        if getattr(envs_ascend, "VLLM_ASCEND_DEBUG_HADAMARD", False) is not True:
+        if not get_ascend_config().enable_sparse_c8:
             return
 
         try:
@@ -538,8 +538,12 @@ class NPUWorker(WorkerBase):
             from contextlib import nullcontext
 
             context = nullcontext()  # type: ignore
+        self._log_sfa_hadamard_debug_state("initialize_from_config.before_kv_cache_context")
         with context:
+            self._log_sfa_hadamard_debug_state("initialize_from_config.inside_kv_cache_context.before_initialize_kv_cache")
             self.model_runner.initialize_kv_cache(kv_cache_config)
+            self._log_sfa_hadamard_debug_state("initialize_from_config.inside_kv_cache_context.after_initialize_kv_cache")
+        self._log_sfa_hadamard_debug_state("initialize_from_config.after_kv_cache_context")
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)
