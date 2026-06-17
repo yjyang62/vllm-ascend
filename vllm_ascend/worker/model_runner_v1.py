@@ -102,6 +102,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -2681,7 +2682,14 @@ class NPUModelRunner(GPUModelRunner):
             corresponding memory buffer for KV cache.
         """
         # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+        # Keep metadata builders and derived lookup tensors outside CaMem; sleep
+        # may discard non-offloaded kv_cache-tagged allocations.
+        if self.vllm_config.model_config.enable_sleep_mode:
+            context = CaMemAllocator.get_instance().use_memory_pool(tag="kv_cache")
+        else:
+            context = nullcontext()
+        with context:
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
 

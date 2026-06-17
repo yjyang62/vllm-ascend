@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
@@ -83,6 +83,43 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
+
+    def test_initialize_kv_cache_tensors_pools_only_raw_allocation(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.vllm_config = MagicMock()
+        runner.vllm_config.model_config.enable_sleep_mode = True
+        runner.model_config = MagicMock()
+        runner.model_config.hf_text_config.model_type = "test_model"
+        runner.shared_kv_cache_layers = {}
+        runner.compilation_config = MagicMock()
+        runner.compilation_config.static_forward_context = {}
+        runner.kv_caches = []
+
+        events = []
+        raw_tensors = {"attn": torch.empty(1)}
+        kv_caches = {"attn": torch.empty(1)}
+        runner._allocate_kv_cache_tensors = MagicMock(
+            side_effect=lambda kv_config: events.append("allocate") or raw_tensors
+        )
+        runner._reshape_kv_cache_tensors = MagicMock(
+            side_effect=lambda kv_config, raw: events.append("reshape") or kv_caches
+        )
+
+        context = MagicMock()
+        context.__enter__.side_effect = lambda: events.append("enter_pool")
+        context.__exit__.side_effect = lambda *args: events.append("exit_pool")
+        allocator = MagicMock()
+        allocator.use_memory_pool.return_value = context
+
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.CaMemAllocator.get_instance", return_value=allocator),
+            patch("vllm.v1.worker.utils.bind_kv_cache", side_effect=lambda *args: events.append("bind")),
+        ):
+            result = runner.initialize_kv_cache_tensors(MagicMock())
+
+        self.assertIs(result, kv_caches)
+        allocator.use_memory_pool.assert_called_once_with(tag="kv_cache")
+        self.assertEqual(events, ["enter_pool", "allocate", "exit_pool", "reshape", "bind"])
 
 
 if __name__ == "__main__":

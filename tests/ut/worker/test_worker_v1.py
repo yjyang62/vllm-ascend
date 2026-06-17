@@ -1154,9 +1154,7 @@ class TestNPUWorker(TestBase):
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
 
-    @patch("vllm_ascend.worker.worker.CaMemAllocator")
-    def test_initialize_from_config_with_sleep_mode(self,
-                                                    mock_allocator_class):
+    def test_initialize_from_config_with_sleep_mode(self):
         """Test initialize_from_config method - with sleep mode enabled"""
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -1168,12 +1166,6 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
 
-            # Setup allocator mock
-            mock_allocator = MagicMock()
-            mock_context = MagicMock()
-            mock_allocator.use_memory_pool.return_value = mock_context
-            mock_allocator_class.get_instance.return_value = mock_allocator
-
             # Create mock kv_cache_config
             mock_kv_cache_config = MagicMock()
 
@@ -1181,9 +1173,6 @@ class TestNPUWorker(TestBase):
             worker.initialize_from_config(mock_kv_cache_config)
 
             # Verify calls
-            mock_allocator_class.get_instance.assert_called_once()
-            mock_allocator.use_memory_pool.assert_called_once_with(
-                tag="kv_cache")
             worker.model_runner.initialize_kv_cache.assert_called_once_with(
                 mock_kv_cache_config)
 
