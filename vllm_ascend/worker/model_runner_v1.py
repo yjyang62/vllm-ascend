@@ -566,6 +566,17 @@ class NPUModelRunner(GPUModelRunner):
                 block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
                 parallel_config=self.parallel_config, dtype=self.dtype)
 
+    def _log_sfa_hadamard_debug_state(self, stage: str) -> None:
+        if not self.use_sparse_c8_indexer:
+            return
+
+        try:
+            from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+
+            AscendSFAImpl.log_hadamard_debug_state(stage)
+        except Exception:
+            logger.warning("[SFA hadamard debug][%s] failed to collect state.", stage, exc_info=True)
+
     @property
     def use_cp(self) -> bool:
         return self.pcp_size * self.dcp_size > 1
@@ -3678,7 +3689,9 @@ class NPUModelRunner(GPUModelRunner):
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
+        self._log_sfa_hadamard_debug_state("initialize_kv_cache.before_initialize_attn_backend")
         self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
+        self._log_sfa_hadamard_debug_state("initialize_kv_cache.after_initialize_attn_backend")
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
         self.need_accepted_tokens = any(
@@ -3686,7 +3699,9 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)
+        self._log_sfa_hadamard_debug_state("initialize_kv_cache.before_initialize_kv_cache_tensors")
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
+        self._log_sfa_hadamard_debug_state("initialize_kv_cache.after_initialize_kv_cache_tensors")
         # TODO: refactor the logic of attention
         # Initialize drafter attention group initialization
         if self.speculative_config and (
@@ -4587,6 +4602,11 @@ class NPUModelRunner(GPUModelRunner):
             attn_groups: list[AttentionGroup] = []
             for (attn_backend, kv_cache_spec), layer_names in attn_backends_map.items():
                 attn_metadata_builders = []
+                self._log_sfa_hadamard_debug_state(
+                    f"initialize_attn_backend.create_attn_groups.before_builder."
+                    f"kv_cache_group_id={kv_cache_group_id}."
+                    f"backend={attn_backend.__name__}"
+                )
                 attn_metadata_builders.append(
                     attn_backend.get_builder_cls()(
                         kv_cache_spec,
@@ -4594,6 +4614,11 @@ class NPUModelRunner(GPUModelRunner):
                         self.vllm_config,
                         self.device,
                     )
+                )
+                self._log_sfa_hadamard_debug_state(
+                    f"initialize_attn_backend.create_attn_groups.after_builder."
+                    f"kv_cache_group_id={kv_cache_group_id}."
+                    f"backend={attn_backend.__name__}"
                 )
                 attn_group = AttentionGroup(
                     attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders

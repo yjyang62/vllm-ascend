@@ -212,7 +212,19 @@ class NPUWorker(WorkerBase):
                 except Exception:
                     return
 
+    def _log_sfa_hadamard_debug_state(self, stage: str) -> None:
+        if not get_ascend_config().enable_sparse_c8:
+            return
+
+        try:
+            from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+
+            AscendSFAImpl.log_hadamard_debug_state(stage)
+        except Exception:
+            logger.warning("[SFA hadamard debug][%s] failed to collect state.", stage, exc_info=True)
+
     def sleep(self, level: int = 1) -> None:
+        self._log_sfa_hadamard_debug_state(f"sleep.before_allocator_sleep.level={level}")
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -220,6 +232,7 @@ class NPUWorker(WorkerBase):
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        self._log_sfa_hadamard_debug_state(f"sleep.after_allocator_sleep.level={level}")
         free_bytes_after_sleep, total = torch.npu.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -231,6 +244,8 @@ class NPUWorker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
+        tag_text = ",".join(tags) if tags else "all"
+        self._log_sfa_hadamard_debug_state(f"wake_up.before_allocator_wake_up.tags={tag_text}")
         nz_mode = get_ascend_config().weight_nz_mode
         if nz_mode:
             raise ValueError(
@@ -239,6 +254,7 @@ class NPUWorker(WorkerBase):
             )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
+        self._log_sfa_hadamard_debug_state(f"wake_up.after_allocator_wake_up.tags={tag_text}")
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
@@ -267,6 +283,7 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+        self._log_sfa_hadamard_debug_state(f"wake_up.after_restore_buffers.tags={tag_text}")
 
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
@@ -919,8 +936,11 @@ class NPUWorker(WorkerBase):
             from contextlib import nullcontext
 
             context = nullcontext()  # type: ignore
+        self._log_sfa_hadamard_debug_state("initialize_from_config.before_kv_cache_context")
         with context:
+            self._log_sfa_hadamard_debug_state("initialize_from_config.inside_kv_cache_context.before_initialize_kv_cache")
             self.model_runner.initialize_kv_cache(kv_cache_config)
+            self._log_sfa_hadamard_debug_state("initialize_from_config.inside_kv_cache_context.after_initialize_kv_cache")
 
             # Build KV-zero metadata outside the CuMem pool so the bookkeeping
             # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
@@ -933,6 +953,7 @@ class NPUWorker(WorkerBase):
                 and self.vllm_config.speculative_config.num_speculative_tokens > 1
             ):
                 self.model_runner._init_kv_zero_meta()
+        self._log_sfa_hadamard_debug_state("initialize_from_config.after_kv_cache_context")
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)
