@@ -514,15 +514,7 @@ class NPUWorker(WorkerBase):
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-        if self.vllm_config.model_config.enable_sleep_mode:
-            allocator = CaMemAllocator.get_instance()
-            context = allocator.use_memory_pool(tag="kv_cache")
-        else:
-            from contextlib import nullcontext
-
-            context = nullcontext()  # type: ignore
-        with context:
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+        self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)
