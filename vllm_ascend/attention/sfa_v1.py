@@ -63,6 +63,7 @@ if TYPE_CHECKING:
 
 # token count limits within bmm_transpose operator
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
+HADAMARD_DIM = 128
 
 
 class AscendSFABackend(AttentionBackend):
@@ -363,6 +364,42 @@ class AscendSFAImpl(MLAAttentionImpl):
     q_hadamard: torch.Tensor | None = None
     k_hadamard: torch.Tensor | None = None
 
+    @staticmethod
+    def _format_hadamard_debug_state(name: str, tensor: torch.Tensor | None) -> str:
+        if tensor is None:
+            return f"{name}=None"
+
+        tensor_info = (
+            f"{name}: shape={tuple(tensor.shape)} dtype={tensor.dtype} device={tensor.device} "
+            f"data_ptr={tensor.data_ptr()}"
+        )
+        try:
+            tensor_cpu = tensor.detach().float().cpu()
+            nonzero_count = int(torch.count_nonzero(tensor_cpu).item())
+            numel = tensor_cpu.numel()
+            abs_sum = float(tensor_cpu.abs().sum().item())
+            min_value = float(tensor_cpu.min().item()) if numel else 0.0
+            max_value = float(tensor_cpu.max().item()) if numel else 0.0
+            return (
+                f"{tensor_info} nonzero_count={nonzero_count}/{numel} "
+                f"all_zero={nonzero_count == 0} abs_sum={abs_sum:.6f} "
+                f"min={min_value:.6f} max={max_value:.6f}"
+            )
+        except Exception as exc:
+            return f"{tensor_info} stat_error={type(exc).__name__}: {exc}"
+
+    @classmethod
+    def log_hadamard_debug_state(cls, stage: str) -> None:
+        if not envs.VLLM_ASCEND_DEBUG_HADAMARD:
+            return
+
+        logger.warning(
+            "[SFA hadamard debug][%s] %s; %s",
+            stage,
+            cls._format_hadamard_debug_state("q_hadamard", cls.q_hadamard),
+            cls._format_hadamard_debug_state("k_hadamard", cls.k_hadamard),
+        )
+
     def __init__(
         self,
         num_heads: int,
@@ -537,13 +574,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
         if self.use_sparse_c8_indexer and AscendSFAImpl.q_hadamard is None:
-            AscendSFAImpl.q_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
-                128**0.5
-            )
+            AscendSFAImpl.q_hadamard = torch.tensor(
+                scipy.linalg.hadamard(HADAMARD_DIM), dtype=torch.bfloat16, device="npu"
+            ) / (HADAMARD_DIM**0.5)
         if self.use_sparse_c8_indexer and AscendSFAImpl.k_hadamard is None:
-            AscendSFAImpl.k_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
-                128**0.5
-            )
+            AscendSFAImpl.k_hadamard = torch.tensor(
+                scipy.linalg.hadamard(HADAMARD_DIM), dtype=torch.bfloat16, device="npu"
+            ) / (HADAMARD_DIM**0.5)
+        if self.use_sparse_c8_indexer:
+            AscendSFAImpl.log_hadamard_debug_state("process_weights_after_loading")
 
     # Processing the input parameters for MLAPO by reordering and transposing
     # QKV(and part of Q) weight, applying RoPE-related dimension transformations,
@@ -909,6 +948,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
 
         if self.use_sparse_c8_indexer:
+            AscendSFAImpl.log_hadamard_debug_state("before_k_hadamard_matmul")
             k_li = k_li @ AscendSFAImpl.k_hadamard
             k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
@@ -953,6 +993,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.use_sparse_c8_indexer:
             q_li_shape_ori = q_li.shape
+            AscendSFAImpl.log_hadamard_debug_state("before_q_hadamard_matmul")
             q_li = q_li @ AscendSFAImpl.q_hadamard
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)
