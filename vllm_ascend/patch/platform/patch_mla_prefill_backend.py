@@ -14,35 +14,45 @@
 
 import torch
 import vllm.model_executor.layers.attention.mla_attention
-from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+
+try:
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+except ModuleNotFoundError as exc:
+    if exc.name is None or not exc.name.startswith("vllm.v1.attention.backends.mla.prefill"):
+        raise
+    # Older vLLM versions do not have the MLAPrefillBackend abstraction.
+    MLAPrefillBackend = None
 
 
-class AscendMLAPrefillBackend(MLAPrefillBackend):
-    @staticmethod
-    def get_name() -> str:
-        return "ASCEND"
+if MLAPrefillBackend is not None:
 
-    @classmethod
-    def is_available(cls) -> bool:
-        return True
+    class AscendMLAPrefillBackend(MLAPrefillBackend):
+        @staticmethod
+        def get_name() -> str:
+            return "ASCEND"
 
-    def run_prefill_new_tokens(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        return_softmax_lse: bool,
-    ) -> torch.Tensor:
-        raise NotImplementedError("Ascend MLA prefill is handled by AscendSFAImpl/AscendMLAImpl")
+        @classmethod
+        def is_available(cls) -> bool:
+            return True
 
-    def run_prefill_context_chunk(
-        self,
-        chunk_idx: int,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError("Ascend MLA prefill is handled by AscendSFAImpl/AscendMLAImpl")
+        def run_prefill_new_tokens(
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            return_softmax_lse: bool,
+        ) -> torch.Tensor:
+            raise NotImplementedError("Ascend MLA prefill is handled by AscendSFAImpl/AscendMLAImpl")
 
+        def run_prefill_context_chunk(
+            self,
+            chunk_idx: int,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            raise NotImplementedError("Ascend MLA prefill is handled by AscendSFAImpl/AscendMLAImpl")
 
-vllm.model_executor.layers.attention.mla_attention.get_mla_prefill_backend = lambda vllm_config: AscendMLAPrefillBackend
+    vllm.model_executor.layers.attention.mla_attention.get_mla_prefill_backend = (
+        lambda vllm_config: AscendMLAPrefillBackend
+    )
