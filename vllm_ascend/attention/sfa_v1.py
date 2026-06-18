@@ -378,23 +378,23 @@ class AscendSFAImpl(MLAAttentionImpl):
     k_hadamard: torch.Tensor | None = None
 
     @staticmethod
-    def _format_hadamard_matrix(name: str, tensor: torch.Tensor | None) -> str:
+    def _format_hadamard_matrix(tensor: torch.Tensor | None) -> str:
         if tensor is None:
-            return f"{name}_matrix=None"
+            return "hadamard_matrix=None"
 
         try:
-            matrix = tensor.detach().float().cpu().tolist()
-            return f"{name}_matrix={matrix}"
+            matrix = tensor.detach().float().cpu()[:3, :3].tolist()
+            return f"hadamard_matrix={matrix}"
         except Exception as exc:
-            return f"{name}_matrix: dump_error={type(exc).__name__}: {exc}"
+            return f"hadamard_matrix: dump_error={type(exc).__name__}: {exc}"
 
     @classmethod
     def log_hadamard_matrix(cls, stage: str) -> None:
+        hadamard = cls.q_hadamard if cls.q_hadamard is not None else cls.k_hadamard
         logger.warning(
-            "[SFA hadamard matrix][%s] %s; %s",
+            "[SFA hadamard matrix][%s] %s",
             stage,
-            cls._format_hadamard_matrix("q_hadamard", cls.q_hadamard),
-            cls._format_hadamard_matrix("k_hadamard", cls.k_hadamard),
+            cls._format_hadamard_matrix(hadamard),
         )
 
     def __init__(

@@ -83,24 +83,40 @@ class TestAscendSFAImplHadamardLogging(TestBase):
         AscendSFAImpl.k_hadamard = None
 
     def test_format_hadamard_matrix(self):
-        tensor = torch.tensor([[1, -1], [1, 1]], dtype=torch.float16)
+        tensor = torch.tensor(
+            [
+                [1, -1, 1, -1],
+                [1, 1, -1, -1],
+                [1, -1, -1, 1],
+                [1, 1, 1, 1],
+            ],
+            dtype=torch.float16,
+        )
 
-        result = AscendSFAImpl._format_hadamard_matrix("q_hadamard", tensor)
+        result = AscendSFAImpl._format_hadamard_matrix(tensor)
 
-        self.assertEqual(result, "q_hadamard_matrix=[[1.0, -1.0], [1.0, 1.0]]")
+        expected_matrix = (
+            "hadamard_matrix=[[1.0, -1.0, 1.0], [1.0, 1.0, -1.0], [1.0, -1.0, -1.0]]"
+        )
+        self.assertEqual(result, expected_matrix)
 
     @patch("vllm_ascend.attention.sfa_v1.logger")
     def test_log_hadamard_matrix(self, mock_logger):
-        AscendSFAImpl.q_hadamard = torch.tensor([[1, -1]], dtype=torch.float16)
-        AscendSFAImpl.k_hadamard = torch.tensor([[1, 1]], dtype=torch.float16)
+        AscendSFAImpl.q_hadamard = torch.tensor(
+            [
+                [1, -1, 1],
+                [1, 1, -1],
+                [1, -1, -1],
+            ],
+            dtype=torch.float16,
+        )
 
-        AscendSFAImpl.log_hadamard_matrix("sleep.before.level=1")
+        AscendSFAImpl.log_hadamard_matrix("sleep.before")
 
         mock_logger.warning.assert_called_once_with(
-            "[SFA hadamard matrix][%s] %s; %s",
-            "sleep.before.level=1",
-            "q_hadamard_matrix=[[1.0, -1.0]]",
-            "k_hadamard_matrix=[[1.0, 1.0]]",
+            "[SFA hadamard matrix][%s] %s",
+            "sleep.before",
+            "hadamard_matrix=[[1.0, -1.0, 1.0], [1.0, 1.0, -1.0], [1.0, -1.0, -1.0]]",
         )
 
 
