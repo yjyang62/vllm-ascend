@@ -19,7 +19,6 @@ from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h  # noqa: F401
 from .chunk_delta_hupdate import chunk_gated_delta_rule_fwd_hupdate
 from .chunk_o import chunk_fwd_o  # noqa: F401
-from .chunk_o_update import chunk_fwd_o_update
 from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .l2norm import l2norm_fwd
@@ -49,7 +48,9 @@ def chunk_gated_delta_rule_fwd(
         num_decodes = attn_metadata.num_decodes
     chunk_size = 64
     block_indices_cumsum = None if prebuilt_meta is None else prebuilt_meta.block_indices_cumsum
+    cu_seqlens_host = None if prebuilt_meta is None else prebuilt_meta.cu_seqlens_host
     chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_chunk64
+    chunk_indices_chunk64_host = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_chunk64_host
     chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.chunk_offsets_chunk64
     update_chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.update_chunk_offsets_chunk64
     final_chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.final_chunk_indices_chunk64
@@ -92,8 +93,12 @@ def chunk_gated_delta_rule_fwd(
     g_ascendc = g.transpose(1, 2).contiguous()
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
 
-    cu_seqlens = cu_seqlens.to(torch.int64)
+    cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
     chunk_indices = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
+    if cu_seqlens_host is None and cu_seqlens is not None:
+        cu_seqlens_host = tuple(cu_seqlens.tolist())
+    if chunk_indices_chunk64_host is None and chunk_indices is not None:
+        chunk_indices_chunk64_host = tuple(chunk_indices.flatten().tolist())
     h, v_new, final_state = torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
         k_ascendc,
         w_ascendc,
@@ -104,8 +109,8 @@ def chunk_gated_delta_rule_fwd(
         output_final_state=True,
         chunk_size=64,
         save_new_value=True,
-        cu_seqlens=cu_seqlens.tolist() if cu_seqlens is not None else None,
-        chunk_indices=chunk_indices.flatten().tolist() if chunk_indices is not None else None,
+        cu_seqlens=cu_seqlens_host,
+        chunk_indices=chunk_indices_chunk64_host,
         use_exp2=False,
         transpose_state_layout=False,
     )
@@ -144,15 +149,23 @@ def chunk_gated_delta_rule_fwd(
         else:
             updated_h_state = updated_state[get_pcp_group().rank_in_group - 1, ...]
 
-        h = chunk_fwd_o_update(
-            q=q,
-            v=v_new,
-            h=h,
-            h_update=h_update,
-            updated_h_state=updated_h_state,
-            cu_seqlens=cu_seqlens,
-            chunk_offsets=chunk_offsets_chunk64,
-        )
+        if get_pcp_group().rank_in_group > 0:
+            rerun_initial_state = initial_state.clone()
+            prefill_slice = slice(num_decodes, final_state.shape[0])
+            rerun_initial_state[prefill_slice] = updated_h_state[prefill_slice]
+            h, v_new, _ = chunk_gated_delta_rule_fwd_h(
+                k=k,
+                w=w,
+                u=u,
+                g=g,
+                initial_state=rerun_initial_state,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices_chunk64,
+                chunk_offsets=chunk_offsets_chunk64,
+            )
+            h = h.transpose(1, 2).contiguous()
+            v_new = v_new.transpose(1, 2).contiguous()
 
     o_ascendc = torch.ops._C_ascend.chunk_fwd_o(
         q_ascendc,
@@ -162,8 +175,8 @@ def chunk_gated_delta_rule_fwd(
         scale,
         g=g_ascendc,
         g_gamma=None,
-        cu_seqlens=cu_seqlens.tolist() if cu_seqlens is not None else None,
-        chunk_indices=chunk_indices.flatten().tolist() if chunk_indices is not None else None,
+        cu_seqlens=cu_seqlens_host,
+        chunk_indices=chunk_indices_chunk64_host,
         chunk_size=64,
         transpose_state_layout=False,
     )
@@ -229,6 +242,9 @@ def chunk_gated_delta_rule(
     prebuilt_meta=None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
+    core_attn_out: torch.Tensor | None = None,
 ):
     r"""
     Args:

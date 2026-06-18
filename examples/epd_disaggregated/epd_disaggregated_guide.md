@@ -70,7 +70,7 @@ export ASCEND_RT_VISIBLE_DEVICES=1
 
 vllm serve "/your/local/model/path/Qwen3-VL-8B-Instruct" \
     --gpu-memory-utilization 0.7 \
-    --port "33003" \
+    --port "33005" \
     --enforce-eager \
     --enable-request-id-headers \
     --served-model-name qwenvl \
@@ -206,8 +206,6 @@ vllm serve "/home/p00929506/Qwen3-VL-8B-Instruct" \
       '{"kv_connector": "MooncakeLayerwiseConnector",
       "kv_role": "kv_producer",
       "kv_port": "50001",
-      "engine_id": "0",
-      "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
       "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {
@@ -249,8 +247,6 @@ vllm serve "/your/local/model/path/Qwen3-VL-8B-Instruct" \
       '{"kv_connector": "MooncakeLayerwiseConnector",
         "kv_role": "kv_consumer",
         "kv_port": "50001",
-        "engine_id": "1",
-        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
         "kv_connector_extra_config": {
                   "use_ascend_direct": true,
                   "prefill": {
@@ -276,7 +272,7 @@ Content of the run_proxy.sh script
 ```shell
 python3 epd_load_balance_proxy_layerwise_server_example.py \
     --encoder-hosts 127.0.0.1 \
-    --encoder-ports 23001 23002 \
+    --encoder-ports 23001 \
     --prefiller-hosts 127.0.0.1 \
     --prefiller-ports 33003 \
     --decoder-hosts 127.0.0.1 \
