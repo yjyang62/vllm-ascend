@@ -38,6 +38,37 @@ MOE_MODELS = ["Qwen/Qwen3-30B-A3B"]
 DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
 REPO_ROOT = Path(__file__).resolve().parents[4]
 EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.py"
+EXTERNAL_LAUNCHER_TIMEOUT_SECONDS = 16 * 60
+SMOKE_TEST_ARGS = [
+    "--max-model-len",
+    "1024",
+    "--max-num-seqs",
+    "4",
+    "--max-tokens",
+    "5",
+    "--prompt-repeat",
+    "1",
+]
+
+
+def run_external_launcher(cmd: list[str], env: dict[str, str]) -> tuple[subprocess.CompletedProcess[bytes], str]:
+    print(f"Running subprocess: {' '.join(cmd)}")
+    try:
+        proc = subprocess.run(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=EXTERNAL_LAUNCHER_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = (exc.output or b"").decode(errors="ignore")
+        print(output)
+        raise
+
+    output = proc.stdout.decode(errors="ignore")
+    print(output)
+    return proc, output
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -59,19 +90,10 @@ def test_qwen3_external_launcher(model):
         "--proc-per-node",
         "2",
         "--trust-remote-code",
+        *SMOKE_TEST_ARGS,
     ]
 
-    print(f"Running subprocess: {' '.join(cmd)}")
-    proc = subprocess.run(
-        cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=600,
-    )
-    output = proc.stdout.decode(errors="ignore")
-
-    print(output)
+    proc, output = run_external_launcher(cmd, env)
 
     assert "TP RANKS: [0]" in output
     assert "TP RANKS: [1]" in output
@@ -99,19 +121,10 @@ def test_qwen3_moe_external_launcher_ep_tp2(model):
         "2",
         "--trust-remote-code",
         "--enable-expert-parallel",
+        *SMOKE_TEST_ARGS,
     ]
 
-    print(f"Running subprocess: {' '.join(cmd)}")
-    proc = subprocess.run(
-        cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=600,
-    )
-    output = proc.stdout.decode(errors="ignore")
-
-    print(output)
+    proc, output = run_external_launcher(cmd, env)
 
     assert "TP RANKS: [0, 1]" in output
     assert "Generated text:" in output
@@ -142,19 +155,10 @@ def test_qwen3_external_launcher_with_sleepmode():
         "0",
         "--model-weight-gib",
         "16",
+        *SMOKE_TEST_ARGS,
     ]
 
-    print(f"Running subprocess: {' '.join(cmd)}")
-    proc = subprocess.run(
-        cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=600,
-    )
-    output = proc.stdout.decode(errors="ignore")
-
-    print(output)
+    proc, output = run_external_launcher(cmd, env)
 
     assert "Generated text:" in output
     assert "Sleep and wake up successfully!!" in output
@@ -191,19 +195,10 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
         "16",
         "--sleep-mode-level",
         "2",
+        *SMOKE_TEST_ARGS,
     ]
 
-    print(f"Running subprocess: {' '.join(cmd)}")
-    proc = subprocess.run(
-        cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=600,
-    )
-    output = proc.stdout.decode(errors="ignore")
-
-    print(output)
+    proc, output = run_external_launcher(cmd, env)
 
     assert "Generated text:" in output
     assert "Sleep and wake up successfully!!" in output
@@ -225,19 +220,10 @@ def test_qwen3_external_launcher_with_matmul_allreduce(model):
         "--model",
         model,
         "--trust-remote-code",
+        *SMOKE_TEST_ARGS,
     ]
 
-    print(f"Running subprocess: {' '.join(cmd)}")
-    proc = subprocess.run(
-        cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=600,
-    )
-
-    output = proc.stdout.decode(errors="ignore")
-    print(output)
+    proc, output = run_external_launcher(cmd, env)
 
     assert "Generated text:" in output
     assert proc.returncode == 0

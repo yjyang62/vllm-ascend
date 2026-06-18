@@ -60,7 +60,7 @@ import contextlib
 import gc
 import os
 from multiprocessing import Process
-from time import sleep
+from time import monotonic, sleep
 
 import torch
 from safetensors.torch import load_file
@@ -75,6 +75,10 @@ from vllm.utils.network_utils import get_open_port
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+PROCESS_JOIN_TIMEOUT_SECONDS = 15 * 60
+PROCESS_POLL_INTERVAL_SECONDS = 1.0
+PROCESS_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
 def patch_vllm_moe_model_weight_loader(model):
@@ -139,8 +143,40 @@ def parse_args():
         default=1,
         help="Sleep mode level: 1 or 2. This example of level 2 is only supported for dense model.",
     )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=None,
+        help="Maximum model sequence length to pass to LLM.",
+    )
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=None,
+        help="Maximum number of sequences to pass to LLM.",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=10,
+        help="Maximum number of generated tokens per prompt.",
+    )
+    parser.add_argument(
+        "--prompt-repeat",
+        type=int,
+        default=10,
+        help="Number of times to repeat the base prompt set.",
+    )
 
     args = parser.parse_args()
+    if args.max_model_len is not None and args.max_model_len <= 0:
+        parser.error("max-model-len must be greater than 0 when provided.")
+    if args.max_num_seqs is not None and args.max_num_seqs <= 0:
+        parser.error("max-num-seqs must be greater than 0 when provided.")
+    if args.max_tokens <= 0:
+        parser.error("max-tokens must be greater than 0.")
+    if args.prompt_repeat <= 0:
+        parser.error("prompt-repeat must be greater than 0.")
     if args.enable_sleep_mode:
         if args.model_weight_gib is None or args.temperature != 0:
             parser.error(
@@ -159,7 +195,7 @@ def main(
     rank: int,
     master_addr: str,
     master_port: int,
-    model_weight_gib: float,
+    model_weight_gib: float | None,
     model: str = "Qwen/Qwen3-0.6B",
     world_size: int = 4,
     tensor_parallel_size: int = 2,
@@ -169,6 +205,10 @@ def main(
     enable_sleep_mode: bool = False,
     temperature: float = 0.8,
     sleep_mode_level: int = 1,
+    max_model_len: int | None = None,
+    max_num_seqs: int | None = None,
+    max_tokens: int = 10,
+    prompt_repeat: int = 10,
 ):
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = str(master_port)
@@ -181,17 +221,23 @@ def main(
             world_size=world_size,
             rank=rank,
         )
-    prompts = [
+    base_prompts = [
         "Hello, my name is",
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
-    ] * 10
+    ]
+    prompts = base_prompts * prompt_repeat
     sampling_params = SamplingParams(
         temperature=temperature,
         top_p=0.95,
-        max_tokens=10,
+        max_tokens=max_tokens,
     )
+    llm_kwargs = {}
+    if max_model_len is not None:
+        llm_kwargs["max_model_len"] = max_model_len
+    if max_num_seqs is not None:
+        llm_kwargs["max_num_seqs"] = max_num_seqs
     llm = LLM(
         model=model,
         tensor_parallel_size=tensor_parallel_size,
@@ -201,6 +247,7 @@ def main(
         distributed_executor_backend="external_launcher",
         seed=0,
         enable_sleep_mode=enable_sleep_mode,
+        **llm_kwargs,
     )
     tp_ranks = get_tp_group().ranks
     print(f"TP RANKS: {tp_ranks}")
@@ -209,10 +256,10 @@ def main(
 
     if enable_sleep_mode:
         if rank == 0:
-            free_bytes_before_sleep, total = torch.npu.mem_get_info()
+            free_bytes_before_sleep, _ = torch.npu.mem_get_info()
         llm.sleep(level=sleep_mode_level)
         if rank == 0:
-            free_bytes_after_sleep, total = torch.npu.mem_get_info()
+            free_bytes_after_sleep, _ = torch.npu.mem_get_info()
             freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
             print(f"Freed memory: {freed_bytes / 1024**3:.2f} GiB")
             # now the freed memory should be larger than the model weights
@@ -258,6 +305,45 @@ def cleanup_env_and_memory():
     torch.npu.reset_peak_memory_stats()
 
 
+def stop_processes(procs: list[Process]):
+    for proc in procs:
+        if proc.exitcode is None:
+            proc.kill()
+    for proc in procs:
+        proc.join(timeout=PROCESS_SHUTDOWN_TIMEOUT_SECONDS)
+
+
+def wait_for_processes(procs: list[Process], timeout_seconds: float) -> int:
+    deadline = monotonic() + timeout_seconds
+    pending = list(procs)
+
+    while pending:
+        for proc in pending[:]:
+            proc.join(timeout=0)
+            if proc.exitcode is None:
+                continue
+
+            pending.remove(proc)
+            if proc.exitcode:
+                print(f"Process {proc.pid} exited with code {proc.exitcode}; stopping remaining ranks.")
+                stop_processes(pending)
+                return proc.exitcode
+
+        if not pending:
+            return 0
+
+        remaining_seconds = deadline - monotonic()
+        if remaining_seconds <= 0:
+            for proc in pending:
+                print(f"Killing process {proc.pid} that did not stop within {timeout_seconds / 60:.0f} minutes.")
+            stop_processes(pending)
+            return 1
+
+        sleep(min(PROCESS_POLL_INTERVAL_SECONDS, remaining_seconds))
+
+    return 0
+
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -294,19 +380,14 @@ if __name__ == "__main__":
                 args.enable_sleep_mode,
                 args.temperature,
                 args.sleep_mode_level,
+                args.max_model_len,
+                args.max_num_seqs,
+                args.max_tokens,
+                args.prompt_repeat,
             ),
         )
 
         proc.start()
         procs.append(proc)
-    exit_code = 0
-    for proc in procs:
-        proc.join(timeout=600)
-        if proc.exitcode is None:
-            print(f"Killing process {proc.pid} that didn't stop within 30 minutes.")
-            proc.kill()
-            exit_code = 1
-        elif proc.exitcode:
-            exit_code = proc.exitcode
 
-    exit(exit_code)
+    raise SystemExit(wait_for_processes(procs, PROCESS_JOIN_TIMEOUT_SECONDS))
