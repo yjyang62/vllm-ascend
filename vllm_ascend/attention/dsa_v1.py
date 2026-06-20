@@ -355,6 +355,23 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     understand this class
     """
 
+    @classmethod
+    def initialize_hadamard(cls, hf_config, device: torch.device) -> None:
+        if cls.hadamard is not None or hf_config.model_type != "deepseek_v4":
+            return
+
+        indexer_head_dim = hf_config.index_head_dim
+        try:
+            from scipy.linalg import hadamard  # type: ignore[import-untyped]
+        except ImportError as e:
+            raise ImportError("Please install scipy") from e
+
+        log_dim = math.ceil(math.log2(indexer_head_dim))
+        dim_padded = 2**log_dim
+        cls.hadamard = torch.tensor(hadamard(dim_padded, dtype=float), dtype=torch.float, device=device).to(
+            torch.bfloat16
+        )
+
     def __init__(
         self,
         kv_cache_spec: MLAAttentionSpec,
@@ -413,20 +430,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
-        hf_config = self.model_config.hf_config
-
-        if AscendDSAMetadataBuilder.hadamard is None:
-            if hf_config.model_type == "deepseek_v4":
-                indexer_head_dim = hf_config.index_head_dim
-                try:
-                    from scipy.linalg import hadamard  # type: ignore[import-untyped]
-                except ImportError as e:
-                    raise ImportError("Please install scipy") from e
-                log_dim = math.ceil(math.log2(indexer_head_dim))
-                dim_padded = 2**log_dim
-                AscendDSAMetadataBuilder.hadamard = torch.tensor(
-                    hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                ).to(torch.bfloat16)
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.start_pos_decode = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.decode_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)

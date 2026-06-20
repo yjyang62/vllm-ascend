@@ -912,6 +912,17 @@ class NPUWorker(WorkerBase):
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+        # Keep DSA Hadamard outside the sleep-managed KV cache pool so sleep does not release it.
+        hf_config = self.vllm_config.model_config.hf_config
+        parallel_config = self.vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
+            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
+
+            AscendDSACPMetadataBuilder.initialize_hadamard(hf_config, self.device)
+        else:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+
+            AscendDSAMetadataBuilder.initialize_hadamard(hf_config, self.device)
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
