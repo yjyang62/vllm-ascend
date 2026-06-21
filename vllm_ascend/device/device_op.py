@@ -535,12 +535,12 @@ class BaseDeviceAdaptor:
         return "PA_ND"
 
     @staticmethod
-    def get_dsa_swa_only_cmp_ratio(compress_ratio):
-        """cmp_ratio for the SWA-only (no compression) scenario.
+    def get_dsa_swa_only_cmp_ratio():
+        """cmp_ratio sentinel for the SWA-only (no compression) scenario.
 
         The FP8 kv_quant / BF16 sparse_attn_sharedkv ops require ``1`` for the
         non-compressed case."""
-        return max(compress_ratio, 1)
+        return 1
 
     # ===== SWA / Compressor KV Scatter =====
 
@@ -1203,12 +1203,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return "PA_ND"
 
     @staticmethod
-    def get_dsa_swa_only_cmp_ratio(compress_ratio):
+    def get_dsa_swa_only_cmp_ratio():
         # sparse_flash_mla only accepts cmp_ratio in {4, 128}; the SWA-only
         # (scenario one) path passes 0 to signal "no compression".
         if dsv4_use_kv_bf16():
             return 0
-        return max(compress_ratio, 1)
+        return 1
 
     # ===== SWA / Compressor KV Scatter =====
 
