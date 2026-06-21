@@ -116,7 +116,7 @@ def test_a5_sparse_attn_kwargs_and_layout_by_kv_dtype(use_bf16):
         base_kwargs = A5DeviceAdaptor.get_dsa_sparse_attn_base_kwargs()
         metadata_kwargs = A5DeviceAdaptor.get_dsa_sparse_attn_metadata_kwargs("npu:0")
         layout = A5DeviceAdaptor.get_dsa_kv_layout()
-        swa_only_cmp_ratio = A5DeviceAdaptor.get_dsa_swa_only_cmp_ratio(0)
+        swa_only_cmp_ratio = A5DeviceAdaptor.get_dsa_swa_only_cmp_ratio()
 
     if use_bf16:
         # sparse_flash_mla drops the FP8-quant-only attributes.
