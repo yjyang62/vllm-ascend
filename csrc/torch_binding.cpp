@@ -1283,6 +1283,12 @@ std::tuple<at::Tensor, at::Tensor> npu_sparse_attn_sharedkv_npu(const at::Tensor
 // BF16 shared-KV sparse attention for DeepSeek-V4 on Ascend A5 (SparseFlashMla).
 // Mirrors npu_sparse_attn_sharedkv but dispatches to aclnnSparseFlashMla, which
 // consumes BF16 ori_kv/cmp_kv (PA_BBND) instead of FP8 (PA_ND).
+//
+// NOTE: the EXEC_NPU_CMD argument list below mirrors aclnnSparseAttnSharedkv.
+// The aclnnSparseFlashMla README lists additional placeholder inputs
+// (seqused_cmp_kv, cmp_residual_kv, ori_topk_length, cmp_topk_length). The exact
+// argument order/count MUST be reconciled with the real aclnnSparseFlashMla
+// header from CANN ops-transformer before enabling on hardware.
 std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_npu(const at::Tensor &q, const c10::optional<at::Tensor> &ori_kv,
     const c10::optional<at::Tensor> &cmp_kv, const c10::optional<at::Tensor> &ori_sparse_indices,
     const c10::optional<at::Tensor> &cmp_sparse_indices, const c10::optional<at::Tensor> &ori_block_table,
@@ -1381,6 +1387,8 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_npu(
 }
 
 // Metadata (core-split result) builder for npu_sparse_flash_mla.
+// NOTE: as with npu_sparse_flash_mla_npu, the EXEC_NPU_CMD argument list must be
+// reconciled with the real aclnnSparseFlashMlaMetadata header before hardware use.
 at::Tensor npu_sparse_flash_mla_metadata_npu(
     int64_t num_heads_q,
     int64_t num_heads_kv,
