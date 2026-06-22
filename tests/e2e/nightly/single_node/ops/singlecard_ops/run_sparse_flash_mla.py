@@ -73,10 +73,12 @@ import torch
 SEED = 42
 NUM_Q_HEADS = 64  # SparseFlashMla TND constraint: N1 == 64
 NUM_KV_HEADS = 1  # KV_N == 1
-# Query head dim. For DSV4 MLA the cache packs rope(64) + nope(512) = 576.
-# If the operator output head_dim differs (MLA-absorb nope/rope split), the
-# golden comparison is skipped and only the smoke check is reported.
-HEAD_DIM = 576
+# DSV4 MLA head_dim == 512 and already INCLUDES rope:
+#   head_dim (512) = nope_head_dim (448) + rope_head_dim (64).
+# (The FP8 path's 640 was 512 + a 128-byte per-tile scale segment.)
+# The metadata op enforces head_dim == 512. q / kv / output are all 512, so the
+# shared-KV golden applies directly.
+HEAD_DIM = 512
 BLOCK_SIZE = 64  # PageAttention block size, multiple of 16, <= 1024
 WINDOW = 128  # sliding window size; ori_win_left == WINDOW - 1 == 127
 DTYPE = torch.bfloat16
