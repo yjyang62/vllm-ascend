@@ -4,15 +4,18 @@
 NOT a pytest file. Run directly:
     python tests/e2e/nightly/single_node/ops/singlecard_ops/run_sparse_flash_mla.py
 
-You import the operator yourself. Add ONE of the following at the top of this
-file (or in your shell before running), so that the name ``sparse_flash_mla``
-is available in this module's namespace, e.g.:
+You import the operators yourself. ``sparse_flash_mla`` requires a ``metadata``
+tensor (the aicpu core-split result), so import BOTH the op and its metadata
+builder at the top of this file, e.g.:
 
-    import torch_npu
-    sparse_flash_mla = torch_npu.sparse_flash_mla
-    # or:  from <your_module> import sparse_flash_mla
+    from cann_ops_transformer.ops.sparse_flash_mla import sparse_flash_mla
+    from cann_ops_transformer.ops.sparse_flash_mla_metadata import sparse_flash_mla_metadata
+    # (adjust module paths to your install)
 
-The script then calls ``sparse_flash_mla(...)`` directly.
+The script then calls ``sparse_flash_mla_metadata(...)`` to build ``metadata``
+and ``sparse_flash_mla(...)`` directly. The metadata builder's exact argument
+names vary by version, so the script discovers them via ``inspect.signature``
+and only passes matching kwargs (it prints the discovered signature).
 
 Operator interface under test (ops-transformer)::
 
@@ -53,14 +56,15 @@ comparison against a shared-KV causal-attention golden with an attention sink,
 using seq_len <= window so the sliding window reduces to plain causal.
 """
 
+import inspect
 import math
 
 import torch
 
 # ---------------------------------------------------------------------------
-# >>> IMPORT THE OPERATOR YOURSELF (uncomment / edit one of these) <<<
-# import torch_npu
-# sparse_flash_mla = torch_npu.sparse_flash_mla
+# >>> IMPORT THE OPERATORS YOURSELF (uncomment / edit to match your install) <<<
+# from cann_ops_transformer.ops.sparse_flash_mla import sparse_flash_mla
+# from cann_ops_transformer.ops.sparse_flash_mla_metadata import sparse_flash_mla_metadata
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -127,7 +131,66 @@ def _golden_shared_kv_attention(q, kv, sinks, scale):
     return out
 
 
-def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, scale):
+def _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv):
+    """Build the required `metadata` tensor via sparse_flash_mla_metadata.
+
+    The metadata builder's argument names differ across versions, so we
+    introspect its signature and only pass the kwargs it accepts (printing the
+    discovered signature). If the call fails, paste the printed signature back
+    and the kwargs can be adjusted.
+    """
+    meta_op = globals().get("sparse_flash_mla_metadata")
+    if meta_op is None:
+        raise RuntimeError(
+            "`sparse_flash_mla_metadata` is not imported. The op requires a "
+            "`metadata` tensor; import the metadata builder at the top of this file."
+        )
+
+    sig = inspect.signature(meta_op)
+    print(f"[metadata] sparse_flash_mla_metadata{sig}")
+
+    # Superset of candidate kwargs for scenario 1 (SWA-only). Names cover the
+    # observed sparse_flash_mla / kv_quant_sparse_attn_sharedkv_metadata vocab.
+    candidates = {
+        "num_heads_q": NUM_Q_HEADS,
+        "num_heads_kv": NUM_KV_HEADS,
+        "head_dim": HEAD_DIM,
+        "cu_seqlens_q": cu_seqlens_q,
+        "cu_seqlens_ori_kv": cu_seqlens_q,
+        "cu_seqlens_cmp_kv": None,
+        "seqused_q": None,
+        "seqused_ori_kv": seqused_ori_kv,
+        "seqused_cmp_kv": None,
+        "seqused_kv": seqused_ori_kv,
+        "batch_size": 1,
+        "max_seqlen_q": t_len,
+        "max_seqlen_kv": seq_len,
+        "max_seqlen_ori_kv": seq_len,
+        "ori_topk": 0,
+        "cmp_topk": 0,
+        "cmp_ratio": 1,
+        "ori_mask_mode": 4,
+        "cmp_mask_mode": 3,
+        "ori_win_left": WINDOW - 1,
+        "ori_win_right": 0,
+        "layout_q": "TND",
+        "layout_kv": "PA_BBND",
+        "has_ori_kv": True,
+        "has_cmp_kv": False,
+        "topk_value_mode": 1,
+    }
+
+    params = sig.parameters
+    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    if has_var_kw:
+        kwargs = candidates
+    else:
+        kwargs = {k: v for k, v in candidates.items() if k in params}
+    print(f"[metadata] passing kwargs: {sorted(kwargs)}")
+    return meta_op(**kwargs)
+
+
+def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, scale, metadata):
     """Invoke sparse_flash_mla for scenario 1 (SWA-only). Edit kwargs to match
     your operator binding if needed."""
     return _unwrap(
@@ -138,6 +201,7 @@ def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, 
             cu_seqlens_q=cu_seqlens_q,
             seqused_ori_kv=seqused_ori_kv,
             sinks=sinks,
+            metadata=metadata,
             softmax_scale=scale,
             cmp_ratio=1,
             ori_mask_mode=4,
@@ -163,7 +227,8 @@ def run_scenario_one(seq_len):
     sinks = torch.zeros(NUM_Q_HEADS, dtype=torch.float32).to(DEVICE)
     scale = 1.0 / math.sqrt(HEAD_DIM)
 
-    out = _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, scale)
+    metadata = _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv)
+    out = _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, scale, metadata)
     out_cpu = out.cpu().float()
 
     # --- smoke ---
@@ -199,8 +264,14 @@ def run_scenario_one(seq_len):
 def main():
     if "sparse_flash_mla" not in globals():
         raise RuntimeError(
-            "`sparse_flash_mla` is not imported. Edit the import block at the top "
-            "of this file (e.g. `import torch_npu; sparse_flash_mla = torch_npu.sparse_flash_mla`)."
+            "`sparse_flash_mla` is not imported. Edit the import block at the top of this file, e.g. "
+            "`from cann_ops_transformer.ops.sparse_flash_mla import sparse_flash_mla`."
+        )
+    if "sparse_flash_mla_metadata" not in globals():
+        raise RuntimeError(
+            "`sparse_flash_mla_metadata` is not imported, but sparse_flash_mla requires a `metadata` "
+            "tensor. Add e.g. `from cann_ops_transformer.ops.sparse_flash_mla_metadata import "
+            "sparse_flash_mla_metadata` to the import block."
         )
     print(f"device={DEVICE} dtype={DTYPE} N1={NUM_Q_HEADS} D={HEAD_DIM} block={BLOCK_SIZE} window={WINDOW}")
     for seq_len in (8, 32, 128):
