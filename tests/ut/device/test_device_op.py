@@ -3,7 +3,12 @@ from unittest import mock
 import pytest
 import torch
 
-from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+from vllm_ascend.device.device_op import (
+    A5DeviceAdaptor,
+    BaseDeviceAdaptor,
+    _bf16_sparse_flash_mla,
+    _bf16_sparse_flash_mla_metadata,
+)
 
 
 def test_npu_flash_attention_uses_fusion_attention_for_fp32():
@@ -103,11 +108,36 @@ def test_a5_sparse_attn_op_selection_by_kv_dtype(use_bf16):
         metadata_op = A5DeviceAdaptor.get_dsa_sparse_attn_metadata_op()
 
     if use_bf16:
-        assert attn_op is ops.npu_sparse_flash_mla
-        assert metadata_op is ops.npu_sparse_flash_mla_metadata
+        # BF16 returns kwarg-renaming wrappers around the sparse_flash_mla ops
+        # (the call sites use the FP8 shared-KV kwarg names).
+        assert attn_op is _bf16_sparse_flash_mla
+        assert metadata_op is _bf16_sparse_flash_mla_metadata
     else:
         assert attn_op is ops.npu_kv_quant_sparse_attn_sharedkv
         assert metadata_op is ops.npu_kv_quant_sparse_attn_sharedkv_metadata
+
+
+def test_a5_bf16_sparse_flash_mla_wrappers_rename_kwargs():
+    mock_torch = mock.MagicMock()
+    ops = mock_torch.ops._C_ascend
+    with mock.patch("vllm_ascend.device.device_op.torch", mock_torch):
+        _bf16_sparse_flash_mla("Q", seqused_kv="S", sinks="X", metadata="M")
+        _bf16_sparse_flash_mla_metadata(
+            num_heads_q=64, seqused_kv="S", max_seqlen_kv="MK", cmp_ratio=0
+        )
+
+    # attn op: q stays positional, seqused_kv -> seqused_ori_kv, rest untouched.
+    ops.npu_sparse_flash_mla.assert_called_once_with("Q", seqused_ori_kv="S", sinks="X", metadata="M")
+    attn_kwargs = ops.npu_sparse_flash_mla.call_args.kwargs
+    assert "seqused_kv" not in attn_kwargs
+
+    # metadata op: seqused_kv -> seqused_ori_kv, max_seqlen_kv -> max_seqlen_ori_kv.
+    ops.npu_sparse_flash_mla_metadata.assert_called_once_with(
+        num_heads_q=64, seqused_ori_kv="S", max_seqlen_ori_kv="MK", cmp_ratio=0
+    )
+    meta_kwargs = ops.npu_sparse_flash_mla_metadata.call_args.kwargs
+    assert "seqused_kv" not in meta_kwargs
+    assert "max_seqlen_kv" not in meta_kwargs
 
 
 @pytest.mark.parametrize("use_bf16", [False, True])

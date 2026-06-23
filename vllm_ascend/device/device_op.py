@@ -804,6 +804,36 @@ class BaseDeviceAdaptor:
         return results
 
 
+def _bf16_sparse_flash_mla_metadata(**kwargs):
+    """Adapt the FP8 ``kv_quant_sparse_attn_sharedkv_metadata`` call convention
+    to the BF16 ``npu_sparse_flash_mla_metadata`` signature.
+
+    DSV4 attention call sites (``dsa_v1.py``) are written against the FP8 op,
+    which uses a single shared-KV length (``seqused_kv`` / ``max_seqlen_kv``).
+    ``sparse_flash_mla_metadata`` instead splits KV into ori/cmp and names the
+    shared-KV ("ori") length params ``seqused_ori_kv`` / ``max_seqlen_ori_kv``.
+    Rename those so the device-agnostic call sites stay unchanged.
+    """
+    if "seqused_kv" in kwargs:
+        kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
+    if "max_seqlen_kv" in kwargs:
+        kwargs["max_seqlen_ori_kv"] = kwargs.pop("max_seqlen_kv")
+    return torch.ops._C_ascend.npu_sparse_flash_mla_metadata(**kwargs)
+
+
+def _bf16_sparse_flash_mla(*args, **kwargs):
+    """Adapt the FP8 ``kv_quant_sparse_attn_sharedkv`` call convention to the
+    BF16 ``npu_sparse_flash_mla`` signature.
+
+    The shared-KV length kwarg is ``seqused_kv`` on the FP8 op and
+    ``seqused_ori_kv`` on ``sparse_flash_mla``; ``q`` is still passed
+    positionally. All other kwargs already match the BF16 op signature.
+    """
+    if "seqused_kv" in kwargs:
+        kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
+    return torch.ops._C_ascend.npu_sparse_flash_mla(*args, **kwargs)
+
+
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
@@ -1164,7 +1194,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def get_dsa_sparse_attn_metadata_op():
         if dsv4_use_kv_bf16():
-            return torch.ops._C_ascend.npu_sparse_flash_mla_metadata
+            # Wrapper renames the FP8 shared-KV length kwargs to the BF16
+            # sparse_flash_mla_metadata names (seqused_kv -> seqused_ori_kv,
+            # max_seqlen_kv -> max_seqlen_ori_kv).
+            return _bf16_sparse_flash_mla_metadata
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
 
     @staticmethod
@@ -1178,7 +1211,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def get_dsa_sparse_attn_op():
         if dsv4_use_kv_bf16():
-            return torch.ops._C_ascend.npu_sparse_flash_mla
+            # Wrapper renames the FP8 shared-KV length kwarg to the BF16
+            # sparse_flash_mla name (seqused_kv -> seqused_ori_kv).
+            return _bf16_sparse_flash_mla
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
 
     @staticmethod
