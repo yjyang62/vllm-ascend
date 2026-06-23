@@ -101,6 +101,11 @@ BLOCK_SIZE = 64  # PageAttention block size, multiple of 16, <= 1024
 WINDOW = 128  # sliding window size; ori_win_left == WINDOW - 1 == 127
 DTYPE = torch.bfloat16
 DEVICE = "npu"
+# The operator requires a `sinks` tensor (it errors with "sinks must be
+# provided" on None). To run a "no effective sink" correctness pass we feed a
+# large-negative sink so exp(sink - m) underflows to ~0 on both the op and the
+# golden, leaving plain causal softmax.
+SINK_DISABLED = -1.0e4
 
 
 def _unwrap(out):
@@ -218,11 +223,14 @@ def run_scenario_one(seq_len, sink_value=None):
     """Scenario 1 (only ori_kv -> SWA): smoke + golden compare.
 
     ``sink_value``:
-        None  -> no attention sink (sinks=None passed to the op). Best for
-                 validating the core QK^T/softmax/V + sliding-window math.
+        None  -> "no effective sink": feed a large-negative sink (the op
+                 mandates a sinks tensor), so the sink term underflows to ~0 on
+                 both sides. Best for validating the core QK^T/softmax/V +
+                 sliding-window math.
         float -> uniform per-head sink logit of that value (gpt-oss style).
                  Use to characterize the operator's sink convention.
     """
+    effective_sink = SINK_DISABLED if sink_value is None else float(sink_value)
     tag = "no-sink" if sink_value is None else f"sink={sink_value:g}"
     print(f"\n=== scenario 1 (SWA-only), seq_len={seq_len}, {tag} ===")
     torch.manual_seed(SEED)
@@ -233,12 +241,8 @@ def run_scenario_one(seq_len, sink_value=None):
     ori_kv, block_table, kv_dense = _build_paged_kv(seq_len, HEAD_DIM, DTYPE, SEED + 1)
     cu_seqlens_q = torch.tensor([0, t_len], dtype=torch.int32).to(DEVICE)
     seqused_ori_kv = torch.tensor([seq_len], dtype=torch.int32).to(DEVICE)
-    if sink_value is None:
-        sinks = None
-        sinks_cpu = None
-    else:
-        sinks_cpu = torch.full((NUM_Q_HEADS,), float(sink_value), dtype=torch.float32)
-        sinks = sinks_cpu.to(DEVICE)
+    sinks_cpu = torch.full((NUM_Q_HEADS,), effective_sink, dtype=torch.float32)
+    sinks = sinks_cpu.to(DEVICE)
     scale = 1.0 / math.sqrt(HEAD_DIM)
 
     metadata = _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv)
