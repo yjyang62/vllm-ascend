@@ -130,23 +130,27 @@ def _build_paged_kv(seq_len, head_dim, dtype, seed):
 
 
 def _golden_shared_kv_attention(q, kv, sinks, scale):
-    """Causal shared-KV attention with an attention sink (CPU fp32).
+    """Causal shared-KV attention (CPU fp32), optionally with an attention sink.
 
-    q:     [T, N, D]   kv: [S, D] (K == V)   sinks: [N]
-    out[t, n] = sum_s softmax_s(scale * q[t,n] . kv[s]) * kv[s], where the sink
-    adds an extra exp(sink[n]) term to the softmax denominator only.
+    q:     [T, N, D]   kv: [S, D] (K == V)   sinks: [N] or None
+    out[t, n] = sum_s softmax_s(scale * q[t,n] . kv[s]) * kv[s]. When ``sinks``
+    is not None, an extra exp(sink[n]) term is added to the softmax denominator
+    only (the sink carries no value), i.e. gpt-oss style attention sink.
     Query t is aligned to key position (S - T + t).
     """
     t_len, n_heads, _ = q.shape
     s_len = kv.shape[0]
     out = torch.zeros(t_len, n_heads, kv.shape[1], dtype=torch.float32)
     for n in range(n_heads):
+        sink_n = sinks[n] if sinks is not None else None
         for t in range(t_len):
             q_pos = s_len - t_len + t
             scores = scale * (kv[: q_pos + 1] @ q[t, n])
-            m = torch.maximum(scores.max(), sinks[n])
+            m = scores.max() if sink_n is None else torch.maximum(scores.max(), sink_n)
             p = torch.exp(scores - m)
-            denom = p.sum() + torch.exp(sinks[n] - m)
+            denom = p.sum()
+            if sink_n is not None:
+                denom = denom + torch.exp(sink_n - m)
             out[t, n] = (p.unsqueeze(-1) * kv[: q_pos + 1]).sum(0) / denom
     return out
 
@@ -210,9 +214,17 @@ def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, 
     )
 
 
-def run_scenario_one(seq_len):
-    """Scenario 1 (only ori_kv -> SWA): smoke + golden compare."""
-    print(f"\n=== scenario 1 (SWA-only), seq_len={seq_len} ===")
+def run_scenario_one(seq_len, sink_value=None):
+    """Scenario 1 (only ori_kv -> SWA): smoke + golden compare.
+
+    ``sink_value``:
+        None  -> no attention sink (sinks=None passed to the op). Best for
+                 validating the core QK^T/softmax/V + sliding-window math.
+        float -> uniform per-head sink logit of that value (gpt-oss style).
+                 Use to characterize the operator's sink convention.
+    """
+    tag = "no-sink" if sink_value is None else f"sink={sink_value:g}"
+    print(f"\n=== scenario 1 (SWA-only), seq_len={seq_len}, {tag} ===")
     torch.manual_seed(SEED)
     t_len = seq_len  # prefill-style single batch: query length == key length
 
@@ -221,7 +233,12 @@ def run_scenario_one(seq_len):
     ori_kv, block_table, kv_dense = _build_paged_kv(seq_len, HEAD_DIM, DTYPE, SEED + 1)
     cu_seqlens_q = torch.tensor([0, t_len], dtype=torch.int32).to(DEVICE)
     seqused_ori_kv = torch.tensor([seq_len], dtype=torch.int32).to(DEVICE)
-    sinks = torch.zeros(NUM_Q_HEADS, dtype=torch.float32).to(DEVICE)
+    if sink_value is None:
+        sinks = None
+        sinks_cpu = None
+    else:
+        sinks_cpu = torch.full((NUM_Q_HEADS,), float(sink_value), dtype=torch.float32)
+        sinks = sinks_cpu.to(DEVICE)
     scale = 1.0 / math.sqrt(HEAD_DIM)
 
     metadata = _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv)
@@ -243,19 +260,20 @@ def run_scenario_one(seq_len):
             "operator likely uses MLA-absorb nope/rope split (score over full D, "
             "value over nope sub-dim). Tell me the real dims and I'll refine the golden."
         )
-        return
+        return None
 
     if seq_len > WINDOW:
         print(f"[skip golden] seq_len {seq_len} > window {WINDOW}; golden assumes full-causal.")
-        return
+        return None
 
-    ref = _golden_shared_kv_attention(q_cpu, kv_dense, sinks.cpu(), scale)
+    ref = _golden_shared_kv_attention(q_cpu, kv_dense, sinks_cpu, scale)
     abs_err = (out_cpu - ref).abs()
     rel_err = abs_err / (ref.abs() + 1e-6)
+    ok = torch.allclose(out_cpu, ref, rtol=4e-2, atol=4e-2)
     print(f"golden max abs err = {abs_err.max().item():.4e}")
     print(f"golden max rel err = {rel_err.max().item():.4e}")
-    ok = torch.allclose(out_cpu, ref, rtol=4e-2, atol=4e-2)
     print(f"golden match (rtol=4e-2, atol=4e-2): {ok}")
+    return ok
 
 
 def main():
@@ -270,8 +288,32 @@ def main():
             "npu_sparse_flash_mla requires a `metadata` tensor."
         )
     print(f"device={DEVICE} dtype={DTYPE} N1={NUM_Q_HEADS} D={HEAD_DIM} block={BLOCK_SIZE} window={WINDOW}")
+
+    # Pass 1: core correctness without an attention sink. Expect match for all
+    # seq_len -- this isolates the QK^T/softmax/V + sliding-window math from any
+    # sink-convention ambiguity.
+    print("\n##### PASS 1: core correctness (no sink) #####")
+    core_ok = []
     for seq_len in (8, 32, 128):
-        run_scenario_one(seq_len)
+        core_ok.append(run_scenario_one(seq_len, sink_value=None))
+
+    # Pass 2: characterize the attention-sink convention. The sink term scales
+    # like 1/seq_len, so seq_len=8 is the most sensitive probe. If the golden
+    # (sink adds exp(sink) to the denominator) matches the op, these pass; if
+    # not, the op uses a different sink convention.
+    print("\n##### PASS 2: attention-sink characterization (seq_len=8) #####")
+    sink_ok = []
+    for sink_value in (0.0, 2.0):
+        sink_ok.append(run_scenario_one(8, sink_value=sink_value))
+
+    print("\n=== SUMMARY ===")
+    print(f"core (no-sink) match @ seq_len 8/32/128 : {core_ok}")
+    print(f"sink match @ seq_len=8 for sink 0.0/2.0 : {sink_ok}")
+    print(
+        "Interpretation: PASS 1 all True => operator core math is correct. "
+        "If PASS 2 is False, the op's sink convention differs from the golden "
+        "(e.g. sink not added to the denominator); share these numbers to refine."
+    )
     print("\nDONE.")
 
 
