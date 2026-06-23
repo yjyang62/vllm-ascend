@@ -53,11 +53,20 @@ using seq_len <= window so the sliding window reduces to plain causal.
 """
 
 import math
+import os
 
-import torch
+# Disable torch's automatic device-backend autoload before importing torch.
+# Some environments ship a broken/mismatched `triton` whose `triton.language`
+# attribute is missing; torch's autoload pulls torch_npu -> torch._dynamo at a
+# point that trips over it ("module 'triton' has no attribute 'language'").
+# We import torch_npu explicitly below, which registers the NPU backend without
+# the fragile autoload path. (Honor an existing override if set.)
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+
+import torch  # noqa: E402
 
 try:
-    import torch_npu  # noqa: F401  (registers the npu backend)
+    import torch_npu  # noqa: F401,E402  (registers the npu backend)
 except ImportError as exc:  # pragma: no cover - hardware-only dependency
     raise RuntimeError("torch_npu is required to run this check on an Ascend NPU host.") from exc
 
