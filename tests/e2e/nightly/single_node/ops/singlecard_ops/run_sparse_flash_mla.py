@@ -61,9 +61,16 @@ try:
 except ImportError as exc:  # pragma: no cover - hardware-only dependency
     raise RuntimeError("torch_npu is required to run this check on an Ascend NPU host.") from exc
 
-# Importing vllm_ascend registers the vendored custom ops under
-# torch.ops._C_ascend (npu_sparse_flash_mla / npu_sparse_flash_mla_metadata).
-import vllm_ascend  # noqa: F401
+# Make the vendored custom op_api libs (libcust_opapi.so) discoverable, then
+# explicitly load the vllm_ascend_C extension. The static TORCH_LIBRARY in
+# csrc/torch_binding.cpp registers npu_sparse_flash_mla / *_metadata under
+# torch.ops._C_ascend only when this .so is loaded. On A5, plain `import
+# vllm_ascend` does NOT load it (enable_custom_op() short-circuits there), so we
+# load the extension directly here.
+from vllm_ascend.utils import bootstrap_custom_op_env  # noqa: E402
+
+bootstrap_custom_op_env(include_vendor_lib=True)
+import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401,E402
 
 # ---------------------------------------------------------------------------
 # CONFIG -- adjust to match the deployed operator / model dims.
