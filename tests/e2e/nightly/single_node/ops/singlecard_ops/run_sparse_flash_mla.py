@@ -52,16 +52,20 @@ comparison against a shared-KV causal-attention golden with an attention sink,
 using seq_len <= window so the sliding window reduces to plain causal.
 """
 
-import math
 import os
+import sys
 
-# Disable torch's automatic device-backend autoload before importing torch.
-# Some environments ship a broken/mismatched `triton` whose `triton.language`
-# attribute is missing; torch's autoload pulls torch_npu -> torch._dynamo at a
-# point that trips over it ("module 'triton' has no attribute 'language'").
-# We import torch_npu explicitly below, which registers the NPU backend without
-# the fragile autoload path. (Honor an existing override if set.)
-os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+# When run as a script, Python inserts THIS file's directory at the front of
+# sys.path. That directory has a sibling `triton/` test folder, which shadows
+# the real installed `triton` package; torch._dynamo then does
+# `import triton; triton.language.dtype` and fails with
+# "module 'triton' has no attribute 'language'" (only when run as a script, not
+# in an interactive shell). Drop our own directory from sys.path before any
+# torch import so the real `triton` resolves.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.getcwd()) != _HERE]
+
+import math  # noqa: E402
 
 import torch  # noqa: E402
 
