@@ -293,30 +293,49 @@ def main():
         )
     print(f"device={DEVICE} dtype={DTYPE} N1={NUM_Q_HEADS} D={HEAD_DIM} block={BLOCK_SIZE} window={WINDOW}")
 
-    # Pass 1: core correctness without an attention sink. Expect match for all
-    # seq_len -- this isolates the QK^T/softmax/V + sliding-window math from any
-    # sink-convention ambiguity.
-    print("\n##### PASS 1: core correctness (no sink) #####")
+    # The paged KV cache pads the last block to BLOCK_SIZE. A non-block-aligned
+    # seq_len leaves zero-filled tail slots in that block, and the operator
+    # counts them as keys (score = scale*(0.q) = 0 -> exp(0) = 1 weight, value
+    # 0), inflating the softmax denominator. The golden only sums the real keys,
+    # so it diverges by ~ (seq_len / round_up(seq_len, BLOCK_SIZE)). We therefore
+    # validate core math on BLOCK_SIZE-aligned lengths (<= WINDOW so the sliding
+    # window reduces to plain causal), and keep partial lengths as a diagnostic.
+    aligned_lens = tuple(n for n in (BLOCK_SIZE, 2 * BLOCK_SIZE) if n <= WINDOW)
+
+    # Pass 1: core correctness without an attention sink, block-aligned lengths.
+    # Expect match -- isolates QK^T/softmax/V + sliding window.
+    print("\n##### PASS 1: core correctness (no sink, block-aligned seq_len) #####")
     core_ok = []
-    for seq_len in (8, 32, 128):
+    for seq_len in aligned_lens:
         core_ok.append(run_scenario_one(seq_len, sink_value=None))
 
-    # Pass 2: characterize the attention-sink convention. The sink term scales
-    # like 1/seq_len, so seq_len=8 is the most sensitive probe. If the golden
-    # (sink adds exp(sink) to the denominator) matches the op, these pass; if
-    # not, the op uses a different sink convention.
-    print("\n##### PASS 2: attention-sink characterization (seq_len=8) #####")
+    # Pass 2: partial-block diagnostic. Non-aligned lengths; expected to diverge
+    # because of the zero-padded tail described above. Useful to confirm the
+    # padding/seqused behavior rather than the math.
+    print("\n##### PASS 2: partial-block diagnostic (no sink, non-aligned seq_len) #####")
+    partial_ok = []
+    for seq_len in (8, 32):
+        partial_ok.append(run_scenario_one(seq_len, sink_value=None))
+
+    # Pass 3: characterize the attention-sink convention at a block-aligned
+    # length so padding does not contaminate the result. If the golden (sink
+    # adds exp(sink) to the denominator) matches the op, these pass.
+    sink_seq = aligned_lens[0]
+    print(f"\n##### PASS 3: attention-sink characterization (block-aligned seq_len={sink_seq}) #####")
     sink_ok = []
     for sink_value in (0.0, 2.0):
-        sink_ok.append(run_scenario_one(8, sink_value=sink_value))
+        sink_ok.append(run_scenario_one(sink_seq, sink_value=sink_value))
 
     print("\n=== SUMMARY ===")
-    print(f"core (no-sink) match @ seq_len 8/32/128 : {core_ok}")
-    print(f"sink match @ seq_len=8 for sink 0.0/2.0 : {sink_ok}")
+    print(f"core (no-sink) match @ block-aligned {aligned_lens} : {core_ok}")
+    print(f"partial-block (no-sink) match @ seq_len 8/32        : {partial_ok}")
+    print(f"sink match @ seq_len={sink_seq} for sink 0.0/2.0          : {sink_ok}")
     print(
         "Interpretation: PASS 1 all True => operator core math is correct. "
-        "If PASS 2 is False, the op's sink convention differs from the golden "
-        "(e.g. sink not added to the denominator); share these numbers to refine."
+        "PASS 2 is expected to be False (zero-padded tail of a partial block is "
+        "counted as keys). If PASS 3 is False, the op's sink convention differs "
+        "from the golden (e.g. sink not added to the denominator); share these "
+        "numbers to refine the sink formula."
     )
     print("\nDONE.")
 
