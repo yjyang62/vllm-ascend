@@ -193,6 +193,14 @@ vllm-ascend==|pip_vllm_ascend_version|
 :::{dropdown} Click here to see "Build from source code"
 or build from **source code**:
 
+```{note}
+To install `triton-ascend`, run:
+
+pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+
+If you are installing via `uv`, make sure to install `triton-ascend` **last**, after all other packages have been installed, to avoid dependency resolution conflicts.
+```
+
 ```{code-block} bash
    :substitutions:
 
@@ -222,7 +230,7 @@ If you are building in a CPU-only environment where `npu-smi` is unavailable, yo
 - Atlas A2: `export SOC_VERSION=ascend910b1`
 - Atlas A3: `export SOC_VERSION=ascend910_9391`
 - Atlas 300I: `export SOC_VERSION=ascend310p1`
-- Atlas A5: `export SOC_VERSION=<value starting with "ascend950">`
+- Ascend 950 Products: `export SOC_VERSION=<value starting with "ascend950">`
 ```
 
 ## Set up using Docker
