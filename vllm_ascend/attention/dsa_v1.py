@@ -739,6 +739,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if c4_cmp_seq_lens is not None:
             c4_cmp_metadata_kwargs = {
                 "seqused_cmp_kv": c4_cmp_seq_lens,
+                "cmp_residual_kv": DeviceOperator.get_dsa_cmp_residual_kv(prefill_kv_seq_lens, 4),
                 "max_seqlen_cmp_kv": DeviceOperator.get_dsa_max_seqlen_cmp_kv(max_prefill_kv_seq_len, 4),
             }
         c128_cmp_metadata_kwargs = {}
@@ -746,6 +747,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if c128_cmp_seq_lens is not None:
             c128_cmp_metadata_kwargs = {
                 "seqused_cmp_kv": c128_cmp_seq_lens,
+                "cmp_residual_kv": DeviceOperator.get_dsa_cmp_residual_kv(prefill_kv_seq_lens, 128),
                 "max_seqlen_cmp_kv": DeviceOperator.get_dsa_max_seqlen_cmp_kv(max_prefill_kv_seq_len, 128),
             }
 
@@ -1019,6 +1021,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if c4_cmp_seq_lens is not None:
             c4_cmp_metadata_kwargs = {
                 "seqused_cmp_kv": c4_cmp_seq_lens,
+                "cmp_residual_kv": DeviceOperator.get_dsa_cmp_residual_kv(decode_kv_seq_lens, 4),
                 "max_seqlen_cmp_kv": DeviceOperator.get_dsa_max_seqlen_cmp_kv(max_seqlen_kv, 4),
             }
         c128_cmp_metadata_kwargs = {}
@@ -1026,6 +1029,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if c128_cmp_seq_lens is not None:
             c128_cmp_metadata_kwargs = {
                 "seqused_cmp_kv": c128_cmp_seq_lens,
+                "cmp_residual_kv": DeviceOperator.get_dsa_cmp_residual_kv(decode_kv_seq_lens, 128),
                 "max_seqlen_cmp_kv": DeviceOperator.get_dsa_max_seqlen_cmp_kv(max_seqlen_kv, 128),
             }
         if self.compressor_ratio <= 1:

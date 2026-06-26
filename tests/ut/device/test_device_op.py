@@ -156,10 +156,12 @@ def test_a5_bf16_sparse_flash_mla_wrappers_add_cmp_lengths():
     attn_kwargs = mock_torch.ops._C_ascend.npu_sparse_flash_mla.call_args.kwargs
     torch.testing.assert_close(attn_kwargs["seqused_ori_kv"], seq_lens)
     torch.testing.assert_close(attn_kwargs["seqused_cmp_kv"], seq_lens // 4)
+    torch.testing.assert_close(attn_kwargs["cmp_residual_kv"], seq_lens % 4)
 
     meta_kwargs = mock_torch.ops._C_ascend.npu_sparse_flash_mla_metadata.call_args.kwargs
     torch.testing.assert_close(meta_kwargs["seqused_ori_kv"], seq_lens)
     torch.testing.assert_close(meta_kwargs["seqused_cmp_kv"], seq_lens // 128)
+    torch.testing.assert_close(meta_kwargs["cmp_residual_kv"], seq_lens % 128)
     assert meta_kwargs["max_seqlen_ori_kv"] == 512
     assert meta_kwargs["max_seqlen_cmp_kv"] == 4
 
@@ -173,6 +175,7 @@ def test_a5_sparse_attn_kwargs_and_layout_by_kv_dtype(use_bf16):
         swa_only_cmp_ratio = A5DeviceAdaptor.get_dsa_swa_only_cmp_ratio()
         cmp_seq_lens = A5DeviceAdaptor.get_dsa_cmp_seq_lens(torch.tensor([16, 512], dtype=torch.int32), 4)
         max_cmp_seq_len = A5DeviceAdaptor.get_dsa_max_seqlen_cmp_kv(512, 4)
+        cmp_residual_kv = A5DeviceAdaptor.get_dsa_cmp_residual_kv(torch.tensor([17, 514], dtype=torch.int32), 4)
 
     if use_bf16:
         # sparse_flash_mla drops the FP8-quant-only attributes.
@@ -184,6 +187,7 @@ def test_a5_sparse_attn_kwargs_and_layout_by_kv_dtype(use_bf16):
         assert swa_only_cmp_ratio == 0
         torch.testing.assert_close(cmp_seq_lens, torch.tensor([4, 128], dtype=torch.int32))
         assert max_cmp_seq_len == 128
+        torch.testing.assert_close(cmp_residual_kv, torch.tensor([1, 2], dtype=torch.int32))
     else:
         assert base_kwargs == {"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64}
         assert metadata_kwargs == {"kv_quant_mode": 1}
@@ -191,6 +195,7 @@ def test_a5_sparse_attn_kwargs_and_layout_by_kv_dtype(use_bf16):
         assert swa_only_cmp_ratio == 1
         assert cmp_seq_lens is None
         assert max_cmp_seq_len == 0
+        assert cmp_residual_kv is None
 
 
 def test_a5_bf16_kv_scatter_delegates_to_plain_scatter():

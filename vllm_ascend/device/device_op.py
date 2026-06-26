@@ -544,6 +544,11 @@ class BaseDeviceAdaptor:
         """Return the maximum compressed KV length when required by the backend."""
         return 0
 
+    @staticmethod
+    def get_dsa_cmp_residual_kv(seq_lens, compress_ratio):
+        """Return residual KV lengths when required by the backend."""
+        return None
+
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
@@ -828,6 +833,8 @@ def _bf16_sparse_flash_mla_metadata(**kwargs):
         if cmp_ratio in (4, 128):
             if kwargs.get("seqused_cmp_kv") is None:
                 kwargs["seqused_cmp_kv"] = kwargs["seqused_ori_kv"] // cmp_ratio
+            if kwargs.get("cmp_residual_kv") is None:
+                kwargs["cmp_residual_kv"] = kwargs["seqused_ori_kv"] % cmp_ratio
             max_seqlen_cmp_kv = kwargs.get("max_seqlen_cmp_kv")
             if max_seqlen_cmp_kv is None or (isinstance(max_seqlen_cmp_kv, int) and max_seqlen_cmp_kv == 0):
                 kwargs["max_seqlen_cmp_kv"] = kwargs["max_seqlen_ori_kv"] // cmp_ratio
@@ -849,6 +856,8 @@ def _bf16_sparse_flash_mla(*args, **kwargs):
     cmp_ratio = kwargs.get("cmp_ratio", 0)
     if kwargs.get("cmp_kv") is not None and cmp_ratio in (4, 128) and kwargs.get("seqused_cmp_kv") is None:
         kwargs["seqused_cmp_kv"] = kwargs["seqused_ori_kv"] // cmp_ratio
+    if kwargs.get("cmp_kv") is not None and cmp_ratio in (4, 128) and kwargs.get("cmp_residual_kv") is None:
+        kwargs["cmp_residual_kv"] = kwargs["seqused_ori_kv"] % cmp_ratio
     return torch.ops._C_ascend.npu_sparse_flash_mla(*args, **kwargs)
 
 
@@ -1269,6 +1278,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if dsv4_use_kv_bf16() and compress_ratio in (4, 128):
             return max_seqlen_kv // compress_ratio
         return 0
+
+    @staticmethod
+    def get_dsa_cmp_residual_kv(seq_lens, compress_ratio):
+        if dsv4_use_kv_bf16() and compress_ratio in (4, 128):
+            return seq_lens % compress_ratio
+        return None
 
     # ===== SWA / Compressor KV Scatter =====
 
