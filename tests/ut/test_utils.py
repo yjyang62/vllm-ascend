@@ -274,6 +274,59 @@ class TestUtils(TestBase):
             utils.get_max_hidden_layers(NoLayerConfig())
         self.assertIn("num_hidden_layers", str(context.exception))
 
+    def test_truncate_dsv4_config_for_reduced_layers(self):
+        class Cfg:
+            pass
+
+        # Reduced run: compress_ratios trimmed (values preserved) and
+        # num_hash_layers capped at num_hidden_layers.
+        cfg = Cfg()
+        cfg.num_hidden_layers = 5
+        cfg.compress_ratios = [0, 4, 128, 128, 128, 4, 128, 4]
+        cfg.num_hash_layers = 8
+        utils.truncate_dsv4_config_for_reduced_layers(cfg)
+        self.assertEqual(cfg.compress_ratios, [0, 4, 128, 128, 128])
+        self.assertEqual(cfg.num_hash_layers, 5)
+
+        # tuple input keeps tuple type.
+        cfg = Cfg()
+        cfg.num_hidden_layers = 2
+        cfg.compress_ratios = (0, 4, 128, 128)
+        cfg.num_hash_layers = 1
+        utils.truncate_dsv4_config_for_reduced_layers(cfg)
+        self.assertEqual(cfg.compress_ratios, (0, 4))
+        # num_hash_layers below num_hidden_layers is left untouched.
+        self.assertEqual(cfg.num_hash_layers, 1)
+
+        # Full-size run: no-op when arrays already match the layer count.
+        cfg = Cfg()
+        cfg.num_hidden_layers = 3
+        cfg.compress_ratios = [0, 4, 128]
+        cfg.num_hash_layers = 1
+        utils.truncate_dsv4_config_for_reduced_layers(cfg)
+        self.assertEqual(cfg.compress_ratios, [0, 4, 128])
+        self.assertEqual(cfg.num_hash_layers, 1)
+
+        # Missing fields must not raise.
+        cfg = Cfg()
+        cfg.num_hidden_layers = 4
+        utils.truncate_dsv4_config_for_reduced_layers(cfg)
+
+    def test_is_dsv4_pruned_layer_weight(self):
+        class Cfg:
+            num_hidden_layers = 5
+
+        cfg = Cfg()
+        # Retained layers (0..4) are kept.
+        self.assertFalse(utils.is_dsv4_pruned_layer_weight(cfg, "model.layers.0.self_attn.wkv.weight"))
+        self.assertFalse(utils.is_dsv4_pruned_layer_weight(cfg, "model.layers.4.mlp.gate.weight"))
+        # Layers >= num_hidden_layers (incl. MTP layer 5) are pruned.
+        self.assertTrue(utils.is_dsv4_pruned_layer_weight(cfg, "model.layers.5.self_attn.wkv.weight"))
+        self.assertTrue(utils.is_dsv4_pruned_layer_weight(cfg, "layers.60.mlp.experts.0.gate_proj.weight"))
+        # Non-layer weights are never pruned.
+        self.assertFalse(utils.is_dsv4_pruned_layer_weight(cfg, "model.embed_tokens.weight"))
+        self.assertFalse(utils.is_dsv4_pruned_layer_weight(cfg, "lm_head.weight"))
+
     def test_is_drafter_moe_model_extract_hidden_states_is_never_moe(self):
         """The extract_hidden_states drafter is a cache-only attention layer
         with no MoE layers, but its hf_config copies the (possibly MoE) target

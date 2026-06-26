@@ -82,6 +82,8 @@ from vllm_ascend.utils import (
     extract_dsv4_layer_index,
     get_ascend_device_type,
     get_dsv4_compress_ratio,
+    is_dsv4_pruned_layer_weight,
+    truncate_dsv4_config_for_reduced_layers,
 )
 
 
@@ -1209,6 +1211,9 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        # Reduced-layer (减层) runs only override num_hidden_layers; keep the
+        # per-layer config arrays consistent before any layer is built.
+        truncate_dsv4_config_for_reduced_layers(config)
         self.config = config
         self.quant_config = quant_config
 
@@ -1322,6 +1327,12 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
+
+            # Reduced-layer (减层) runs build fewer layers than the checkpoint
+            # provides; drop weights for layers beyond num_hidden_layers so a
+            # full checkpoint loads without missing-parameter errors.
+            if is_dsv4_pruned_layer_weight(self.config, name):
+                continue
 
             # TODO:
             if not name.startswith("model"):
