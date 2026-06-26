@@ -31,7 +31,7 @@ from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, dsv4_use_kv_bf16, get_ascend_device_type
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -520,6 +520,35 @@ class BaseDeviceAdaptor:
         """Returns base kwargs for sparse attention (extended by caller)."""
         return {}
 
+    @staticmethod
+    def get_dsa_kv_layout():
+        """Returns the layout string for ori_kv/cmp_kv passed to the sparse
+        attention op (and its metadata builder)."""
+        return "PA_ND"
+
+    @staticmethod
+    def get_dsa_swa_only_cmp_ratio():
+        """cmp_ratio sentinel for the SWA-only (no compression) scenario.
+
+        The FP8 kv_quant / BF16 sparse_attn_sharedkv ops require ``1`` for the
+        non-compressed case."""
+        return 1
+
+    @staticmethod
+    def get_dsa_cmp_seq_lens(seq_lens, compress_ratio):
+        """Return per-batch compressed KV lengths when required by the backend."""
+        return None
+
+    @staticmethod
+    def get_dsa_max_seqlen_cmp_kv(max_seqlen_kv, compress_ratio):
+        """Return the maximum compressed KV length when required by the backend."""
+        return 0
+
+    @staticmethod
+    def get_dsa_cmp_residual_kv(seq_lens, compress_ratio):
+        """Return residual KV lengths when required by the backend."""
+        return None
+
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
@@ -780,6 +809,56 @@ class BaseDeviceAdaptor:
             positions=positions,
         )
         return results
+
+
+def _bf16_sparse_flash_mla_metadata(**kwargs):
+    """Adapt the FP8 ``kv_quant_sparse_attn_sharedkv_metadata`` call convention
+    to the BF16 ``npu_sparse_flash_mla_metadata`` signature.
+
+    DSV4 attention call sites (``dsa_v1.py``) are written against the FP8 op,
+    which uses a single shared-KV length (``seqused_kv`` / ``max_seqlen_kv``).
+    ``sparse_flash_mla_metadata`` instead splits KV into ori/cmp and names the
+    shared-KV ("ori") length params ``seqused_ori_kv`` / ``max_seqlen_ori_kv``.
+    Rename those so the device-agnostic call sites stay unchanged.  For
+    compressed KV scenarios (c4/c128), PA_BBND also requires
+    ``seqused_cmp_kv`` and ``max_seqlen_cmp_kv``; derive them as a fallback
+    if an older call site only provided the original FP8-style names.
+    """
+    if "seqused_kv" in kwargs:
+        kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
+    if "max_seqlen_kv" in kwargs:
+        kwargs["max_seqlen_ori_kv"] = kwargs.pop("max_seqlen_kv")
+    if kwargs.get("has_cmp_kv", False):
+        cmp_ratio = kwargs.get("cmp_ratio", 0)
+        if cmp_ratio in (4, 128):
+            if kwargs.get("seqused_cmp_kv") is None:
+                kwargs["seqused_cmp_kv"] = kwargs["seqused_ori_kv"] // cmp_ratio
+            if kwargs.get("cmp_residual_kv") is None:
+                kwargs["cmp_residual_kv"] = kwargs["seqused_ori_kv"] % cmp_ratio
+            max_seqlen_cmp_kv = kwargs.get("max_seqlen_cmp_kv")
+            if max_seqlen_cmp_kv is None or (isinstance(max_seqlen_cmp_kv, int) and max_seqlen_cmp_kv == 0):
+                kwargs["max_seqlen_cmp_kv"] = kwargs["max_seqlen_ori_kv"] // cmp_ratio
+    return torch.ops._C_ascend.npu_sparse_flash_mla_metadata(**kwargs)
+
+
+def _bf16_sparse_flash_mla(*args, **kwargs):
+    """Adapt the FP8 ``kv_quant_sparse_attn_sharedkv`` call convention to the
+    BF16 ``npu_sparse_flash_mla`` signature.
+
+    The shared-KV length kwarg is ``seqused_kv`` on the FP8 op and
+    ``seqused_ori_kv`` on ``sparse_flash_mla``; ``q`` is still passed
+    positionally. For compressed KV scenarios, derive the BF16-only
+    ``seqused_cmp_kv`` argument if the caller only provided the FP8-style
+    shared-KV length.
+    """
+    if "seqused_kv" in kwargs:
+        kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
+    cmp_ratio = kwargs.get("cmp_ratio", 0)
+    if kwargs.get("cmp_kv") is not None and cmp_ratio in (4, 128) and kwargs.get("seqused_cmp_kv") is None:
+        kwargs["seqused_cmp_kv"] = kwargs["seqused_ori_kv"] // cmp_ratio
+    if kwargs.get("cmp_kv") is not None and cmp_ratio in (4, 128) and kwargs.get("cmp_residual_kv") is None:
+        kwargs["cmp_residual_kv"] = kwargs["seqused_ori_kv"] % cmp_ratio
+    return torch.ops._C_ascend.npu_sparse_flash_mla(*args, **kwargs)
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
@@ -1141,19 +1220,70 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_op():
+        if dsv4_use_kv_bf16():
+            # Wrapper renames the FP8 shared-KV length kwargs to the BF16
+            # sparse_flash_mla_metadata names (seqused_kv -> seqused_ori_kv,
+            # max_seqlen_kv -> max_seqlen_ori_kv).
+            return _bf16_sparse_flash_mla_metadata
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_kwargs(device):
+        # BF16 path: sparse_flash_mla_metadata has no kv_quant_mode attribute;
+        # it takes a `device` arg like the A2/A3 sparse_attn_sharedkv_metadata.
+        if dsv4_use_kv_bf16():
+            return {"device": str(device)}
         return {"kv_quant_mode": 1}
 
     @staticmethod
     def get_dsa_sparse_attn_op():
+        if dsv4_use_kv_bf16():
+            # Wrapper renames the FP8 shared-KV length kwarg to the BF16
+            # sparse_flash_mla name (seqused_kv -> seqused_ori_kv).
+            return _bf16_sparse_flash_mla
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
 
     @staticmethod
     def get_dsa_sparse_attn_base_kwargs():
+        # BF16 path: sparse_flash_mla drops the FP8-quant-only attributes
+        # (kv_quant_mode / tile_size / rope_head_dim).
+        if dsv4_use_kv_bf16():
+            return {}
         return {"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64}
+
+    @staticmethod
+    def get_dsa_kv_layout():
+        # sparse_flash_mla expects PageAttention KV in PA_BBND layout, whereas
+        # the FP8 kv_quant_sparse_attn_sharedkv op uses PA_ND.
+        if dsv4_use_kv_bf16():
+            return "PA_BBND"
+        return "PA_ND"
+
+    @staticmethod
+    def get_dsa_swa_only_cmp_ratio():
+        # sparse_flash_mla only accepts cmp_ratio in {4, 128}; the SWA-only
+        # (scenario one) path passes 0 to signal "no compression".
+        if dsv4_use_kv_bf16():
+            return 0
+        return 1
+
+    @staticmethod
+    def get_dsa_cmp_seq_lens(seq_lens, compress_ratio):
+        if dsv4_use_kv_bf16() and compress_ratio in (4, 128):
+            return seq_lens // compress_ratio
+        return None
+
+    @staticmethod
+    def get_dsa_max_seqlen_cmp_kv(max_seqlen_kv, compress_ratio):
+        if dsv4_use_kv_bf16() and compress_ratio in (4, 128):
+            return max_seqlen_kv // compress_ratio
+        return 0
+
+    @staticmethod
+    def get_dsa_cmp_residual_kv(seq_lens, compress_ratio):
+        if dsv4_use_kv_bf16() and compress_ratio in (4, 128):
+            return seq_lens % compress_ratio
+        return None
 
     # ===== SWA / Compressor KV Scatter =====
 
@@ -1161,7 +1291,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def dsa_kv_compress_scatter(cache, x, slot_mapping):
         """Scatter KV into cache with fused quantization+compression.
         A5: kv_compress_epilog handles quant/compress/scatter internally.
-        Input x is unquantized bf16; cache shape is [..., head_dim]."""
+        Input x is unquantized bf16; cache shape is [..., head_dim].
+
+        BF16 path: the cache stays BF16 (no per-tile FP8 quant), so fall back
+        to a plain scatter using a 2D [block_idx, offset] slot_mapping."""
+        if dsv4_use_kv_bf16():
+            BaseDeviceAdaptor.dsa_kv_compress_scatter(cache, x, slot_mapping)
+            return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
             x=x.view(-1, x.shape[-1]),
@@ -1307,7 +1443,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def format_dsa_slot_mapping(slot_mapping, block_size):
-        """A5: 1D pass-through."""
+        """A5: 1D pass-through.
+
+        BF16 path: uses the 2D [block_idx, offset] format required by the plain
+        scatter (matching the A2/A3 BF16 shared-kv path)."""
+        if dsv4_use_kv_bf16():
+            return BaseDeviceAdaptor.format_dsa_slot_mapping(slot_mapping, block_size)
         return slot_mapping
 
     @staticmethod
