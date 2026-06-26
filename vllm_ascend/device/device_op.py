@@ -534,6 +534,16 @@ class BaseDeviceAdaptor:
         non-compressed case."""
         return 1
 
+    @staticmethod
+    def get_dsa_cmp_seq_lens(seq_lens, compress_ratio):
+        """Return per-batch compressed KV lengths when required by the backend."""
+        return None
+
+    @staticmethod
+    def get_dsa_max_seqlen_cmp_kv(max_seqlen_kv, compress_ratio):
+        """Return the maximum compressed KV length when required by the backend."""
+        return 0
+
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
@@ -804,12 +814,23 @@ def _bf16_sparse_flash_mla_metadata(**kwargs):
     which uses a single shared-KV length (``seqused_kv`` / ``max_seqlen_kv``).
     ``sparse_flash_mla_metadata`` instead splits KV into ori/cmp and names the
     shared-KV ("ori") length params ``seqused_ori_kv`` / ``max_seqlen_ori_kv``.
-    Rename those so the device-agnostic call sites stay unchanged.
+    Rename those so the device-agnostic call sites stay unchanged.  For
+    compressed KV scenarios (c4/c128), PA_BBND also requires
+    ``seqused_cmp_kv`` and ``max_seqlen_cmp_kv``; derive them as a fallback
+    if an older call site only provided the original FP8-style names.
     """
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     if "max_seqlen_kv" in kwargs:
         kwargs["max_seqlen_ori_kv"] = kwargs.pop("max_seqlen_kv")
+    if kwargs.get("has_cmp_kv", False):
+        cmp_ratio = kwargs.get("cmp_ratio", 0)
+        if cmp_ratio in (4, 128):
+            if kwargs.get("seqused_cmp_kv") is None:
+                kwargs["seqused_cmp_kv"] = kwargs["seqused_ori_kv"] // cmp_ratio
+            max_seqlen_cmp_kv = kwargs.get("max_seqlen_cmp_kv")
+            if max_seqlen_cmp_kv is None or (isinstance(max_seqlen_cmp_kv, int) and max_seqlen_cmp_kv == 0):
+                kwargs["max_seqlen_cmp_kv"] = kwargs["max_seqlen_ori_kv"] // cmp_ratio
     return torch.ops._C_ascend.npu_sparse_flash_mla_metadata(**kwargs)
 
 
@@ -819,10 +840,15 @@ def _bf16_sparse_flash_mla(*args, **kwargs):
 
     The shared-KV length kwarg is ``seqused_kv`` on the FP8 op and
     ``seqused_ori_kv`` on ``sparse_flash_mla``; ``q`` is still passed
-    positionally. All other kwargs already match the BF16 op signature.
+    positionally. For compressed KV scenarios, derive the BF16-only
+    ``seqused_cmp_kv`` argument if the caller only provided the FP8-style
+    shared-KV length.
     """
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
+    cmp_ratio = kwargs.get("cmp_ratio", 0)
+    if kwargs.get("cmp_kv") is not None and cmp_ratio in (4, 128) and kwargs.get("seqused_cmp_kv") is None:
+        kwargs["seqused_cmp_kv"] = kwargs["seqused_ori_kv"] // cmp_ratio
     return torch.ops._C_ascend.npu_sparse_flash_mla(*args, **kwargs)
 
 
@@ -1231,6 +1257,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if dsv4_use_kv_bf16():
             return 0
         return 1
+
+    @staticmethod
+    def get_dsa_cmp_seq_lens(seq_lens, compress_ratio):
+        if dsv4_use_kv_bf16() and compress_ratio in (4, 128):
+            return seq_lens // compress_ratio
+        return None
+
+    @staticmethod
+    def get_dsa_max_seqlen_cmp_kv(max_seqlen_kv, compress_ratio):
+        if dsv4_use_kv_bf16() and compress_ratio in (4, 128):
+            return max_seqlen_kv // compress_ratio
+        return 0
 
     # ===== SWA / Compressor KV Scatter =====
 

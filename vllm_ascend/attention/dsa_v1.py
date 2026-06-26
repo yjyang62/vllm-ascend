@@ -732,6 +732,22 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         cu_c4_cmp_seqlen_list = None
         cu_c128_cmp_seqlen_list = None
+        prefill_kv_seq_lens = self.seq_lens[reqs_start:]
+        max_prefill_kv_seq_len = prefill_kv_seq_lens.max()
+        c4_cmp_metadata_kwargs = {}
+        c4_cmp_seq_lens = DeviceOperator.get_dsa_cmp_seq_lens(prefill_kv_seq_lens, 4)
+        if c4_cmp_seq_lens is not None:
+            c4_cmp_metadata_kwargs = {
+                "seqused_cmp_kv": c4_cmp_seq_lens,
+                "max_seqlen_cmp_kv": DeviceOperator.get_dsa_max_seqlen_cmp_kv(max_prefill_kv_seq_len, 4),
+            }
+        c128_cmp_metadata_kwargs = {}
+        c128_cmp_seq_lens = DeviceOperator.get_dsa_cmp_seq_lens(prefill_kv_seq_lens, 128)
+        if c128_cmp_seq_lens is not None:
+            c128_cmp_metadata_kwargs = {
+                "seqused_cmp_kv": c128_cmp_seq_lens,
+                "max_seqlen_cmp_kv": DeviceOperator.get_dsa_max_seqlen_cmp_kv(max_prefill_kv_seq_len, 128),
+            }
 
         layer_name = f"c{self.compressor_ratio}"
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
@@ -772,10 +788,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cu_seqlens_ori_kv=prefill_query_start_loc,
                     cu_seqlens_cmp_kv=cu_c4_cmp_seqlen_list,
                     seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[reqs_start:],
+                    seqused_kv=prefill_kv_seq_lens,
                     max_seqlen_q=seq_lens_q.max(),
-                    max_seqlen_kv=self.seq_lens[reqs_start:].max(),
-                    batch_size=len(self.seq_lens[reqs_start:]),
+                    max_seqlen_kv=max_prefill_kv_seq_len,
+                    batch_size=len(prefill_kv_seq_lens),
                     cmp_topk=index_topk,
                     # topk=index_topk,
                     cmp_ratio=4,
@@ -787,6 +803,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=True,
+                    **c4_cmp_metadata_kwargs,
                 )
             sas_metadata = self.prefill_ratio_to_sas_metadata[layer_name]
         else:
@@ -800,10 +817,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cu_seqlens_ori_kv=prefill_query_start_loc,
                     cu_seqlens_cmp_kv=cu_c128_cmp_seqlen_list,
                     seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[reqs_start:],
+                    seqused_kv=prefill_kv_seq_lens,
                     max_seqlen_q=seq_lens_q.max(),
-                    max_seqlen_kv=self.seq_lens[reqs_start:].max(),
-                    batch_size=len(self.seq_lens[reqs_start:]),
+                    max_seqlen_kv=max_prefill_kv_seq_len,
+                    batch_size=len(prefill_kv_seq_lens),
                     cmp_ratio=128,  #
                     ori_mask_mode=4,  # 4:sliding window
                     cmp_mask_mode=3,  # 3:causal
@@ -813,6 +830,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=True,
+                    **c128_cmp_metadata_kwargs,
                 )
             sas_metadata = self.prefill_ratio_to_sas_metadata[layer_name]
         if self.prefill_ratio_to_sas_metadata.get("qli") is None:
@@ -995,6 +1013,21 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
+        decode_kv_seq_lens = self.seq_lens[: self.num_decodes]
+        c4_cmp_metadata_kwargs = {}
+        c4_cmp_seq_lens = DeviceOperator.get_dsa_cmp_seq_lens(decode_kv_seq_lens, 4)
+        if c4_cmp_seq_lens is not None:
+            c4_cmp_metadata_kwargs = {
+                "seqused_cmp_kv": c4_cmp_seq_lens,
+                "max_seqlen_cmp_kv": DeviceOperator.get_dsa_max_seqlen_cmp_kv(max_seqlen_kv, 4),
+            }
+        c128_cmp_metadata_kwargs = {}
+        c128_cmp_seq_lens = DeviceOperator.get_dsa_cmp_seq_lens(decode_kv_seq_lens, 128)
+        if c128_cmp_seq_lens is not None:
+            c128_cmp_metadata_kwargs = {
+                "seqused_cmp_kv": c128_cmp_seq_lens,
+                "max_seqlen_cmp_kv": DeviceOperator.get_dsa_max_seqlen_cmp_kv(max_seqlen_kv, 128),
+            }
         if self.compressor_ratio <= 1:
             if self.decode_ratio_to_sas_metadata.get(layer_name) is None:
                 self.decode_ratio_to_sas_metadata[layer_name] = metadata_op(
@@ -1032,10 +1065,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cu_seqlens_ori_kv=cu_seqlens_ori_kv,
                     cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
                     seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[: self.num_decodes],  # cached
+                    seqused_kv=decode_kv_seq_lens,  # cached
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
-                    batch_size=len(self.seq_lens[: self.num_decodes]),  # cached
+                    batch_size=len(decode_kv_seq_lens),  # cached
                     cmp_topk=index_topk,
                     # topk=index_topk,
                     cmp_ratio=4,
@@ -1047,6 +1080,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=True,
+                    **c4_cmp_metadata_kwargs,
                 )
             self.decode_sas_metadata[:1024] = self.decode_ratio_to_sas_metadata[layer_name]
         else:
@@ -1060,10 +1094,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cu_seqlens_ori_kv=cu_seqlens_ori_kv,
                     cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
                     seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[: self.num_decodes],
+                    seqused_kv=decode_kv_seq_lens,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
-                    batch_size=len(self.seq_lens[: self.num_decodes]),
+                    batch_size=len(decode_kv_seq_lens),
                     cmp_ratio=128,
                     ori_mask_mode=4,
                     cmp_mask_mode=3,
@@ -1073,6 +1107,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=True,
+                    **c128_cmp_metadata_kwargs,
                 )
             self.decode_sas_metadata[:1024] = self.decode_ratio_to_sas_metadata[layer_name]
         assert self.decode_qli_metadata is not None
