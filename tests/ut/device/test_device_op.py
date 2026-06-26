@@ -140,6 +140,40 @@ def test_a5_bf16_sparse_flash_mla_wrappers_rename_kwargs():
     assert "max_seqlen_kv" not in meta_kwargs
 
 
+def test_a5_bf16_compressed_path_derives_cmp_kv_lengths():
+    # On the compressed path (cmp_ratio in {4, 128}) the BF16 ops require the
+    # compressed-KV lengths explicitly: seqused_cmp_kv = S // ratio and
+    # cmp_residual_kv = S % ratio (S = ori KV length per request).
+    seqused = torch.tensor([10, 64, 130], dtype=torch.int32)
+    mock_torch = mock.MagicMock()
+    ops = mock_torch.ops._C_ascend
+    with mock.patch("vllm_ascend.device.device_op.torch", mock_torch):
+        _bf16_sparse_flash_mla("Q", seqused_kv=seqused, cmp_ratio=4)
+        _bf16_sparse_flash_mla_metadata(num_heads_q=64, seqused_kv=seqused, max_seqlen_kv=130, cmp_ratio=4)
+
+    attn_kwargs = ops.npu_sparse_flash_mla.call_args.kwargs
+    torch.testing.assert_close(attn_kwargs["seqused_ori_kv"], seqused)
+    torch.testing.assert_close(attn_kwargs["seqused_cmp_kv"], seqused // 4)
+    torch.testing.assert_close(attn_kwargs["cmp_residual_kv"], seqused % 4)
+
+    meta_kwargs = ops.npu_sparse_flash_mla_metadata.call_args.kwargs
+    torch.testing.assert_close(meta_kwargs["seqused_cmp_kv"], seqused // 4)
+    torch.testing.assert_close(meta_kwargs["cmp_residual_kv"], seqused % 4)
+    assert int(meta_kwargs["max_seqlen_cmp_kv"]) == int((seqused // 4).max())
+
+
+def test_a5_bf16_swa_only_does_not_add_cmp_kv_lengths():
+    # SWA-only uses the cmp_ratio sentinel (0); no compressed-KV params added.
+    seqused = torch.tensor([8, 16], dtype=torch.int32)
+    mock_torch = mock.MagicMock()
+    ops = mock_torch.ops._C_ascend
+    with mock.patch("vllm_ascend.device.device_op.torch", mock_torch):
+        _bf16_sparse_flash_mla("Q", seqused_kv=seqused, cmp_ratio=0)
+    attn_kwargs = ops.npu_sparse_flash_mla.call_args.kwargs
+    assert "seqused_cmp_kv" not in attn_kwargs
+    assert "cmp_residual_kv" not in attn_kwargs
+
+
 @pytest.mark.parametrize("use_bf16", [False, True])
 def test_a5_sparse_attn_kwargs_and_layout_by_kv_dtype(use_bf16):
     with mock.patch("vllm_ascend.device.device_op.dsv4_use_kv_bf16", return_value=use_bf16):
