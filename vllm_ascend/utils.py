@@ -110,6 +110,64 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
+# Matches the decoder layer index in checkpoint/runtime weight names such as
+# ``model.layers.12.self_attn.wkv.weight`` or ``layers.12.mlp...``.
+_DSV4_LAYER_INDEX_PATTERN = re.compile(r"layers\.(\d+)\.")
+
+
+def truncate_dsv4_config_for_reduced_layers(config: Any) -> None:
+    """Keep DSV4 per-layer config arrays consistent with ``num_hidden_layers``.
+
+    Reduced-layer (减层) runs shrink the model via
+    ``--hf-overrides '{"num_hidden_layers": N}'``, but that override does not
+    touch the per-layer ``compress_ratios`` array or the ``num_hash_layers``
+    count. Left untouched, the stale tail of ``compress_ratios`` (and an
+    over-large hash-layer count) no longer describes the layers actually built.
+
+    This trims ``compress_ratios`` to the first ``num_hidden_layers`` entries
+    and caps ``num_hash_layers`` at ``num_hidden_layers``. The leading values
+    are preserved, so the retained layers keep the exact structure of the
+    original checkpoint's first ``N`` layers. It is a no-op for full-size runs.
+    """
+    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return
+
+    compress_ratios = getattr(config, "compress_ratios", None)
+    if isinstance(compress_ratios, (list, tuple)) and len(compress_ratios) > num_hidden_layers:
+        truncated = compress_ratios[:num_hidden_layers]
+        config.compress_ratios = list(truncated) if isinstance(compress_ratios, list) else tuple(truncated)
+        logger.info(
+            "Reduced-layer DSV4 run: truncated compress_ratios to the first %d layers.",
+            num_hidden_layers,
+        )
+
+    num_hash_layers = getattr(config, "num_hash_layers", None)
+    if isinstance(num_hash_layers, int) and num_hash_layers > num_hidden_layers:
+        config.num_hash_layers = num_hidden_layers
+        logger.info(
+            "Reduced-layer DSV4 run: capped num_hash_layers at %d.",
+            num_hidden_layers,
+        )
+
+
+def is_dsv4_pruned_layer_weight(config: Any, weight_name: str) -> bool:
+    """Whether ``weight_name`` belongs to a layer dropped by a reduced-layer run.
+
+    Returns ``True`` when the weight targets a decoder layer whose index is
+    ``>= num_hidden_layers`` (e.g. layers 5..60 and the MTP layer of a full
+    checkpoint loaded into a 5-layer model). For full-size runs no main-model
+    weight matches, so this is a no-op.
+    """
+    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return False
+    match = _DSV4_LAYER_INDEX_PATTERN.search(weight_name)
+    if match is None:
+        return False
+    return int(match.group(1)) >= num_hidden_layers
+
+
 def clear_enable_sp():
     global _ENABLE_SP
     _ENABLE_SP = None
