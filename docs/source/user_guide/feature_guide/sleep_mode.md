@@ -69,7 +69,7 @@ With extra cleanup enabled, ACL graphs are recaptured only when `tags` is `None`
 
 ## MoE vs. dense (non-MoE) model differences
 
-Sleep mode follows the same high-level contract for every model: `sleep()` offloads/discards weights and the KV cache, and `wake_up()` restores them. However, Mixture-of-Experts (MoE) models go through two extra steps that dense (non-MoE) models do not. These steps run automatically based on the model architecture and configuration, so no additional flags are required.
+Sleep mode follows the same high-level contract for every model: `sleep()` offloads/discards weights and the KV cache, and `wake_up()` restores them. However, Mixture-of-Experts (MoE) models go through one extra step during wakeup that dense (non-MoE) models do not. This step runs automatically based on the model architecture, so no additional flags are required.
 
 ### Expert weight layout restoration
 
@@ -81,26 +81,6 @@ For **unquantized MoE models** (`quant_config is None`), the fused expert weight
 - `w2_weight` (down projection): transposed back to the runtime layout when its third dimension matches `hidden_size`.
 
 This step is skipped entirely for dense models (which have no expert weights) and for quantized models (whose weights are handled by the quantization method).
-
-### MoE dispatcher HCCL metadata refresh
-
-This difference only applies when `enable_sleep_mode_extra_cleanup` is enabled, because that is when HCCL process groups are destroyed during `sleep()` and recreated during `wake_up()`.
-
-- **Dense models** only rely on the standard tensor/pipeline-parallel HCCL groups, which are restored directly during `wake_up()`.
-- **MoE models** additionally use a dedicated MC2 all-to-all communicator for token dispatch/combine across experts. The token dispatcher caches the HCCL communicator name, which becomes stale once the underlying HCCL groups are recreated. During `wake_up()`, vLLM Ascend therefore iterates over the registered MoE communication methods and calls `refresh_hccl_group()` on each token dispatcher to re-resolve the MC2 communicator name. Without this refresh, MoE all-to-all communication after wakeup would use an invalid communicator handle.
-
-Dense models skip this refresh because they register no MoE token dispatcher.
-
-### Summary
-
-| Step | Dense (non-MoE) | MoE |
-| --- | --- | --- |
-| Offload/restore weights | Yes | Yes |
-| Discard/restore KV cache | Yes | Yes |
-| HCCL group destroy/restore (extra cleanup) | Yes | Yes |
-| ACL graph workspace cleanup/recapture | Yes | Yes |
-| Expert weight re-transpose on wakeup | No | Yes (unquantized only) |
-| MoE dispatcher HCCL metadata refresh | No | Yes (extra cleanup only) |
 
 ## Usage
 
