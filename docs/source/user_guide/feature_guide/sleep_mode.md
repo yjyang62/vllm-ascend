@@ -67,6 +67,17 @@ llm.wake_up(tags=["kv_cache"])
 
 With extra cleanup enabled, ACL graphs are recaptured only when `tags` is `None` or contains `"kv_cache"`. This avoids recapturing graphs before externally reloaded weights and KV-cache state are ready.
 
+## Weight post-processing after wakeup
+
+When `wake_up(tags=["weights"])` is used with externally reloaded or updated weights, logs mentioning `process_weights_after_loading` are expected. After weights are loaded, vLLM Ascend runs this hook to transform the restored tensors into the layout required by NPU kernels.
+
+The MoE and non-MoE paths differ in what this hook prepares:
+
+- MoE layers post-process expert weights after loading. For example, the `w13` and `w2` expert weights may be transposed, cast to the required NPU format, and have their scale tensors reshaped so they match the input format expected by `torch_npu.npu_grouped_matmul`.
+- Non-MoE layers run the corresponding linear-layer quantization post-processing. This usually converts the loaded weight and scale tensors into the layout required by the layer's matmul kernel, but it does not prepare per-expert grouped-matmul inputs.
+
+This post-processing is part of the normal wakeup path and may increase wakeup latency, especially for MoE models with many experts.
+
 ## Usage
 
 The following is a simple example of how to use sleep mode.
