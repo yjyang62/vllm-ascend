@@ -210,7 +210,7 @@ def test_a5_bf16_kv_scatter_updates_cache_by_block_offset():
     torch.testing.assert_close(cache[1, 0], x[2])
 
 
-def test_a5_bf16_kv_scatter_uses_index_assignment():
+def test_a5_bf16_kv_scatter_uses_flat_index_copy():
     cache = torch.zeros(1, 2, 1, 2)
     x = torch.ones(1, 1, 2)
     slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
