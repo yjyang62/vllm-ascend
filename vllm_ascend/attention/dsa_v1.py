@@ -28,6 +28,7 @@ from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
+    dsv4_use_kv_bf16,
     get_ascend_device_type,
     get_potential_max_tokens,
     npu_stream_switch,
@@ -112,13 +113,17 @@ def hadamard_scale(out: torch.Tensor, x_shape: tuple[int, ...], dim: int, scale:
     return out[..., :dim].reshape(*x_shape)
 
 
+def _has_weight_scale(linear) -> bool:
+    return getattr(linear, "weight_scale", None) is not None
+
+
 def _is_w8a8_dynamic(linear) -> bool:
-    """True iff ``linear`` is wired up with ``AscendW8A8DynamicLinearMethod``."""
+    """True iff ``linear`` can run the W8A8 dynamic matmul fast path."""
     qm = getattr(linear, "quant_method", None)
     if qm is None or isinstance(qm, AscendUnquantizedLinearMethod):
         return False
     inner = getattr(qm, "quant_method", None)
-    return isinstance(inner, AscendW8A8DynamicLinearMethod)
+    return isinstance(inner, AscendW8A8DynamicLinearMethod) and _has_weight_scale(linear)
 
 
 def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
@@ -387,9 +392,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_ascend_device_type() in {AscendDeviceType.A5} and not dsv4_use_kv_bf16():
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
+            # A2/A3, and A5 BF16 path, use a 2D [block_idx, offset] slot_mapping.
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
@@ -749,12 +755,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     max_seqlen_q=seq_lens_q.max(),
                     max_seqlen_kv=self.seq_lens[reqs_start:].max(),
                     batch_size=len(self.seq_lens[reqs_start:]),
-                    cmp_ratio=1,
+                    cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(),
                     ori_mask_mode=4,  # 4:sliding window
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=False,
                 )
@@ -782,7 +788,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -808,7 +814,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -978,13 +984,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
                     batch_size=len(self.seq_lens[: self.num_decodes]),  # cached
-                    cmp_ratio=1,
+                    cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(),
                     ori_mask_mode=4,
                     cmp_mask_mode=3,
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=False,
                 )
@@ -1012,7 +1018,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -1038,7 +1044,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -1198,12 +1204,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seqlen_q=seq_lens_q.max(),
             max_seqlen_kv=seq_lens.max(),
             batch_size=len(seq_lens),
-            cmp_ratio=1,
+            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(),
             ori_mask_mode=4,
             ori_win_left=self.model_config.hf_config.sliding_window - 1,
             ori_win_right=0,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv=DeviceOperator.get_dsa_kv_layout(),
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -1279,13 +1285,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
             batch_size=len(seq_lens[:num_decodes]),
-            cmp_ratio=1,
+            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(),
             ori_mask_mode=4,
             cmp_mask_mode=3,
             ori_win_left=self.model_config.hf_config.sliding_window - 1,
             ori_win_right=0,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv=DeviceOperator.get_dsa_kv_layout(),
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -1535,7 +1541,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
         # + quantized batch matmul). Preserve it as-is: it predates and is
         # orthogonal to the OTP / olora_tp paths below, so it must win first.
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_ascend_device_type() in {AscendDeviceType.A5} and _has_weight_scale(self.wo_a):
             o = o_proj_input
             o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
             o = torch_npu.npu_transpose_quant_batchmatmul(
@@ -1928,12 +1934,12 @@ class AscendDSAImpl(DSAAttentionImpl):
                 sinks=self.attn_sink,
                 metadata=common_prefill_metadata.sas_metadata,
                 softmax_scale=self.softmax_scale,
-                cmp_ratio=max(self.compress_ratio, 1),
+                cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(),
                 ori_mask_mode=4,
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_kv_layout(),
                 **extra_attn_kwargs,
             )[0]
 
@@ -2078,7 +2084,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     ori_win_left=self.window_size - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     **extra_attn_kwargs,
                 )[0]
             else:
@@ -2102,7 +2108,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     ori_win_left=self.window_size - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     **extra_attn_kwargs,
                 )[0]
         return attn_output
@@ -2360,12 +2366,12 @@ class AscendDSAImpl(DSAAttentionImpl):
                 sinks=self.attn_sink,
                 metadata=swa_decode_metadata.sas_metadata,
                 softmax_scale=self.softmax_scale,
-                cmp_ratio=max(self.compress_ratio, 1),
+                cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(),
                 ori_mask_mode=4,
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_kv_layout(),
                 **extra_attn_kwargs,
             )[0]
         elif self.compress_ratio == 4:
@@ -2387,7 +2393,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_kv_layout(),
                 **extra_attn_kwargs,
             )[0]
         else:
@@ -2408,7 +2414,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_kv_layout(),
                 **extra_attn_kwargs,
             )[0]
         return attn_output
