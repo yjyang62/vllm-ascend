@@ -120,6 +120,11 @@ def _dsa_o_proj_weight_for_batch_matmul(weight: torch.Tensor, n_local_groups: in
     return weight.view(n_local_groups, -1, weight.shape[-1])
 
 
+def _dsa_o_proj_matmul(o_proj_input: torch.Tensor, weight: torch.Tensor, n_local_groups: int) -> torch.Tensor:
+    grouped_weight = _dsa_o_proj_weight_for_batch_matmul(weight, n_local_groups)
+    return torch.matmul(o_proj_input.transpose(0, 1), grouped_weight.transpose(-1, -2)).transpose(0, 1)
+
+
 def _is_w8a8_dynamic(linear) -> bool:
     """True iff ``linear`` can run the W8A8 dynamic matmul fast path."""
     qm = getattr(linear, "quant_method", None)
@@ -1621,16 +1626,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             if olora_tp_enable():
                 o_proj_input = self.wo_a(o_proj_input)
             else:
-                o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                    o_proj_input,
-                    _dsa_o_proj_weight_for_batch_matmul(self.wo_a.weight, self.n_local_groups),
-                    bias=None,
-                    scale=None,
-                    perm_x1=(1, 0, 2),
-                    perm_x2=(0, 1, 2),
-                    perm_y=(1, 0, 2),
-                    batch_split_factor=1,
-                )
+                o_proj_input = _dsa_o_proj_matmul(o_proj_input, self.wo_a.weight, self.n_local_groups)
                 o_proj_input = o_proj_input.reshape(num_tokens, -1)
             output[...] = self.wo_b(o_proj_input)
 
