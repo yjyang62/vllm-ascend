@@ -859,6 +859,15 @@ def _bf16_sparse_flash_mla(*args, **kwargs):
     return torch.ops._C_ascend.npu_sparse_flash_mla(*args, **kwargs)
 
 
+def _bf16_scatter_kv_cache(cache, x, slot_mapping):
+    if slot_mapping.dim() != 2 or slot_mapping.shape[-1] != 2:
+        raise ValueError(f"BF16 DSA slot_mapping must have shape [num_tokens, 2], got {tuple(slot_mapping.shape)}.")
+    block_indices = slot_mapping[:, 0].to(torch.int64)
+    block_offsets = slot_mapping[:, 1].to(torch.int64)
+    update_shape = (slot_mapping.shape[0],) + tuple(cache.shape[2:])
+    cache[block_indices, block_offsets] = x.reshape(update_shape)
+
+
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
@@ -1274,7 +1283,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         BF16 path: the cache stays BF16 (no per-tile FP8 quant), so fall back
         to a plain scatter using a 2D [block_idx, offset] slot_mapping."""
         if dsv4_use_kv_bf16():
-            torch_npu.npu_scatter_nd_update_(cache, slot_mapping, x)
+            _bf16_scatter_kv_cache(cache, x, slot_mapping)
             return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),

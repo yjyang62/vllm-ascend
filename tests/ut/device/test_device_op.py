@@ -6,6 +6,7 @@ import torch
 from vllm_ascend.device.device_op import (
     A5DeviceAdaptor,
     BaseDeviceAdaptor,
+    _bf16_scatter_kv_cache,
     _bf16_sparse_flash_mla,
     _bf16_sparse_flash_mla_metadata,
 )
@@ -197,18 +198,31 @@ def test_a5_sparse_attn_kwargs_and_layout_by_kv_dtype(use_bf16):
         assert swa_only_cmp_ratio == 1
 
 
-def test_a5_bf16_kv_scatter_uses_torch_npu_scatter():
-    cache = object()
-    x = object()
-    slot_mapping = object()
+def test_a5_bf16_kv_scatter_updates_cache_by_block_offset():
+    cache = torch.zeros(3, 4, 1, 2)
+    x = torch.tensor([[[1.0, 2.0]], [[3.0, 4.0]], [[5.0, 6.0]]])
+    slot_mapping = torch.tensor([[0, 1], [2, 3], [1, 0]], dtype=torch.int32)
+
+    _bf16_scatter_kv_cache(cache, x, slot_mapping)
+
+    torch.testing.assert_close(cache[0, 1], x[0])
+    torch.testing.assert_close(cache[2, 3], x[1])
+    torch.testing.assert_close(cache[1, 0], x[2])
+
+
+def test_a5_bf16_kv_scatter_uses_index_assignment():
+    cache = torch.zeros(1, 2, 1, 2)
+    x = torch.ones(1, 1, 2)
+    slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
     with (
         mock.patch("vllm_ascend.device.device_op.dsv4_use_kv_bf16", return_value=True),
         mock.patch("vllm_ascend.device.device_op.torch_npu.npu_scatter_nd_update_") as mock_scatter,
         mock.patch.object(BaseDeviceAdaptor, "dsa_kv_compress_scatter") as mock_base_scatter,
     ):
         A5DeviceAdaptor.dsa_kv_compress_scatter(cache, x, slot_mapping)
-    mock_scatter.assert_called_once_with(cache, x, slot_mapping)
+    mock_scatter.assert_not_called()
     mock_base_scatter.assert_not_called()
+    torch.testing.assert_close(cache[0, 1], x[0])
 
 
 def test_a5_bf16_slot_mapping_uses_2d_format():
