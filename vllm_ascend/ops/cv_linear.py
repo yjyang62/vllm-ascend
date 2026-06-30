@@ -36,7 +36,7 @@ class CVLinearWrapper:
         # 1. linear.quant_method is directly AscendW8A8DynamicLinearMethod
         # 2. linear.quant_method is a wrapper class, requiring .quant_method to get the actual quantization method
         self._quant_method = linear.quant_method
-        self._is_w8a8_dynamic = self._detect_w8a8_dynamic(linear.quant_method)
+        self._is_w8a8_dynamic = self._detect_w8a8_dynamic(linear.quant_method) and self._has_weight_scale(linear)
 
     @staticmethod
     def _detect_w8a8_dynamic(quant_method):
@@ -48,6 +48,10 @@ class CVLinearWrapper:
         return hasattr(quant_method, "quant_method") and isinstance(
             quant_method.quant_method, AscendW8A8DynamicLinearMethod
         )
+
+    @staticmethod
+    def _has_weight_scale(linear):
+        return getattr(linear, "weight_scale", None) is not None
 
     @staticmethod
     def _detect_communication(linear):
