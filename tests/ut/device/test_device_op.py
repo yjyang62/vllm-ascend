@@ -197,16 +197,18 @@ def test_a5_sparse_attn_kwargs_and_layout_by_kv_dtype(use_bf16):
         assert swa_only_cmp_ratio == 1
 
 
-def test_a5_bf16_kv_scatter_delegates_to_plain_scatter():
+def test_a5_bf16_kv_scatter_uses_torch_npu_scatter():
     cache = object()
     x = object()
     slot_mapping = object()
     with (
         mock.patch("vllm_ascend.device.device_op.dsv4_use_kv_bf16", return_value=True),
-        mock.patch.object(BaseDeviceAdaptor, "dsa_kv_compress_scatter") as mock_scatter,
+        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_scatter_nd_update_") as mock_scatter,
+        mock.patch.object(BaseDeviceAdaptor, "dsa_kv_compress_scatter") as mock_base_scatter,
     ):
         A5DeviceAdaptor.dsa_kv_compress_scatter(cache, x, slot_mapping)
     mock_scatter.assert_called_once_with(cache, x, slot_mapping)
+    mock_base_scatter.assert_not_called()
 
 
 def test_a5_bf16_slot_mapping_uses_2d_format():

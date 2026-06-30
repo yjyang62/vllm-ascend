@@ -1276,7 +1276,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         BF16 path: the cache stays BF16 (no per-tile FP8 quant), so fall back
         to a plain scatter using a 2D [block_idx, offset] slot_mapping."""
         if dsv4_use_kv_bf16():
-            BaseDeviceAdaptor.dsa_kv_compress_scatter(cache, x, slot_mapping)
+            torch_npu.npu_scatter_nd_update_(cache, slot_mapping, x)
             return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
