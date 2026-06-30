@@ -1,6 +1,6 @@
 # Batch Invariance（批不变性 / 批一致性）— 日志定位指南
 
-> **这是什么**：让模型输出与 batch 大小、batch 内请求顺序**无关**（确定性、可复现）的能力。对 RL/RLHF 训练尤为关键——rollout 需要可复现以保证训练稳定。实现方式是注册一组确定性算子（matmul/softmax/sum 等）、关闭引入非确定性的优化，并固定通信确定性环境。代码在 `vllm_ascend/batch_invariant.py`、`vllm_ascend/ops/triton/batch_invariant/*`、`vllm_ascend/sample/sampler.py`、`vllm_ascend/platform.py`。
+> **这是什么**：让模型输出与 batch 大小、以及 batch 内请求的排列顺序**无关**，从而做到确定、可复现。它对 RL/RLHF 训练尤为关键——稳定的训练依赖可复现的 rollout。实现上主要做三件事：注册一组确定性算子（matmul、softmax、sum 等），关闭会引入非确定性的优化，并固定集合通信的确定性环境。相关代码位于 `vllm_ascend/batch_invariant.py`、`vllm_ascend/ops/triton/batch_invariant/*`、`vllm_ascend/sample/sampler.py`、`vllm_ascend/platform.py`。
 > **覆盖范围**：从 `VLLM_BATCH_INVARIANT=1` 在 worker 分布式初始化时触发，到运行期采样 / 注意力后端走确定性路径。
 > **涉及组件**：`NPUWorker`（初始化触发）、`vllm_ascend.batch_invariant`（环境覆盖 + 算子注册）、`AscendSampler`（采样回退）、`NPUPlatform`（FA3 后端选择）（详见 [附录 A](#a-涉及仓库与组件)）。
 >
@@ -17,7 +17,7 @@
 > - 推理侧日志：`VLLM_BATCH_INVARIANT=1 vllm serve ...` 进程的 stdout/stderr。部分为 `logger.debug`/`debug_once`，需放开 debug 级别才可见。
 > - 快速过滤：`grep -E "batch-invariant|BATCH_INVARIANT|training-inference consistency|FA3" <日志文件>`
 >
-> **说明（重要）**：信号来自 `vllm_ascend.batch_invariant`、`AscendSampler`、`NPUPlatform._validate_fa3_backend` 的 `logger.info/warning/debug` 与异常文本。`init_batch_invariance` 的 info/warning 默认可见；环境覆盖与算子注册为 `logger.debug`（需开 debug）。注意 `VLLM_BATCH_INVARIANT` 是 **vLLM 上游 envs**，不在 vllm-ascend `envs.py`。
+> **说明（重要）**：关键信号来自 `vllm_ascend.batch_invariant`、`AscendSampler` 与 `NPUPlatform._validate_fa3_backend` 打印的 `logger.info`/`warning`/`debug` 及异常文本。其中 `init_batch_invariance` 的 info/warning 默认即可见，而环境覆盖与算子注册都是 `logger.debug`，需先放开 debug 级别才能看到。另需注意：`VLLM_BATCH_INVARIANT` 是 **vLLM 上游的环境变量**，并不在 vllm-ascend 的 `envs.py` 中。
 >
 > **阅读优先级**：紧急排障 → 直接看下方「判断口诀」；系统了解 → 按 §一 → §二 → 附录顺序读。
 
@@ -74,7 +74,7 @@ flowchart LR
 
 ### 2.1 阶段 1：触发与可用性检查
 
-**在干什么**：worker 初始化分布式环境前调用 `init_batch_invariance()`；若 `VLLM_BATCH_INVARIANT` 为真且 Triton 或 AscendC 批不变算子可用，则启用，否则告警跳过。
+**在干什么**：worker 在初始化分布式环境之前会调用 `init_batch_invariance()`。只有当 `VLLM_BATCH_INVARIANT` 为真、且 Triton 或 AscendC 批不变算子至少有一个可用时，才会真正启用；两者都不可用时则打印告警并跳过。
 
 | 子环节 | 关键日志 / 代码点 | 正常含义 | 异常时 / 分支 |
 |--------|-------------------|----------|----------------|
@@ -87,7 +87,7 @@ flowchart LR
 
 ### 2.2 阶段 2：确定性环境覆盖
 
-**在干什么**：`override_envs_for_invariance()` 关闭会引入非确定性的优化，并固定通信确定性环境变量。
+**在干什么**：`override_envs_for_invariance()` 会关闭那些会引入非确定性的优化，并把集合通信的确定性环境变量固定下来。
 
 | 子环节 | 关键日志 / 代码点 | 正常含义 | 异常时 / 分支 |
 |--------|-------------------|----------|----------------|
@@ -101,7 +101,7 @@ flowchart LR
 
 ### 2.3 阶段 3：批不变算子注册
 
-**在干什么**：`enable_batch_invariant_mode()` 把 aten 算子重定向到批不变实现：AscendC 优先（mm/matmul/sum + patch FIA/add_rms_norm/torch.sum），否则用 Triton（addmm/bmm/softmax/mm/matmul/linear）。
+**在干什么**：`enable_batch_invariant_mode()` 把相关 aten 算子重定向到批不变实现：优先使用 AscendC（注册 mm/matmul/sum，并 patch FIA、add_rms_norm、torch.sum），在其不可用时改用 Triton（addmm/bmm/softmax/mm/matmul/linear）。
 
 | 子环节 | 关键日志 / 代码点 | 正常含义 | 异常时 / 分支 |
 |--------|-------------------|----------|----------------|
@@ -114,7 +114,7 @@ flowchart LR
 
 ### 2.4 阶段 4：运行期一致性路径
 
-**在干什么**：运行期采样与注意力后端选择走批不变/训推一致路径。采样回退到 vLLM 原生 top-k/top-p；FA3 后端仅在训推一致场景启用。
+**在干什么**：运行期的采样与注意力后端选择都会切换到批不变/训推一致路径：采样回退到 vLLM 原生的 top-k/top-p 实现，而 FA3 后端只在训推一致场景下才启用。
 
 | 子环节 | 关键日志 / 代码点 | 正常含义 | 异常时 / 分支 |
 |--------|-------------------|----------|----------------|

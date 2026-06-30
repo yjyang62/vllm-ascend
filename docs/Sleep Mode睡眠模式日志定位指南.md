@@ -1,6 +1,6 @@
 # Sleep Mode（睡眠模式）— 日志定位指南
 
-> **这是什么**：RL/RLHF 后训练（PPO/GRPO/DPO）场景下，把推理引擎占用的 NPU 显存（模型权重 + KV cache）在训练阶段临时让出给 trainer 的能力。通过自定义内存池分配器 `CaMemAllocator`（基于 AscendCL）把权重 offload 到 CPU、丢弃 KV cache；训练完成后再 `wake_up` 还原。代码在 `vllm_ascend/device_allocator/{camem,sleep_mem_optimized}.py` 与 `vllm_ascend/worker/worker.py`。
+> **这是什么**：在 RL/RLHF 后训练（PPO、GRPO、DPO 等）中，生成与训练交替进行、争抢同一块 NPU 显存。睡眠模式让推理引擎在训练阶段先把自己占用的显存（模型权重与 KV cache）临时让给 trainer——由基于 AscendCL 的自定义内存池分配器 `CaMemAllocator` 把权重换出到 CPU、并丢弃 KV cache，等训练结束后再通过 `wake_up` 还原。相关代码位于 `vllm_ascend/device_allocator/{camem,sleep_mem_optimized}.py` 与 `vllm_ascend/worker/worker.py`。
 > **覆盖范围**：从 `--enable-sleep-mode` 启动建立内存池，到一次完整的「`sleep(level)` → `wake_up(tags)`」循环结束。
 > **涉及组件**：vLLM API server（dev-mode `/sleep`、`/wake_up`、`/is_sleeping` 端点）、`NPUWorker`、`CaMemAllocator`、`SleepWakeupManager`（ACL Graph + HCCL 额外清理）（详见 [附录 A](#a-涉及仓库与组件)）。
 >
@@ -17,7 +17,7 @@
 > - 推理侧日志：`vllm serve --enable-sleep-mode` 进程的 stdout/stderr（在线服务需 `VLLM_SERVER_DEV_MODE=1` 暴露端点）。
 > - 快速过滤：`grep -E "CaMem (sleep|wake_up)|Sleep mode|HCCL process groups|vllm_ascend_C|FRACTAL_NZ" <日志文件>`
 >
-> **说明（重要）**：本特性的关键信号来自 `CaMemAllocator` / `SleepWakeupManager` / `NPUWorker.sleep|wake_up` 的 `logger.info`/`logger.warning` 与断言/异常文本。`logger.info` 级别默认可见。控制面端点（`/sleep`、`/wake_up`、`/is_sleeping`）位于上游 vLLM，本仓无源码，标注「待代码补证（上游 vLLM）」，不臆造。
+> **说明（重要）**：本特性的关键信号主要来自 `CaMemAllocator`、`SleepWakeupManager` 以及 `NPUWorker.sleep`/`wake_up` 打印的 `logger.info`/`logger.warning`，外加少量断言与异常文本；其中 `logger.info` 默认即可见。控制面端点（`/sleep`、`/wake_up`、`/is_sleeping`）由上游 vLLM 实现，本仓不含其源码，因此下文统一标注「待代码补证（上游 vLLM）」，不做臆测。
 >
 > **阅读优先级**：紧急排障 → 直接看下方「判断口诀」；系统了解 → 按 §一 → §二 → 附录顺序读。
 
@@ -74,7 +74,7 @@ flowchart LR
 
 ### 2.1 阶段 1：启用与内存池标记
 
-**在干什么**：`--enable-sleep-mode` 时获取 `CaMemAllocator` 单例，`load_model` 在 `tag="weights"`、KV cache 初始化在 `tag="kv_cache"` 的内存池上下文中分配，便于 sleep 时按 tag offload/discard。
+**在干什么**：启用 `--enable-sleep-mode` 后，worker 会取得全局唯一的 `CaMemAllocator`，并分别在 `tag="weights"` 与 `tag="kv_cache"` 两个内存池上下文中完成 `load_model` 和 KV cache 初始化。打上标签后，后续 `sleep` 才能按标签精确决定哪些显存换出、哪些直接丢弃。
 
 | 子环节 | 关键日志 / 代码点 | 正常含义 | 异常时 / 分支 |
 |--------|-------------------|----------|----------------|
@@ -88,7 +88,7 @@ flowchart LR
 
 ### 2.2 阶段 2：进入睡眠（sleep）
 
-**在干什么**：`/sleep` → `NPUWorker.sleep(level)`。level 2 先备份 buffer；若开 extra cleanup 则先清 ACL Graph workspace 与 HCCL；再由 `CaMemAllocator.sleep` 按 tag offload/discard。
+**在干什么**：`/sleep` 请求进入 `NPUWorker.sleep(level)`。其顺序为：level 2 先把模型 buffer 备份到 CPU；若开启了 extra cleanup，则先清理 ACL Graph workspace 并销毁 HCCL 进程组；最后由 `CaMemAllocator.sleep` 按标签把权重换出、其余丢弃。
 
 | 子环节 | 关键日志 / 代码点 | 正常含义 | 异常时 / 分支 |
 |--------|-------------------|----------|----------------|
@@ -102,7 +102,7 @@ flowchart LR
 
 ### 2.3 阶段 3：唤醒与内存恢复（wake_up）
 
-**在干什么**：`/wake_up` → `NPUWorker.wake_up(tags)`。先校验 NZ 关闭，再 `CaMemAllocator.wake_up` 重映射并从 CPU 拷回；MoE 权重转置还原；level 2 还原备份 buffer。
+**在干什么**：`/wake_up` 请求进入 `NPUWorker.wake_up(tags)`。其顺序为：先校验 NZ 已关闭，再由 `CaMemAllocator.wake_up` 重新映射显存并从 CPU 把权重拷回，随后还原 MoE 权重的转置布局；若是 level 2，还会把此前备份的 buffer 一并还原。
 
 | 子环节 | 关键日志 / 代码点 | 正常含义 | 异常时 / 分支 |
 |--------|-------------------|----------|----------------|
@@ -115,7 +115,7 @@ flowchart LR
 
 ### 2.4 阶段 4：ACL Graph / HCCL 恢复与就绪
 
-**在干什么**：开启 extra cleanup 时，`wake_up` 末尾恢复 HCCL 进程组、刷新 MoE dispatcher 的 HCCL 元数据，并在需要时 `capture_model()` 重捕获 ACL Graph。此阶段决定唤醒延迟。
+**在干什么**：当开启 extra cleanup 时，`wake_up` 会在收尾阶段重新建立 HCCL 进程组、刷新 MoE dispatcher 的 HCCL 元数据，并在需要时调用 `capture_model()` 重新捕获 ACL Graph。这一步往往是唤醒延迟的主要来源。
 
 | 子环节 | 关键日志 / 代码点 | 正常含义 | 异常时 / 分支 |
 |--------|-------------------|----------|----------------|
