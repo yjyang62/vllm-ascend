@@ -844,6 +844,31 @@ def _bf16_sparse_flash_mla_metadata(**kwargs):
     return torch.ops._C_ascend.npu_sparse_flash_mla_metadata(**kwargs)
 
 
+def _pa_bbnd_logical_stride0(kv_shape: tuple[int, ...]) -> int:
+    stride0 = 1
+    for dim in kv_shape[1:]:
+        stride0 *= dim
+    return stride0
+
+
+def _ensure_sparse_flash_mla_kv(kv: torch.Tensor | None) -> torch.Tensor | None:
+    """Return PA_BBND KV with stride the sparse_flash_mla kernel expects.
+
+    DeepSeek-V4 SWA caches are often strided with ``page_size_padded`` (see
+    ``patch_kv_cache_utils.group_and_unify_kv_cache_specs``). Scatter writes
+    correctly into those slots, but ``sparse_flash_mla`` tiling currently
+    derives ``oriKvStride0`` / ``cmpKvStride0`` from the logical shape product
+    unless explicit stride attrs are passed from C++. When physical stride on
+    dim 0 differs, the kernel reads the wrong KV and serving output is garbage.
+    """
+    if kv is None:
+        return None
+    expected_stride0 = _pa_bbnd_logical_stride0(tuple(kv.shape))
+    if kv.stride(0) == expected_stride0:
+        return kv
+    return kv.contiguous()
+
+
 def _bf16_sparse_flash_mla(*args, **kwargs):
     """Adapt the FP8 ``kv_quant_sparse_attn_sharedkv`` call convention to the
     BF16 ``npu_sparse_flash_mla`` signature.
@@ -856,6 +881,10 @@ def _bf16_sparse_flash_mla(*args, **kwargs):
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     _bf16_add_cmp_kv_lengths(kwargs)
+    if "ori_kv" in kwargs:
+        kwargs["ori_kv"] = _ensure_sparse_flash_mla_kv(kwargs["ori_kv"])
+    if "cmp_kv" in kwargs:
+        kwargs["cmp_kv"] = _ensure_sparse_flash_mla_kv(kwargs["cmp_kv"])
     return torch.ops._C_ascend.npu_sparse_flash_mla(*args, **kwargs)
 
 

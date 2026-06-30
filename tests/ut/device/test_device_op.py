@@ -9,6 +9,7 @@ from vllm_ascend.device.device_op import (
     _bf16_scatter_kv_cache,
     _bf16_sparse_flash_mla,
     _bf16_sparse_flash_mla_metadata,
+    _ensure_sparse_flash_mla_kv,
 )
 
 
@@ -223,6 +224,39 @@ def test_a5_bf16_kv_scatter_uses_flat_index_copy():
     mock_scatter.assert_not_called()
     mock_base_scatter.assert_not_called()
     torch.testing.assert_close(cache[0, 1], x[0])
+
+
+def test_a5_bf16_sparse_flash_mla_uses_contiguous_padded_kv():
+    storage = torch.zeros(40)
+    padded_kv = torch.as_strided(
+        storage,
+        size=(2, 4, 1, 2),
+        stride=(20, 2, 2, 1),
+    )
+    mock_torch = mock.MagicMock()
+    ops = mock_torch.ops._C_ascend
+    with mock.patch("vllm_ascend.device.device_op.torch", mock_torch):
+        _bf16_sparse_flash_mla("Q", ori_kv=padded_kv, seqused_kv="S")
+    passed_kv = ops.npu_sparse_flash_mla.call_args.kwargs["ori_kv"]
+    assert passed_kv.stride(0) == 8
+    assert passed_kv.is_contiguous()
+
+
+def test_ensure_sparse_flash_mla_kv_keeps_contiguous_tensor():
+    kv = torch.randn(2, 4, 1, 8)
+    assert _ensure_sparse_flash_mla_kv(kv) is kv
+
+
+def test_ensure_sparse_flash_mla_kv_materializes_padded_stride():
+    storage = torch.zeros(40)
+    padded_kv = torch.as_strided(
+        storage,
+        size=(2, 4, 1, 2),
+        stride=(20, 2, 2, 1),
+    )
+    dense_kv = _ensure_sparse_flash_mla_kv(padded_kv)
+    assert dense_kv.stride(0) == 8
+    torch.testing.assert_close(dense_kv[0, 3, 0], padded_kv[0, 3, 0])
 
 
 def test_a5_bf16_kv_scatter_respects_padded_page_stride():

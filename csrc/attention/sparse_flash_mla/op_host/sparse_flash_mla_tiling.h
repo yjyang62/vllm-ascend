@@ -102,6 +102,8 @@ constexpr uint32_t ATTR_LAYOUT_Q_INDEX = 6;
 constexpr uint32_t ATTR_LAYOUT_KV_INDEX = 7;
 constexpr uint32_t ATTR_TOPK_VALUE_MODE_INDEX = 8;   // A2/A3
 constexpr uint32_t ATTR_RETURN_SOFTMAX_LSE_INDEX = 9;
+constexpr uint32_t ATTR_ORI_KV_STRIDE0_INDEX = 10;
+constexpr uint32_t ATTR_CMP_KV_STRIDE0_INDEX = 11;
 
 // Dim Index
 constexpr uint32_t DIM_IDX_ONE = 1;
@@ -219,6 +221,8 @@ struct SMLAParaInfo {
     const char *layoutKv = nullptr;
     const uint32_t *topkValueMode = nullptr;
     const bool *returnSoftmaxLse = nullptr;
+    const int64_t *oriKvStride0Attr = nullptr;
+    const int64_t *cmpKvStride0Attr = nullptr;
 };
 
 static std::string SMLADataTypeToSerialString(ge::DataType type);

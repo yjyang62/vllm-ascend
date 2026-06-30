@@ -4185,12 +4185,18 @@ class NPUModelRunner(GPUModelRunner):
                             ]
                             overlap_full_kv_cache = False
 
-                    kv_cache = self._adjust_kv_layout(kv_tensor,
-                                           kv_cache_shape_list,
-                                           kv_cache_dtype_list,
-                                           current_kv_cache_spec.page_size_bytes,
-                                           overlap_full_kv_cache=overlap_full_kv_cache,
-                                           )
+                    # Use the padded hybrid page stride when present so block dim 0
+                    # matches physical storage (SWA layers are padded to MLA pages).
+                    layout_page_size_bytes = getattr(
+                        current_kv_cache_spec, "page_size_padded", None
+                    ) or current_kv_cache_spec.page_size_bytes
+                    kv_cache = self._adjust_kv_layout(
+                        kv_tensor,
+                        kv_cache_shape_list,
+                        kv_cache_dtype_list,
+                        layout_page_size_bytes,
+                        overlap_full_kv_cache=overlap_full_kv_cache,
+                    )
 
                     kv_caches[layer_name] = kv_cache
                 elif isinstance(current_kv_cache_spec, AttentionSpec):
