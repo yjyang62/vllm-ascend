@@ -112,6 +112,14 @@ def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
 
 
+def _dsa_o_proj_weight_for_batch_matmul(weight: torch.Tensor, n_local_groups: int) -> torch.Tensor:
+    if weight.dim() == 3:
+        return weight
+    if weight.dim() != 2:
+        raise ValueError(f"DSA wo_a weight must be 2D or 3D, got shape {tuple(weight.shape)}.")
+    return weight.view(n_local_groups, -1, weight.shape[-1])
+
+
 def _is_w8a8_dynamic(linear) -> bool:
     """True iff ``linear`` can run the W8A8 dynamic matmul fast path."""
     qm = getattr(linear, "quant_method", None)
@@ -1613,11 +1621,9 @@ class AscendDSAImpl(DSAAttentionImpl):
             if olora_tp_enable():
                 o_proj_input = self.wo_a(o_proj_input)
             else:
-                # wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
-                # o = torch.einsum("tgd,grd->tgr", o, wo_a)
                 o_proj_input = torch_npu.npu_transpose_batchmatmul(
                     o_proj_input,
-                    self.wo_a.weight,
+                    _dsa_o_proj_weight_for_batch_matmul(self.wo_a.weight, self.n_local_groups),
                     bias=None,
                     scale=None,
                     perm_x1=(1, 0, 2),
