@@ -286,6 +286,8 @@ ge::graphStatus SMLAInfoParser::GetAttrParaInfo()
     opParamInfo_.layoutKv = attrs->GetStr(ATTR_LAYOUT_KV_INDEX);
     opParamInfo_.topkValueMode = attrs->GetAttrPointer<uint32_t>(ATTR_TOPK_VALUE_MODE_INDEX);
     opParamInfo_.returnSoftmaxLse = attrs->GetAttrPointer<bool>(ATTR_RETURN_SOFTMAX_LSE_INDEX);
+    opParamInfo_.oriKvStride0Attr = attrs->GetAttrPointer<int64_t>(ATTR_ORI_KV_STRIDE0_INDEX);
+    opParamInfo_.cmpKvStride0Attr = attrs->GetAttrPointer<int64_t>(ATTR_CMP_KV_STRIDE0_INDEX);
 
     OP_LOGI(context_->GetNodeName(), "GetAttrParaInfo end");
     return ge::GRAPH_SUCCESS;
@@ -816,8 +818,14 @@ void SMLAInfoParser::GenerateInfo(SMLATilingInfo &smlaInfo)
     smlaInfo.cmpRatio = *opParamInfo_.cmpRatio;
     smlaInfo.oriMaskMode = *opParamInfo_.oriMaskMode;
     smlaInfo.cmpMaskMode = *opParamInfo_.cmpMaskMode;
-    smlaInfo.oriKvStride0 = GetOptionalInputStride0(ORI_KV_INDEX);
-    smlaInfo.cmpKvStride0 = GetOptionalInputStride0(CMP_KV_INDEX);
+    auto resolveKvStride0 = [this](uint32_t inputIndex, const int64_t *attrVal) -> uint64_t {
+        if (attrVal != nullptr && *attrVal > 0) {
+            return static_cast<uint64_t>(*attrVal);
+        }
+        return GetOptionalInputStride0(inputIndex);
+    };
+    smlaInfo.oriKvStride0 = resolveKvStride0(ORI_KV_INDEX, opParamInfo_.oriKvStride0Attr);
+    smlaInfo.cmpKvStride0 = resolveKvStride0(CMP_KV_INDEX, opParamInfo_.cmpKvStride0Attr);
     smlaInfo.oriWinLeft = *opParamInfo_.oriWinLeft;
     smlaInfo.oriWinRight = *opParamInfo_.oriWinRight;
 

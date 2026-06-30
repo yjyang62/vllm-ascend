@@ -128,6 +128,8 @@ public:
         this->Attr("layout_kv").AttrType(OPTIONAL).String("BSND");
         this->Attr("topk_value_mode").AttrType(OPTIONAL).Int(1);
         this->Attr("return_softmax_lse").AttrType(OPTIONAL).Bool(false);
+        this->Attr("ori_kv_stride0").AttrType(OPTIONAL).Int(0);
+        this->Attr("cmp_kv_stride0").AttrType(OPTIONAL).Int(0);
 
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)
