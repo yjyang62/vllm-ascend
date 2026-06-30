@@ -810,8 +810,8 @@ def _bf16_add_cmp_kv_lengths(kwargs):
         seqused_cmp_kv  = S // cmp_ratio   (number of complete compressed groups)
         cmp_residual_kv = S %  cmp_ratio   (leftover uncompressed tail tokens)
 
-    SWA-only uses the cmp_ratio sentinel (0) with no compressed KV, so this is a
-    no-op there. Only fills values the caller did not already provide.
+    SWA-only uses cmp_ratio=1 with no compressed KV, so this is a no-op there.
+    Only fills values the caller did not already provide.
     """
     cmp_ratio = kwargs.get("cmp_ratio") or 0
     seqused_ori = kwargs.get("seqused_ori_kv")
@@ -1259,10 +1259,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def get_dsa_swa_only_cmp_ratio():
-        # sparse_flash_mla only accepts cmp_ratio in {4, 128}; the SWA-only
-        # (scenario one) path passes 0 to signal "no compression".
-        if dsv4_use_kv_bf16():
-            return 0
+        # sparse_flash_mla tiling accepts 1/4/128; use 1 for the SWA-only
+        # (no compressed KV) scenario.
         return 1
 
     # ===== SWA / Compressor KV Scatter =====

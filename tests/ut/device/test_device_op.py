@@ -163,12 +163,12 @@ def test_a5_bf16_compressed_path_derives_cmp_kv_lengths():
 
 
 def test_a5_bf16_swa_only_does_not_add_cmp_kv_lengths():
-    # SWA-only uses the cmp_ratio sentinel (0); no compressed-KV params added.
+    # SWA-only uses cmp_ratio=1; no compressed-KV params added.
     seqused = torch.tensor([8, 16], dtype=torch.int32)
     mock_torch = mock.MagicMock()
     ops = mock_torch.ops._C_ascend
     with mock.patch("vllm_ascend.device.device_op.torch", mock_torch):
-        _bf16_sparse_flash_mla("Q", seqused_kv=seqused, cmp_ratio=0)
+        _bf16_sparse_flash_mla("Q", seqused_kv=seqused, cmp_ratio=1)
     attn_kwargs = ops.npu_sparse_flash_mla.call_args.kwargs
     assert "seqused_cmp_kv" not in attn_kwargs
     assert "cmp_residual_kv" not in attn_kwargs
@@ -188,8 +188,8 @@ def test_a5_sparse_attn_kwargs_and_layout_by_kv_dtype(use_bf16):
         assert "kv_quant_mode" not in metadata_kwargs
         assert metadata_kwargs == {"device": "npu:0"}
         assert layout == "PA_BBND"
-        # SWA-only scenario passes 0 (no compression) for sparse_flash_mla.
-        assert swa_only_cmp_ratio == 0
+        # SWA-only scenario passes 1 (no compression) for sparse_flash_mla tiling.
+        assert swa_only_cmp_ratio == 1
     else:
         assert base_kwargs == {"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64}
         assert metadata_kwargs == {"kv_quant_mode": 1}
