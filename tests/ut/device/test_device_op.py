@@ -225,6 +225,27 @@ def test_a5_bf16_kv_scatter_uses_flat_index_copy():
     torch.testing.assert_close(cache[0, 1], x[0])
 
 
+def test_a5_bf16_kv_scatter_respects_padded_page_stride():
+    """Regression: flat index_copy_ breaks on strided PA_BBND caches."""
+    # Mimic _adjust_kv_layout: logical page is [4, 1, 2] but storage stride skips padding.
+    storage = torch.zeros(40)
+    cache = torch.as_strided(
+        storage,
+        size=(2, 4, 1, 2),
+        stride=(20, 2, 2, 1),
+    )
+    x = torch.tensor([[[9.0, 8.0]], [[7.0, 6.0]]])
+    slot_mapping = torch.tensor([[0, 3], [1, 1]], dtype=torch.int32)
+
+    _bf16_scatter_kv_cache(cache, x, slot_mapping)
+
+    torch.testing.assert_close(cache[0, 3, 0], x[0, 0])
+    torch.testing.assert_close(cache[1, 1, 0], x[1, 0])
+    # Flat index_copy_ would have written into storage[7] and storage[9] instead.
+    assert storage[6] == 9.0
+    assert storage[22] == 7.0
+
+
 def test_a5_bf16_slot_mapping_uses_2d_format():
     slot_mapping = torch.tensor([5, 18, 33], dtype=torch.int32)
     with mock.patch("vllm_ascend.device.device_op.dsv4_use_kv_bf16", return_value=True):

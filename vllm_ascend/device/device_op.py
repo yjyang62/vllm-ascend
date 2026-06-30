@@ -862,10 +862,14 @@ def _bf16_sparse_flash_mla(*args, **kwargs):
 def _bf16_scatter_kv_cache(cache, x, slot_mapping):
     if slot_mapping.dim() != 2 or slot_mapping.shape[-1] != 2:
         raise ValueError(f"BF16 DSA slot_mapping must have shape [num_tokens, 2], got {tuple(slot_mapping.shape)}.")
-    block_size = cache.shape[1]
-    flat_indices = (slot_mapping[:, 0] * block_size + slot_mapping[:, 1]).to(torch.int64)
+    block_indices = slot_mapping[:, 0].to(torch.int64)
+    block_offsets = slot_mapping[:, 1].to(torch.int64)
     update_shape = (slot_mapping.shape[0],) + tuple(cache.shape[2:])
-    cache.view(-1, *cache.shape[2:]).index_copy_(0, flat_indices, x.reshape(update_shape))
+    # Use block/offset indexing so padded PageAttention caches (non-contiguous
+    # stride on dim 0 from _adjust_kv_layout) scatter into the correct slots.
+    # A flat index_copy_ assumes contiguous [block, offset] layout and silently
+    # writes to the wrong locations when page_size_padded > real page size.
+    cache[block_indices, block_offsets] = x.reshape(update_shape)
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
