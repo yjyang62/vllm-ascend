@@ -862,6 +862,8 @@ def _bf16_sparse_flash_mla(*args, **kwargs):
 def _bf16_scatter_kv_cache(cache, x, slot_mapping):
     if slot_mapping.dim() != 2 or slot_mapping.shape[-1] != 2:
         raise ValueError(f"BF16 DSA slot_mapping must have shape [num_tokens, 2], got {tuple(slot_mapping.shape)}.")
+    if slot_mapping.shape[0] == 0:
+        return
     block_indices = slot_mapping[:, 0].to(torch.int64)
     block_offsets = slot_mapping[:, 1].to(torch.int64)
     # DeviceOperator.pad_dsa_decode_slot_mapping (and the generic graph-mode
@@ -885,6 +887,27 @@ def _bf16_scatter_kv_cache(cache, x, slot_mapping):
     # A flat index_copy_ assumes contiguous [block, offset] layout and silently
     # writes to the wrong locations when page_size_padded > real page size.
     cache[block_indices, block_offsets] = x.reshape(update_shape)
+    # EXPERIMENTAL, not yet confirmed on real hardware -- see the long history
+    # in git log for this function. VLLM_ASCEND_DSV4_BF16_DEBUG=1 (which reads
+    # a tensor via `.item()` after every decoder layer) reliably fixes
+    # otherwise garbled/prematurely-truncated BF16 generation. A prior attempt
+    # using `torch.npu.current_stream().synchronize()` here instead caused an
+    # actual EngineCore RPC timeout (worker unresponsive) under normal
+    # --enforce-eager inference (not ACL graph capture, not --async-scheduling
+    # -- both already ruled out) and was reverted. `.synchronize()` and
+    # `.item()` are not obviously equivalent from Python's perspective: if
+    # torch_npu's `.item()` releases the GIL while waiting for the device
+    # (as CPython extension blocking calls generally should) but the
+    # `Stream.synchronize()` binding does not, a raw `.synchronize()` call
+    # would freeze this worker process's *entire* interpreter -- including
+    # any background thread needed to answer the executor's health/RPC
+    # queue -- which would look exactly like the timeout reported. Try the
+    # `.item()` mechanism instead, since it is the one empirically proven to
+    # both fix the bug and not hang. Read back from `cache` (not from an
+    # input like `block_indices`/`x`) at one of the positions just written,
+    # so this actually depends on the scatter having completed rather than
+    # on unrelated, already-available data.
+    cache[block_indices[0], block_offsets[0]].flatten()[0].item()
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
