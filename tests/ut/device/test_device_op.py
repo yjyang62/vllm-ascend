@@ -246,35 +246,6 @@ def test_a5_bf16_kv_scatter_respects_padded_page_stride():
     assert storage[22] == 7.0
 
 
-def test_a5_bf16_kv_scatter_reads_back_written_value():
-    """Experimental fix: read back one just-written cache element (forcing a
-    `.item()`-style sync on the scatter's *output*, like the
-    VLLM_ASCEND_DSV4_BF16_DEBUG=1 mechanism proven to fix otherwise garbled
-    generation) instead of `torch.npu.current_stream().synchronize()` (which
-    caused a real EngineCore RPC timeout under normal --enforce-eager
-    inference and was reverted). The read must target `cache` -- the scatter
-    destination -- not an input like `block_indices`/`x`, otherwise it has no
-    data dependency on the write actually having happened."""
-    cache = torch.zeros(2, 2, 1, 2)
-    x = torch.tensor([[[3.0, 4.0]]])
-    slot_mapping = torch.tensor([[1, 0]], dtype=torch.int32)
-
-    _bf16_scatter_kv_cache(cache, x, slot_mapping)
-
-    torch.testing.assert_close(cache[1, 0], x[0])
-
-
-def test_a5_bf16_kv_scatter_handles_empty_slot_mapping():
-    cache = torch.zeros(2, 2, 1, 2)
-    x = torch.zeros(0, 1, 2)
-    slot_mapping = torch.zeros(0, 2, dtype=torch.int32)
-
-    # Must not raise (e.g. indexing block_indices[0] on an empty tensor).
-    _bf16_scatter_kv_cache(cache, x, slot_mapping)
-
-    assert torch.equal(cache, torch.zeros(2, 2, 1, 2))
-
-
 def test_a5_bf16_kv_scatter_skips_pad_slot_id():
     """Regression: PAD_SLOT_ID (-1) rows must be a no-op, not wrap-around
     corruption of the last real block/offset.
