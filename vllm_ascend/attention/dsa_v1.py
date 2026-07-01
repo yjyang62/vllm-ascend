@@ -9,10 +9,12 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -53,6 +55,40 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     if _DSV4_DSA_OVERLAP_STREAM is None:
         _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
     return _DSV4_DSA_OVERLAP_STREAM
+
+
+def _dsv4_bf16_debug_log_output_stats(
+    stage: str,
+    layer_name: str,
+    compress_ratio: int,
+    output: torch.Tensor,
+) -> None:
+    """Log tensor statistics under VLLM_ASCEND_DSV4_BF16_DEBUG=1, to help
+    pinpoint the first decoder layer (and pipeline stage -- raw sparse
+    attention output vs. after o_proj) where the DSv4 BF16 KV
+    (sparse_flash_mla) path's output goes bad (NaN/Inf, exploding
+    magnitude, or collapses to all-zero) without needing NPU-side
+    profiling tools. Temporary diagnostic aid -- remove once the root
+    cause of the remaining garbled-output issue is found."""
+    out_f32 = output.detach().float()
+    has_nan = bool(torch.isnan(out_f32).any().item())
+    has_inf = bool(torch.isinf(out_f32).any().item())
+    finite = out_f32[torch.isfinite(out_f32)]
+    stats = (
+        f"mean={finite.mean().item():.4g} std={finite.std().item():.4g} abs_max={finite.abs().max().item():.4g}"
+        if finite.numel() > 0
+        else "all NaN/Inf"
+    )
+    logger.info(
+        "[DSV4_BF16_DEBUG] stage=%s layer=%s compress_ratio=%s shape=%s has_nan=%s has_inf=%s %s",
+        stage,
+        layer_name,
+        compress_ratio,
+        tuple(output.shape),
+        has_nan,
+        has_inf,
+        stats,
+    )
 
 
 # mypy: disable-error-code="has-type"
@@ -1580,6 +1616,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kv_cache,
                 attn_metadata,
             )  # type: ignore[arg-type]
+            if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG:
+                _dsv4_bf16_debug_log_output_stats("raw_attn_prefill", layer_name, self.compress_ratio, output_prefill)
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
             cos = attn_metadata[0].prefill.cos[layer_name]
             sin = attn_metadata[0].prefill.sin[layer_name]
@@ -1587,6 +1625,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         if has_decode:
             assert attn_metadata[0].decode is not None
             output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
+            if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG:
+                _dsv4_bf16_debug_log_output_stats("raw_attn_decode", layer_name, self.compress_ratio, output_decode)
             o_proj_input[:decode_tokens] = output_decode
             cos = attn_metadata[0].decode.cos[layer_name]
             sin = attn_metadata[0].decode.sin[layer_name]
@@ -1629,6 +1669,9 @@ class AscendDSAImpl(DSAAttentionImpl):
                 o_proj_input = _dsa_o_proj_matmul(o_proj_input, self.wo_a.weight, self.n_local_groups)
                 o_proj_input = o_proj_input.reshape(num_tokens, -1)
             output[...] = self.wo_b(o_proj_input)
+
+        if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG:
+            _dsv4_bf16_debug_log_output_stats("final_o_proj", layer_name, self.compress_ratio, output)
 
         return output_padded
 

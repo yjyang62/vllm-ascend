@@ -117,6 +117,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 1: use the BF16 path that stores ori_kv/cmp_kv as BF16 (PA_BBND layout)
     #     and runs `npu_sparse_flash_mla`. Only takes effect on A5.
     "VLLM_ASCEND_DSV4_KV_BF16": lambda: bool(int(os.getenv("VLLM_ASCEND_DSV4_KV_BF16", "0"))),
+    # Temporary diagnostic switch for the DeepSeek-V4 BF16 KV (VLLM_ASCEND_DSV4_KV_BF16)
+    # accuracy investigation on Ascend A5. When enabled, AscendDSAImpl.forward logs
+    # per-layer output tensor statistics (mean/std/max-abs/NaN-or-Inf) right after the
+    # o_proj matmul, tagged with layer_name and compress_ratio, so the first layer where
+    # the attention output goes bad (NaN/Inf, exploding magnitude, or all-zero) can be
+    # pinpointed from server logs without hardware-level debugging tools.
+    # 0 (default): no extra logging. 1: enable. Not intended to be left on in production;
+    # remove once the root cause of the remaining garbled-output issue is found.
+    "VLLM_ASCEND_DSV4_BF16_DEBUG": lambda: bool(int(os.getenv("VLLM_ASCEND_DSV4_BF16_DEBUG", "0"))),
 }
 
 # end-env-vars-definition
