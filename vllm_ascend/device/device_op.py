@@ -20,6 +20,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.mxfp_compat import (
@@ -901,7 +902,22 @@ def _bf16_scatter_kv_cache(cache, x, slot_mapping):
     # a real performance cost (a full stream drain on every SWA/compressed KV
     # write); it should be replaced with a properly scoped event/record_stream
     # once the actual missing dependency is confirmed on real A5 hardware.
-    torch.npu.current_stream().synchronize()
+    #
+    # A host-blocking stream.synchronize() must never run while an ACL graph
+    # is being captured (torch.npu.graph(...) in
+    # vllm_ascend/compilation/acl_graph.py) -- graphs can only record
+    # device-side work, so this would be illegal/hang capture, and it would
+    # not even help correctness at replay time (a captured graph replays the
+    # recorded device ops directly; this Python function does not re-run, so
+    # nothing here executes on replay regardless). Skip it during capture;
+    # capture uses dummy warmup inputs anyway, so the actual data written
+    # doesn't matter there. This does NOT fix correctness under
+    # cudagraph_mode=FULL_DECODE_ONLY replay -- that needs a graph-capturable
+    # (event-based) fix instead of a host sync. Use --enforce-eager with this
+    # interim fix until that is done.
+    forward_context = get_forward_context()
+    if not getattr(forward_context, "capturing", False):
+        torch.npu.current_stream().synchronize()
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
