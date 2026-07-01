@@ -126,6 +126,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 0 (default): no extra logging. 1: enable. Not intended to be left on in production;
     # remove once the root cause of the remaining garbled-output issue is found.
     "VLLM_ASCEND_DSV4_BF16_DEBUG": lambda: bool(int(os.getenv("VLLM_ASCEND_DSV4_BF16_DEBUG", "0"))),
+    # Non-masking variant of VLLM_ASCEND_DSV4_BF16_DEBUG for the same investigation.
+    # VLLM_ASCEND_DSV4_BF16_DEBUG calls .item() immediately at each checkpoint, and
+    # that per-layer device sync has itself been observed to make the garbled/
+    # prematurely-truncated output disappear -- so it can only ever report
+    # "everything looks fine", never show where the real corruption happens. This
+    # flag instead keeps every checkpoint's NaN/Inf/abs-max check on-device and only
+    # reads results back (one combined .item() per accumulated step) once a full
+    # step's worth of layers has been recorded, so it should not perturb the race's
+    # timing. Logs under the "[DSV4_BF16_DEBUG_DEFERRED]" tag.
+    # 0 (default): no extra logging. 1: enable. Temporary diagnostic; do not
+    # combine with VLLM_ASCEND_DSV4_BF16_DEBUG=1 (that flag's own .item() calls
+    # would still mask the race for this flag's checkpoints too).
+    "VLLM_ASCEND_DSV4_BF16_DEBUG_DEFERRED": lambda: bool(int(os.getenv("VLLM_ASCEND_DSV4_BF16_DEBUG_DEFERRED", "0"))),
 }
 
 # end-env-vars-definition

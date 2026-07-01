@@ -1,4 +1,6 @@
+import atexit
 import math
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
@@ -89,6 +91,74 @@ def _dsv4_bf16_debug_log_output_stats(
         has_inf,
         stats,
     )
+
+
+_DSV4_BF16_DEBUG_DEFERRED_ACCUM: dict[str, tuple[str, int, torch.Tensor, torch.Tensor]] = {}
+_DSV4_BF16_DEBUG_DEFERRED_SEEN: set[str] = set()
+
+
+def _dsv4_bf16_debug_layer_sort_key(key: str) -> tuple[int, str]:
+    match = re.search(r"\.layers\.(\d+)\.", key)
+    return (int(match.group(1)), key) if match else (10**9, key)
+
+
+def _dsv4_bf16_debug_accumulate_output_stats(
+    stage: str,
+    layer_name: str,
+    compress_ratio: int,
+    output: torch.Tensor,
+) -> None:
+    """Non-masking variant of _dsv4_bf16_debug_log_output_stats, enabled by
+    VLLM_ASCEND_DSV4_BF16_DEBUG_DEFERRED=1 instead of
+    VLLM_ASCEND_DSV4_BF16_DEBUG=1.
+
+    _dsv4_bf16_debug_log_output_stats calls .item() immediately at every
+    checkpoint, forcing a device sync mid-layer -- and per-layer syncs like
+    that are exactly what has been observed to make the underlying garbled/
+    prematurely-truncated output disappear. So the masking (non-deferred)
+    debug flag can only ever report "everything looks fine": it cannot show
+    where the real corruption happens, because turning it on changes (fixes)
+    the very race it is meant to observe.
+
+    This variant keeps every checkpoint's result on-device (no .item() calls
+    at accumulation time) and only reads results back once a full step's
+    worth of layers has been recorded (detected via a repeated (stage,layer)
+    key, meaning a new step/token has started, so the previous step's work is
+    necessarily already complete by ordinary execution order) -- it should
+    therefore not perturb the race's timing the way the immediate-.item()
+    variant does, and should surface the actual first bad layer/stage.
+    """
+    key = f"{stage}:{layer_name}"
+    if key in _DSV4_BF16_DEBUG_DEFERRED_SEEN:
+        _dsv4_bf16_debug_flush_deferred()
+    _DSV4_BF16_DEBUG_DEFERRED_SEEN.add(key)
+    out = output.detach()
+    bad = torch.logical_or(torch.isnan(out).any(), torch.isinf(out).any())
+    abs_max = out.float().abs().amax()
+    _DSV4_BF16_DEBUG_DEFERRED_ACCUM[key] = (stage, compress_ratio, bad, abs_max)
+
+
+def _dsv4_bf16_debug_flush_deferred() -> None:
+    for key in sorted(_DSV4_BF16_DEBUG_DEFERRED_ACCUM, key=_dsv4_bf16_debug_layer_sort_key):
+        stage, compress_ratio, bad, abs_max = _DSV4_BF16_DEBUG_DEFERRED_ACCUM[key]
+        # The only .item() calls in this whole deferred path happen here, once
+        # per accumulated step, after that step's work is already done.
+        logger.info(
+            "[DSV4_BF16_DEBUG_DEFERRED] %s compress_ratio=%s bad=%s abs_max=%.4g",
+            key,
+            compress_ratio,
+            bool(bad.item()),
+            abs_max.item(),
+        )
+    _DSV4_BF16_DEBUG_DEFERRED_ACCUM.clear()
+    _DSV4_BF16_DEBUG_DEFERRED_SEEN.clear()
+
+
+# The last step's accumulated diagnostics only flush once a *new* step starts
+# and repeats a (stage, layer) key; if the process is stopped right after the
+# request that showed bad output, that last step would otherwise never be
+# printed. Flush whatever is pending on interpreter exit too.
+atexit.register(_dsv4_bf16_debug_flush_deferred)
 
 
 # mypy: disable-error-code="has-type"
@@ -1648,6 +1718,10 @@ class AscendDSAImpl(DSAAttentionImpl):
             )  # type: ignore[arg-type]
             if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG:
                 _dsv4_bf16_debug_log_output_stats("raw_attn_prefill", layer_name, self.compress_ratio, output_prefill)
+            if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG_DEFERRED:
+                _dsv4_bf16_debug_accumulate_output_stats(
+                    "raw_attn_prefill", layer_name, self.compress_ratio, output_prefill
+                )
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
             cos = attn_metadata[0].prefill.cos[layer_name]
             sin = attn_metadata[0].prefill.sin[layer_name]
@@ -1657,6 +1731,10 @@ class AscendDSAImpl(DSAAttentionImpl):
             output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
             if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG:
                 _dsv4_bf16_debug_log_output_stats("raw_attn_decode", layer_name, self.compress_ratio, output_decode)
+            if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG_DEFERRED:
+                _dsv4_bf16_debug_accumulate_output_stats(
+                    "raw_attn_decode", layer_name, self.compress_ratio, output_decode
+                )
             o_proj_input[:decode_tokens] = output_decode
             cos = attn_metadata[0].decode.cos[layer_name]
             sin = attn_metadata[0].decode.sin[layer_name]
@@ -1702,6 +1780,8 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG:
             _dsv4_bf16_debug_log_output_stats("final_o_proj", layer_name, self.compress_ratio, output)
+        if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG_DEFERRED:
+            _dsv4_bf16_debug_accumulate_output_stats("final_o_proj", layer_name, self.compress_ratio, output)
 
         return output_padded
 
