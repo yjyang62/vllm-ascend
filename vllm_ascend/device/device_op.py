@@ -885,23 +885,6 @@ def _bf16_scatter_kv_cache(cache, x, slot_mapping):
     # A flat index_copy_ assumes contiguous [block, offset] layout and silently
     # writes to the wrong locations when page_size_padded > real page size.
     cache[block_indices, block_offsets] = x.reshape(update_shape)
-    # TEMPORARY correctness-first fix, pending a proper root cause: unlike
-    # every other cache-scatter path here (all single fused torch.ops._C_ascend
-    # custom aclnn kernels), this scatter is plain PyTorch advanced indexing on
-    # a persistent, externally-managed KV cache buffer. Empirically, forcing an
-    # NPU device sync after every decoder layer (VLLM_ASCEND_DSV4_BF16_DEBUG=1,
-    # which calls .item() per layer) reliably turns otherwise garbled /
-    # prematurely-truncated generation into normal output -- but disabling
-    # multistream_dsv4_dsa_overlap alone (which only reorders work between an
-    # auxiliary and the main NPU stream) was NOT sufficient to fix it, meaning
-    # whatever completion signal this write is missing is not scoped to that
-    # specific cross-stream boundary. Synchronize the current stream
-    # immediately after the write so any op that later reads this cache -- on
-    # any stream, in this call or the next -- is guaranteed to see it. This is
-    # a real performance cost (a full stream drain on every SWA/compressed KV
-    # write); it should be replaced with a properly scoped event/record_stream
-    # once the actual missing dependency is confirmed on real A5 hardware.
-    torch.npu.current_stream().synchronize()
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):

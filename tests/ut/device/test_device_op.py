@@ -246,26 +246,6 @@ def test_a5_bf16_kv_scatter_respects_padded_page_stride():
     assert storage[22] == 7.0
 
 
-def test_a5_bf16_kv_scatter_synchronizes_after_write():
-    """Temporary correctness-first fix: unlike every other cache-scatter path
-    (single fused NPU custom ops), this scatter is plain PyTorch advanced
-    indexing on a persistent KV cache buffer. Forcing a device sync
-    immediately after the write empirically fixed otherwise garbled /
-    prematurely-truncated BF16 generation (disabling
-    multistream_dsv4_dsa_overlap alone was not sufficient), so every call
-    must synchronize the current stream right after scattering."""
-    cache = torch.zeros(1, 2, 1, 2)
-    x = torch.ones(1, 1, 2)
-    slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
-
-    mock_stream = mock.MagicMock()
-    with mock.patch("vllm_ascend.device.device_op.torch.npu.current_stream", return_value=mock_stream):
-        _bf16_scatter_kv_cache(cache, x, slot_mapping)
-
-    mock_stream.synchronize.assert_called_once()
-    torch.testing.assert_close(cache[0, 1], x[0])
-
-
 def test_a5_bf16_kv_scatter_skips_pad_slot_id():
     """Regression: PAD_SLOT_ID (-1) rows must be a no-op, not wrap-around
     corruption of the last real block/offset.
