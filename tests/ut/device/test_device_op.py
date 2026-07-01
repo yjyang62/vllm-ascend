@@ -198,23 +198,12 @@ def test_a5_sparse_attn_kwargs_and_layout_by_kv_dtype(use_bf16):
         assert swa_only_cmp_ratio == 1
 
 
-def _not_capturing_forward_context():
-    """_bf16_scatter_kv_cache checks get_forward_context().capturing to skip
-    its post-write sync during ACL graph capture. Outside of a real forward
-    pass there is no forward context set at all, so tests that aren't
-    specifically about the capturing behavior mock a not-capturing one."""
-    ctx = mock.MagicMock()
-    ctx.capturing = False
-    return mock.patch("vllm_ascend.device.device_op.get_forward_context", return_value=ctx)
-
-
 def test_a5_bf16_kv_scatter_updates_cache_by_block_offset():
     cache = torch.zeros(3, 4, 1, 2)
     x = torch.tensor([[[1.0, 2.0]], [[3.0, 4.0]], [[5.0, 6.0]]])
     slot_mapping = torch.tensor([[0, 1], [2, 3], [1, 0]], dtype=torch.int32)
 
-    with _not_capturing_forward_context():
-        _bf16_scatter_kv_cache(cache, x, slot_mapping)
+    _bf16_scatter_kv_cache(cache, x, slot_mapping)
 
     torch.testing.assert_close(cache[0, 1], x[0])
     torch.testing.assert_close(cache[2, 3], x[1])
@@ -248,8 +237,7 @@ def test_a5_bf16_kv_scatter_respects_padded_page_stride():
     x = torch.tensor([[[9.0, 8.0]], [[7.0, 6.0]]])
     slot_mapping = torch.tensor([[0, 3], [1, 1]], dtype=torch.int32)
 
-    with _not_capturing_forward_context():
-        _bf16_scatter_kv_cache(cache, x, slot_mapping)
+    _bf16_scatter_kv_cache(cache, x, slot_mapping)
 
     torch.testing.assert_close(cache[0, 3, 0], x[0, 0])
     torch.testing.assert_close(cache[1, 1, 0], x[1, 0])
@@ -271,35 +259,10 @@ def test_a5_bf16_kv_scatter_synchronizes_after_write():
     slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
 
     mock_stream = mock.MagicMock()
-    with (
-        mock.patch("vllm_ascend.device.device_op.torch.npu.current_stream", return_value=mock_stream),
-        _not_capturing_forward_context(),
-    ):
+    with mock.patch("vllm_ascend.device.device_op.torch.npu.current_stream", return_value=mock_stream):
         _bf16_scatter_kv_cache(cache, x, slot_mapping)
 
     mock_stream.synchronize.assert_called_once()
-    torch.testing.assert_close(cache[0, 1], x[0])
-
-
-def test_a5_bf16_kv_scatter_skips_sync_during_aclgraph_capture():
-    """A host-blocking stream.synchronize() is illegal/hangs while an ACL
-    graph is being captured (torch.npu.graph(...) sets
-    forward_context.capturing = True for the duration). Must not be called
-    in that window; capture uses dummy warmup inputs anyway."""
-    cache = torch.zeros(1, 2, 1, 2)
-    x = torch.ones(1, 1, 2)
-    slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
-
-    mock_stream = mock.MagicMock()
-    capturing_ctx = mock.MagicMock()
-    capturing_ctx.capturing = True
-    with (
-        mock.patch("vllm_ascend.device.device_op.torch.npu.current_stream", return_value=mock_stream),
-        mock.patch("vllm_ascend.device.device_op.get_forward_context", return_value=capturing_ctx),
-    ):
-        _bf16_scatter_kv_cache(cache, x, slot_mapping)
-
-    mock_stream.synchronize.assert_not_called()
     torch.testing.assert_close(cache[0, 1], x[0])
 
 
@@ -325,8 +288,7 @@ def test_a5_bf16_kv_scatter_skips_pad_slot_id():
     slot_mapping = torch.tensor([[0, 1], [-1, -1], [-1, -1]], dtype=torch.int32)
     x = torch.tensor([[[1.0, 2.0]], [[-7.0, -7.0]], [[-8.0, -8.0]]])
 
-    with _not_capturing_forward_context():
-        _bf16_scatter_kv_cache(cache, x, slot_mapping)
+    _bf16_scatter_kv_cache(cache, x, slot_mapping)
 
     # The real write landed where expected.
     torch.testing.assert_close(cache[0, 1], x[0])
