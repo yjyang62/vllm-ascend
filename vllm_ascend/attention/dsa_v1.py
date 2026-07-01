@@ -1490,6 +1490,36 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+        if self.multistream_dsv4_dsa_overlap and dsv4_use_kv_bf16():
+            # _mla_prolog_multistream overlaps the SWA KV write (and, for
+            # compress_ratio==4, the indexer topk selection) on an auxiliary
+            # NPU stream while q-side work continues on the main stream, then
+            # synchronizes with main_stream.wait_stream(aux_stream) before the
+            # attention op reads that same KV cache on the main stream. This
+            # was designed and validated against the FP8 DSA path, whose KV
+            # write is a single fused NPU custom op
+            # (kv_compress_epilog/npu_scatter_nd_update_v2). The BF16 path's
+            # write (_bf16_scatter_kv_cache, used via dsa_kv_compress_scatter)
+            # is instead plain PyTorch advanced indexing
+            # (cache[block_indices, block_offsets] = x) executed inside that
+            # same aux-stream block, and running with VLLM_ASCEND_DSV4_BF16_DEBUG=1
+            # (which forces a device sync via .item() after every layer) reliably
+            # "fixes" otherwise garbled/truncated BF16 output -- a strong signal
+            # that this overlap's cross-stream synchronization does not fully
+            # cover that write on this path yet. Disable the overlap
+            # automatically for BF16 KV until the synchronization is verified
+            # correct on real A5 hardware; this only costs some overlap
+            # performance, not correctness.
+            logger.warning(
+                "Disabling multistream_dsv4_dsa_overlap for DeepSeek-V4 BF16 KV "
+                "(VLLM_ASCEND_DSV4_KV_BF16=1) on Ascend A5: this optimization's "
+                "aux-stream/main-stream synchronization has not been verified for "
+                "the BF16 KV scatter path and has been observed to produce "
+                "garbled/truncated output when enabled. Pass "
+                "--additional-config '{\"multistream_dsv4_dsa_overlap\": false}' "
+                "explicitly to silence this warning."
+            )
+            self.multistream_dsv4_dsa_overlap = False
         self.vllm_config = get_current_vllm_config()
 
         # indexer param
