@@ -246,6 +246,40 @@ def test_a5_bf16_kv_scatter_respects_padded_page_stride():
     assert storage[22] == 7.0
 
 
+def test_a5_bf16_kv_scatter_skips_pad_slot_id():
+    """Regression: PAD_SLOT_ID (-1) rows must be a no-op, not wrap-around
+    corruption of the last real block/offset.
+
+    ``DeviceOperator.pad_dsa_decode_slot_mapping`` (A5) pads unused decode
+    slots with -1 in *both* the block-index and offset columns (see
+    device_op.py). Naively casting those to int64 and using them as advanced
+    indices makes ``cache[-1, -1]`` wrap around to the tensor's last block and
+    last offset -- a real, potentially in-use cache slot -- instead of being
+    skipped like every other PAD_SLOT_ID-aware scatter path in this codebase.
+    """
+    num_blocks, block_size, num_kv_heads, head_dim = 3, 4, 1, 2
+    cache = torch.zeros(num_blocks, block_size, num_kv_heads, head_dim)
+
+    # A real request currently occupies the last block's last offset.
+    sentinel = torch.full((num_kv_heads, head_dim), 999.0)
+    cache[num_blocks - 1, block_size - 1] = sentinel
+
+    # One real decode token (block 0, offset 1) plus two padded slots (-1, -1).
+    slot_mapping = torch.tensor([[0, 1], [-1, -1], [-1, -1]], dtype=torch.int32)
+    x = torch.tensor([[[1.0, 2.0]], [[-7.0, -7.0]], [[-8.0, -8.0]]])
+
+    _bf16_scatter_kv_cache(cache, x, slot_mapping)
+
+    # The real write landed where expected.
+    torch.testing.assert_close(cache[0, 1], x[0])
+    # The padded writes must NOT have clobbered the last block's last offset.
+    torch.testing.assert_close(cache[num_blocks - 1, block_size - 1], sentinel)
+    # Padded writes get redirected to the reserved null block (0, 0), which no
+    # real request ever occupies, and must not corrupt it with garbage either
+    # beyond what a real row targeting the same slot would have written.
+    assert cache[0, 0].abs().max() <= 8.0
+
+
 def test_a5_bf16_slot_mapping_uses_2d_format():
     slot_mapping = torch.tensor([5, 18, 33], dtype=torch.int32)
     with mock.patch("vllm_ascend.device.device_op.dsv4_use_kv_bf16", return_value=True):

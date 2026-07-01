@@ -864,6 +864,21 @@ def _bf16_scatter_kv_cache(cache, x, slot_mapping):
         raise ValueError(f"BF16 DSA slot_mapping must have shape [num_tokens, 2], got {tuple(slot_mapping.shape)}.")
     block_indices = slot_mapping[:, 0].to(torch.int64)
     block_offsets = slot_mapping[:, 1].to(torch.int64)
+    # DeviceOperator.pad_dsa_decode_slot_mapping (and the generic graph-mode
+    # padding in model_runner_v1) pad unused decode/graph-capture slots with
+    # PAD_SLOT_ID (-1), matching the "skip this token" convention every other
+    # cache-scatter kernel here honors (see PAD_SLOT_ID checks in gdn.py /
+    # causal_conv1d.py / npu_scatter_nd_update_v2, and the FP8 kv_compress_epilog
+    # op this fallback replaces for BF16). Advanced indexing has no such
+    # built-in skip: a raw `cache[-1, -1]` wraps around via Python/PyTorch
+    # negative-indexing semantics and silently overwrites the *last* block's
+    # *last* slot -- a real, potentially in-use cache entry -- on every
+    # decode/graph step that includes padding. Clamp negative (padded) indices
+    # to block 0 / offset 0 instead: vLLM's BlockPool always reserves block 0
+    # as the never-allocated null block, so redirecting padded writes there is
+    # a genuine no-op for every real request.
+    block_indices = block_indices.clamp(min=0)
+    block_offsets = block_offsets.clamp(min=0)
     update_shape = (slot_mapping.shape[0],) + tuple(cache.shape[2:])
     # Use block/offset indexing so padded PageAttention caches (non-contiguous
     # stride on dim 0 from _adjust_kv_layout) scatter into the correct slots.
