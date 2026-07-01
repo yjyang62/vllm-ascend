@@ -1368,15 +1368,6 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             if "sink" in name:
                 if is_pp_missing_parameter(name, self):
                     continue
-                if name not in params_dict:
-                    # Layer-count-truncated dev/debug runs (e.g. "减层" testing
-                    # via a reduced hf_config.num_hidden_layers) keep the full
-                    # checkpoint but only instantiate the first N decoder
-                    # layers, so this rank never has a PPMissingLayer
-                    # placeholder for the extra layers (is_pp_missing_parameter
-                    # only covers actual pipeline-parallel sharding). Skip
-                    # weights with no matching parameter instead of crashing.
-                    continue
                 param = params_dict[name]
                 if enable_dsa_cp():
                     param.data.copy_(loaded_weight)
@@ -1417,11 +1408,6 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                     continue
 
                 if is_pp_missing_parameter(name, self):
-                    continue
-                # See the matching comment in the "sink" branch above: this
-                # covers layer-count-truncated dev/debug runs, not just
-                # pipeline-parallel sharding.
-                if name not in params_dict:
                     continue
 
                 param = params_dict[name]
@@ -1486,15 +1472,6 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
                         if is_pp_missing_parameter(name_mapped, self):
                             continue
-                        # See the matching comment in the "sink" branch above:
-                        # this covers layer-count-truncated dev/debug runs,
-                        # not just pipeline-parallel sharding. Falling through
-                        # to the next mapping candidate (rather than a bare
-                        # `continue` of the outer weight loop) preserves the
-                        # existing "not mapped locally on this rank" skip via
-                        # the `for...else` + `is_expert_weight` check below.
-                        if name_mapped not in params_dict:
-                            continue
 
                         param = params_dict[name_mapped]
                         # We should ask the weight loader to return success or
@@ -1532,11 +1509,6 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                             continue
 
                         if is_pp_missing_parameter(name, self):
-                            continue
-                        # See the matching comment in the "sink" branch above:
-                        # this covers layer-count-truncated dev/debug runs,
-                        # not just pipeline-parallel sharding.
-                        if name not in params_dict:
                             continue
 
                         param = params_dict[name]
