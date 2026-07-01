@@ -43,6 +43,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.logger import logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -722,6 +723,40 @@ class DeepseekV4Attention(nn.Module):
         self.dim = config.hidden_size
         self.n_heads = config.num_attention_heads
         self.n_local_heads = config.num_attention_heads // tp_size
+        if get_ascend_device_type() == AscendDeviceType.A5 and dsv4_use_kv_bf16() and self.n_local_heads != 64:
+            # npu_sparse_flash_mla (the BF16 KV path this env var selects) hard-requires the
+            # local (per-TP-rank) query head count to be exactly 64 -- see the "N1仅支持64"
+            # constraint in csrc/attention/sparse_flash_mla/README.md. Unlike the FP8
+            # kv_quant_sparse_attn_sharedkv op (which accepts N1 in {64, 128}, per
+            # csrc/attention/kv_quant_sparse_attn_sharedkv/README.md), this op's host-side
+            # tiling check does not validate N1 itself, so an unsupported value is not caught
+            # here -- it either silently corrupts attention output or crashes the AICore
+            # kernel deep inside the op, which is very hard to root-cause from the resulting
+            # error. Fail fast with a clear, actionable message instead.
+            suggested_tp_size = config.num_attention_heads // 64
+            suggestion = (
+                f"Set --tensor-parallel-size to {suggested_tp_size} instead."
+                if suggested_tp_size >= 1
+                else (
+                    "num_attention_heads is below 64, so no --tensor-parallel-size value "
+                    "satisfies this constraint; VLLM_ASCEND_DSV4_KV_BF16 cannot be used with "
+                    "this checkpoint."
+                )
+            )
+            message = (
+                f"DeepSeek-V4 BF16 KV (VLLM_ASCEND_DSV4_KV_BF16=1) on Ascend A5 requires "
+                f"num_attention_heads // tensor_parallel_size == 64 (npu_sparse_flash_mla's "
+                f"N1 constraint), but got {config.num_attention_heads} // {tp_size} = "
+                f"{self.n_local_heads}. {suggestion}"
+            )
+            # Also log explicitly (not just raise): with tp_size=2 this constraint
+            # violation does NOT fail cleanly -- it silently corrupts attention
+            # output (garbled text) instead of erroring, and with larger mismatches
+            # (e.g. tp_size=8) it can crash the AICore kernel with a low-level
+            # "device error type 3" / "aicore execution is abnormal" fault that is
+            # very hard to trace back to this root cause. Surface it loudly here.
+            logger.error(message)
+            raise ValueError(message)
         self.q_lora_rank = config.q_lora_rank
         self.o_lora_rank = config.o_lora_rank
         self.head_dim = config.head_dim
