@@ -84,17 +84,20 @@ The following is a simple example of how to use sleep mode.
 
 - Offline inference:
 
+    :::{note}
+    Set `VLLM_USE_MODELSCOPE` before importing `vllm`, otherwise vLLM falls back to Hugging Face Hub and may fail to download the model. Install ModelScope with `pip install modelscope`, or pre-download the model and pass the local path to `LLM()`.
+    :::
+
     ```python
     import os
-
-    import torch
-    from vllm import LLM, SamplingParams
-    from vllm.utils.mem_constants import GiB_bytes
-
 
     os.environ["VLLM_USE_MODELSCOPE"] = "True"
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
+
+    import torch
+    from vllm import LLM, SamplingParams
+    from vllm.utils.mem_constants import GiB_bytes
 
     if __name__ == "__main__":
         prompt = "How are you?"
