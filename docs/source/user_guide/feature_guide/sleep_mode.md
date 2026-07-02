@@ -85,7 +85,9 @@ The following is a simple example of how to use sleep mode.
 - Offline inference:
 
     :::{note}
-    Set `VLLM_USE_MODELSCOPE` before importing `vllm`, otherwise vLLM falls back to Hugging Face Hub and may fail to download the model. Install ModelScope with `pip install modelscope`, or pre-download the model and pass the local path to `LLM()`.
+    Set `VLLM_USE_MODELSCOPE` before importing `vllm`, otherwise vLLM falls back to Hugging Face Hub and may fail to download the model. Install ModelScope with `pip install modelscope`.
+
+    If your environment uses a corporate proxy with TLS inspection and ModelScope download fails with `SSL: CERTIFICATE_VERIFY_FAILED`, either configure your corporate CA with `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`, or pre-download the model and pass the local directory to `LLM()` / `MODEL_PATH`.
     :::
 
     ```python
@@ -106,7 +108,9 @@ The following is a simple example of how to use sleep mode.
         print(f"Free memory before sleep: {free / 1024 ** 3:.2f} GiB")
         # record npu memory use baseline in case other process is running
         used_bytes_baseline = total - free
-        llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
+        # Use a local model directory when online download is blocked.
+        model = os.environ.get("MODEL_PATH", "Qwen/Qwen2.5-0.5B-Instruct")
+        llm = LLM(model, enable_sleep_mode=True)
         sampling_params = SamplingParams(temperature=0, max_tokens=10)
         output = llm.generate(prompt, sampling_params)
 

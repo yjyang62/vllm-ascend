@@ -26,6 +26,10 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 
+# Use a local model directory when online download is blocked (for example,
+# corporate SSL inspection). The directory must contain config.json.
+MODEL = os.environ.get("MODEL_PATH", "Qwen/Qwen2.5-0.5B-Instruct")
+
 
 def main():
     prompt = "How are you?"
@@ -34,7 +38,7 @@ def main():
     print(f"Free memory before sleep: {free / 1024**3:.2f} GiB")
     # record npu memory use baseline in case other process is running
     used_bytes_baseline = total - free
-    llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
+    llm = LLM(MODEL, enable_sleep_mode=True)
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
 
