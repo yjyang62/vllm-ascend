@@ -67,23 +67,39 @@ llm.wake_up(tags=["kv_cache"])
 
 With extra cleanup enabled, ACL graphs are recaptured only when `tags` is `None` or contains `"kv_cache"`. This avoids recapturing graphs before externally reloaded weights and KV-cache state are ready.
 
+## Weight post-processing after wakeup
+
+When `wake_up(tags=["weights"])` is used with externally reloaded or updated weights, logs mentioning `process_weights_after_loading` are expected. After weights are loaded, vLLM Ascend runs this hook to transform the restored tensors into the layout required by NPU kernels.
+
+The MoE and non-MoE paths differ in what this hook prepares:
+
+- MoE layers post-process expert weights after loading. For example, the `w13` and `w2` expert weights may be transposed, cast to the required NPU format, and have their scale tensors reshaped so they match the input format expected by `torch_npu.npu_grouped_matmul`.
+- Non-MoE layers run the corresponding linear-layer quantization post-processing. This usually converts the loaded weight and scale tensors into the layout required by the layer's matmul kernel, but it does not prepare per-expert grouped-matmul inputs.
+
+This post-processing is part of the normal wakeup path and may increase wakeup latency, especially for MoE models with many experts.
+
 ## Usage
 
 The following is a simple example of how to use sleep mode.
 
 - Offline inference:
 
+    :::{note}
+    Set `VLLM_USE_MODELSCOPE` before importing `vllm`, otherwise vLLM falls back to Hugging Face Hub and may fail to download the model. Install ModelScope with `pip install modelscope`.
+
+    If your environment uses a corporate proxy with TLS inspection and ModelScope download fails with `SSL: CERTIFICATE_VERIFY_FAILED`, configure your corporate CA with `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`.
+    :::
+
     ```python
     import os
-
-    import torch
-    from vllm import LLM, SamplingParams
-    from vllm.utils.mem_constants import GiB_bytes
-
 
     os.environ["VLLM_USE_MODELSCOPE"] = "True"
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
+
+    import torch
+    from vllm import LLM, SamplingParams
+    from vllm.utils.mem_constants import GiB_bytes
 
     if __name__ == "__main__":
         prompt = "How are you?"
@@ -92,8 +108,8 @@ The following is a simple example of how to use sleep mode.
         print(f"Free memory before sleep: {free / 1024 ** 3:.2f} GiB")
         # record npu memory use baseline in case other process is running
         used_bytes_baseline = total - free
-        llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
-        sampling_params = SamplingParams(temperature=0, max_completion_tokens=10)
+        llm = LLM("Qwen/Qwen3-0.6B", enable_sleep_mode=True)
+        sampling_params = SamplingParams(temperature=0, max_tokens=10)
         output = llm.generate(prompt, sampling_params)
 
         llm.sleep(level=1)
@@ -102,13 +118,18 @@ The following is a simple example of how to use sleep mode.
         print(f"Free memory after sleep: {free_npu_bytes_after_sleep / 1024 ** 3:.2f} GiB")
         used_bytes = total - free_npu_bytes_after_sleep - used_bytes_baseline
         # now the memory usage should be less than the model weights
-        # (0.5B model, 1GiB weights)
+        # (0.6B model, ~1GiB weights)
         assert used_bytes < 1 * GiB_bytes
 
         llm.wake_up()
         output2 = llm.generate(prompt, sampling_params)
         # cmp output
         assert output[0].outputs[0].text == output2[0].outputs[0].text
+        print(
+            f"Outputs match: {output[0].outputs[0].text!r}",
+            flush=True,
+        )
+        print("Sleep mode test passed!", flush=True)
     ```
 
 - Online serving:

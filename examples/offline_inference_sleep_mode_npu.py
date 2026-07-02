@@ -18,12 +18,13 @@
 
 import os
 
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
+
 import torch
 from vllm import LLM, SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
-
-os.environ["VLLM_USE_MODELSCOPE"] = "True"
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def main():
@@ -33,7 +34,7 @@ def main():
     print(f"Free memory before sleep: {free / 1024**3:.2f} GiB")
     # record npu memory use baseline in case other process is running
     used_bytes_baseline = total - free
-    llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
+    llm = LLM("Qwen/Qwen3-0.6B", enable_sleep_mode=True)
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
 
@@ -43,13 +44,18 @@ def main():
     print(f"Free memory after sleep: {free_npu_bytes_after_sleep / 1024**3:.2f} GiB")
     used_bytes = total - free_npu_bytes_after_sleep - used_bytes_baseline
     # now the memory usage should be less than the model weights
-    # (0.5B model, 1GiB weights)
+    # (0.6B model, ~1GiB weights)
     assert used_bytes < 1 * GiB_bytes
 
     llm.wake_up()
     output2 = llm.generate(prompt, sampling_params)
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+    print(
+        f"Outputs match: {output[0].outputs[0].text!r}",
+        flush=True,
+    )
+    print("Sleep mode test passed!", flush=True)
 
 
 if __name__ == "__main__":
