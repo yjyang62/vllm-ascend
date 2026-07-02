@@ -37,6 +37,7 @@ DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 A5_DSA_SPARSE_FLASH_MLA_OP = "sparse_flash_mla"
 A5_DSA_SPARSE_FLASH_MLA_METADATA_OP = "sparse_flash_mla_metadata"
+_SPARSE_FLASH_MLA_NAMESPACES = ("cann_ops_transformer", "_C_ascend")
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -44,14 +45,133 @@ else:
     triton_q_rms = None  # type: ignore
 
 
-def _get_ascend_custom_op(op_name: str):
-    try:
-        return getattr(torch.ops._C_ascend, op_name)
-    except AttributeError as exc:
-        raise RuntimeError(
-            f"Required Ascend custom op '{op_name}' is not registered. "
-            "Install it with --ops=sparse_flash_mla,sparse_flash_mla_metadata."
-        ) from exc
+def _get_sparse_flash_mla_custom_op(op_name: str):
+    for namespace in _SPARSE_FLASH_MLA_NAMESPACES:
+        try:
+            return getattr(getattr(torch.ops, namespace), op_name)
+        except AttributeError:
+            continue
+    raise RuntimeError(
+        f"Required Ascend custom op '{op_name}' is not registered. "
+        "Install it with --ops=sparse_flash_mla,sparse_flash_mla_metadata."
+    )
+
+
+def _is_non_quant_dsv4(vllm_config=None) -> bool:
+    return (
+        get_ascend_device_type() == AscendDeviceType.A5
+        and vllm_config is not None
+        and getattr(vllm_config, "quant_config", None) is None
+    )
+
+
+def _layout_kv_for_sparse_flash_mla(layout_kv: str | None) -> str | None:
+    return "PA_BBND" if layout_kv == "PA_ND" else layout_kv
+
+
+def _to_optional_int(value):
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if hasattr(value, "item"):
+        return int(value.item())
+    return int(value)
+
+
+def _get_cmp_lengths(seqused_ori_kv, cmp_ratio: int):
+    if seqused_ori_kv is None or cmp_ratio <= 1:
+        return None, None
+    seqused_cmp_kv = torch.div(seqused_ori_kv, cmp_ratio, rounding_mode="floor").to(torch.int32)
+    cmp_residual_kv = (seqused_ori_kv - seqused_cmp_kv * cmp_ratio).to(torch.int32)
+    return seqused_cmp_kv, cmp_residual_kv
+
+
+def _max_cmp_len(seqused_cmp_kv, max_seqlen_ori_kv, cmp_ratio: int):
+    if cmp_ratio <= 1:
+        return 0
+    if seqused_cmp_kv is not None:
+        return _to_optional_int(seqused_cmp_kv.max())
+    max_seqlen_ori_kv = _to_optional_int(max_seqlen_ori_kv)
+    return None if max_seqlen_ori_kv is None else max_seqlen_ori_kv // cmp_ratio
+
+
+def _sparse_flash_mla_metadata_from_dsa(**kwargs):
+    op = _get_sparse_flash_mla_custom_op(A5_DSA_SPARSE_FLASH_MLA_METADATA_OP)
+    cmp_ratio = kwargs.get("cmp_ratio", 1)
+    seqused_ori_kv = kwargs.get("seqused_ori_kv", kwargs.pop("seqused_kv", None))
+    seqused_cmp_kv = kwargs.get("seqused_cmp_kv")
+    cmp_residual_kv = kwargs.get("cmp_residual_kv")
+    if cmp_ratio > 1 and (seqused_cmp_kv is None or cmp_residual_kv is None):
+        seqused_cmp_kv, cmp_residual_kv = _get_cmp_lengths(seqused_ori_kv, cmp_ratio)
+
+    max_seqlen_ori_kv = kwargs.get("max_seqlen_ori_kv", kwargs.pop("max_seqlen_kv", None))
+    return op(
+        num_heads_q=kwargs["num_heads_q"],
+        num_heads_kv=kwargs["num_heads_kv"],
+        head_dim=kwargs["head_dim"],
+        cu_seqlens_q=kwargs.get("cu_seqlens_q"),
+        cu_seqlens_ori_kv=kwargs.get("cu_seqlens_ori_kv"),
+        cu_seqlens_cmp_kv=kwargs.get("cu_seqlens_cmp_kv"),
+        seqused_q=kwargs.get("seqused_q"),
+        seqused_ori_kv=seqused_ori_kv,
+        seqused_cmp_kv=seqused_cmp_kv,
+        cmp_residual_kv=cmp_residual_kv,
+        batch_size=kwargs.get("batch_size"),
+        max_seqlen_q=_to_optional_int(kwargs.get("max_seqlen_q")),
+        max_seqlen_ori_kv=_to_optional_int(max_seqlen_ori_kv),
+        max_seqlen_cmp_kv=_max_cmp_len(seqused_cmp_kv, max_seqlen_ori_kv, cmp_ratio),
+        ori_topk=kwargs.get("ori_topk", 0),
+        cmp_topk=kwargs.get("cmp_topk", 0),
+        cmp_ratio=cmp_ratio,
+        ori_mask_mode=kwargs.get("ori_mask_mode"),
+        cmp_mask_mode=kwargs.get("cmp_mask_mode", 0),
+        ori_win_left=kwargs.get("ori_win_left"),
+        ori_win_right=kwargs.get("ori_win_right"),
+        layout_q=kwargs.get("layout_q"),
+        layout_kv=_layout_kv_for_sparse_flash_mla(kwargs.get("layout_kv")),
+        has_ori_kv=kwargs.get("has_ori_kv"),
+        has_cmp_kv=kwargs.get("has_cmp_kv"),
+    )
+
+
+def _sparse_flash_mla_from_dsa(q, **kwargs):
+    op = _get_sparse_flash_mla_custom_op(A5_DSA_SPARSE_FLASH_MLA_OP)
+    cmp_ratio = kwargs.get("cmp_ratio", 1)
+    seqused_ori_kv = kwargs.get("seqused_ori_kv", kwargs.pop("seqused_kv", None))
+    seqused_cmp_kv = kwargs.get("seqused_cmp_kv")
+    cmp_residual_kv = kwargs.get("cmp_residual_kv")
+    if cmp_ratio > 1 and (seqused_cmp_kv is None or cmp_residual_kv is None):
+        seqused_cmp_kv, cmp_residual_kv = _get_cmp_lengths(seqused_ori_kv, cmp_ratio)
+
+    return op(
+        q,
+        ori_kv=kwargs.get("ori_kv"),
+        cmp_kv=kwargs.get("cmp_kv"),
+        ori_sparse_indices=kwargs.get("ori_sparse_indices"),
+        cmp_sparse_indices=kwargs.get("cmp_sparse_indices"),
+        ori_block_table=kwargs.get("ori_block_table"),
+        cmp_block_table=kwargs.get("cmp_block_table"),
+        cu_seqlens_q=kwargs.get("cu_seqlens_q"),
+        cu_seqlens_ori_kv=kwargs.get("cu_seqlens_ori_kv"),
+        cu_seqlens_cmp_kv=kwargs.get("cu_seqlens_cmp_kv"),
+        seqused_q=kwargs.get("seqused_q"),
+        seqused_ori_kv=seqused_ori_kv,
+        seqused_cmp_kv=seqused_cmp_kv,
+        cmp_residual_kv=cmp_residual_kv,
+        sinks=kwargs.get("sinks"),
+        metadata=kwargs.get("metadata"),
+        softmax_scale=kwargs.get("softmax_scale", 1.0),
+        cmp_ratio=cmp_ratio,
+        ori_mask_mode=kwargs.get("ori_mask_mode", 4),
+        cmp_mask_mode=kwargs.get("cmp_mask_mode", 3),
+        ori_win_left=kwargs.get("ori_win_left", 127),
+        ori_win_right=kwargs.get("ori_win_right", 0),
+        layout_q=kwargs.get("layout_q", "BSND"),
+        layout_kv=_layout_kv_for_sparse_flash_mla(kwargs.get("layout_kv", "BSND")),
+        topk_value_mode=1,
+        return_softmax_lse=kwargs.get("return_softmax_lse", False),
+    )
 
 
 class BaseDeviceAdaptor:
@@ -521,7 +641,7 @@ class BaseDeviceAdaptor:
         return torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
 
     @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
+    def get_dsa_sparse_attn_metadata_kwargs(device, vllm_config=None):
         """Returns kwargs for sparse attention metadata builder."""
         return {"device": str(device)}
 
@@ -543,7 +663,7 @@ class BaseDeviceAdaptor:
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping):
+    def dsa_kv_compress_scatter(cache, x, slot_mapping, *, quantized: bool = True):
         """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
         torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
 
@@ -1166,19 +1286,27 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     # ===== Sparse Attention Metadata & Op Selectors =====
 
     @staticmethod
-    def get_dsa_sparse_attn_metadata_op():
-        return _get_ascend_custom_op(A5_DSA_SPARSE_FLASH_MLA_METADATA_OP)
+    def get_dsa_sparse_attn_metadata_op(vllm_config=None):
+        if _is_non_quant_dsv4(vllm_config):
+            return _sparse_flash_mla_metadata_from_dsa
+        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
 
     @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
+    def get_dsa_sparse_attn_metadata_kwargs(device, vllm_config=None):
+        if _is_non_quant_dsv4(vllm_config):
+            return {}
         return {"kv_quant_mode": 1}
 
     @staticmethod
-    def get_dsa_sparse_attn_op():
-        return _get_ascend_custom_op(A5_DSA_SPARSE_FLASH_MLA_OP)
+    def get_dsa_sparse_attn_op(vllm_config=None):
+        if _is_non_quant_dsv4(vllm_config):
+            return _sparse_flash_mla_from_dsa
+        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
 
     @staticmethod
-    def get_dsa_sparse_attn_base_kwargs():
+    def get_dsa_sparse_attn_base_kwargs(vllm_config=None):
+        if _is_non_quant_dsv4(vllm_config):
+            return {}
         return {"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64}
 
     @staticmethod
@@ -1189,10 +1317,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping):
+    def dsa_kv_compress_scatter(cache, x, slot_mapping, *, quantized: bool = True):
         """Scatter KV into cache with fused quantization+compression.
         A5: kv_compress_epilog handles quant/compress/scatter internally.
         Input x is unquantized bf16; cache shape is [..., head_dim]."""
+        if not quantized:
+            flat_cache = cache.view(-1, cache.shape[-2], cache.shape[-1])
+            flat_cache.index_copy_(
+                0,
+                slot_mapping.to(torch.int64),
+                x.view(-1, x.shape[-2], x.shape[-1]),
+            )
+            return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
             x=x.view(-1, x.shape[-1]),

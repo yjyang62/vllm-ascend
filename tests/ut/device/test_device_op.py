@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -7,6 +8,7 @@ from vllm_ascend.device.device_op import (
     A5_DSA_SPARSE_FLASH_MLA_METADATA_OP,
     A5_DSA_SPARSE_FLASH_MLA_OP,
     A5DeviceAdaptor,
+    AscendDeviceType,
     BaseDeviceAdaptor,
 )
 
@@ -134,23 +136,103 @@ def test_base_dsa_sparse_attention_keeps_sharedkv_ops():
 
 
 def test_a5_dsa_sparse_attention_uses_sparse_flash_mla_ops():
+    vllm_config = SimpleNamespace(quant_config=None)
+    q = torch.randn(2, 4, 512, dtype=torch.bfloat16)
+    kv = torch.randn(8, 128, 1, 512, dtype=torch.bfloat16)
+    seq_lens = torch.tensor([18, 16], dtype=torch.int32)
+    expected = torch.empty_like(q)
+
     with (
-        mock.patch.object(torch.ops._C_ascend, A5_DSA_SPARSE_FLASH_MLA_METADATA_OP, create=True) as metadata_op,
-        mock.patch.object(torch.ops._C_ascend, A5_DSA_SPARSE_FLASH_MLA_OP, create=True) as attn_op,
+        mock.patch("vllm_ascend.device.device_op.get_ascend_device_type", return_value=AscendDeviceType.A5),
+        mock.patch.object(
+            torch.ops.cann_ops_transformer, A5_DSA_SPARSE_FLASH_MLA_METADATA_OP, create=True
+        ) as metadata_op,
+        mock.patch.object(torch.ops.cann_ops_transformer, A5_DSA_SPARSE_FLASH_MLA_OP, create=True) as attn_op,
     ):
-        assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_op() is metadata_op
-        assert A5DeviceAdaptor.get_dsa_sparse_attn_op() is attn_op
-        assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
-        assert A5DeviceAdaptor.get_dsa_sparse_attn_base_kwargs() == {
+        metadata_op.return_value = torch.zeros(1024, dtype=torch.int32)
+        attn_op.return_value = (expected, torch.empty([], dtype=torch.float32))
+
+        metadata = A5DeviceAdaptor.get_dsa_sparse_attn_metadata_op(vllm_config)(
+            num_heads_q=4,
+            num_heads_kv=1,
+            head_dim=512,
+            seqused_kv=seq_lens,
+            max_seqlen_q=1,
+            max_seqlen_kv=18,
+            batch_size=2,
+            cmp_topk=512,
+            cmp_ratio=4,
+            ori_mask_mode=4,
+            cmp_mask_mode=3,
+            ori_win_left=127,
+            ori_win_right=0,
+            layout_q="TND",
+            layout_kv="PA_ND",
+            has_ori_kv=True,
+            has_cmp_kv=True,
+        )
+        output = A5DeviceAdaptor.get_dsa_sparse_attn_op(vllm_config)(
+            q,
+            ori_kv=kv,
+            cmp_kv=kv,
+            cmp_sparse_indices=torch.zeros(2, 1, 512, dtype=torch.int32),
+            ori_block_table=torch.zeros(2, 1, dtype=torch.int32),
+            cmp_block_table=torch.zeros(2, 1, dtype=torch.int32),
+            seqused_kv=seq_lens,
+            sinks=torch.zeros(4, dtype=torch.float32),
+            metadata=metadata,
+            softmax_scale=0.1,
+            cmp_ratio=4,
+            ori_mask_mode=4,
+            cmp_mask_mode=3,
+            ori_win_left=127,
+            ori_win_right=0,
+            layout_q="TND",
+            layout_kv="PA_ND",
+        )[0]
+
+    assert output is expected
+    assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_kwargs("npu:0", vllm_config) == {}
+    assert A5DeviceAdaptor.get_dsa_sparse_attn_base_kwargs(vllm_config) == {}
+    metadata_kwargs = metadata_op.call_args.kwargs
+    assert metadata_kwargs["layout_kv"] == "PA_BBND"
+    torch.testing.assert_close(metadata_kwargs["seqused_cmp_kv"], torch.tensor([4, 4], dtype=torch.int32))
+    torch.testing.assert_close(metadata_kwargs["cmp_residual_kv"], torch.tensor([2, 0], dtype=torch.int32))
+    assert metadata_kwargs["max_seqlen_cmp_kv"] == 4
+    attn_kwargs = attn_op.call_args.kwargs
+    assert attn_kwargs["layout_kv"] == "PA_BBND"
+    assert "kv_quant_mode" not in attn_kwargs
+    torch.testing.assert_close(attn_kwargs["seqused_ori_kv"], seq_lens)
+    torch.testing.assert_close(attn_kwargs["seqused_cmp_kv"], torch.tensor([4, 4], dtype=torch.int32))
+
+
+def test_a5_quantized_dsa_sparse_attention_keeps_kv_quant_ops():
+    vllm_config = SimpleNamespace(quant_config=object())
+
+    with (
+        mock.patch("vllm_ascend.device.device_op.get_ascend_device_type", return_value=AscendDeviceType.A5),
+        mock.patch.object(
+            torch.ops._C_ascend, "npu_kv_quant_sparse_attn_sharedkv_metadata", create=True
+        ) as metadata_op,
+        mock.patch.object(torch.ops._C_ascend, "npu_kv_quant_sparse_attn_sharedkv", create=True) as attn_op,
+    ):
+        assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_op(vllm_config) is metadata_op
+        assert A5DeviceAdaptor.get_dsa_sparse_attn_op(vllm_config) is attn_op
+        assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_kwargs("npu:0", vllm_config) == {"kv_quant_mode": 1}
+        assert A5DeviceAdaptor.get_dsa_sparse_attn_base_kwargs(vllm_config) == {
             "kv_quant_mode": 1,
             "tile_size": 64,
             "rope_head_dim": 64,
         }
 
 
-def test_a5_dsa_sparse_attention_reports_missing_sparse_flash_mla_op():
-    if hasattr(torch.ops._C_ascend, A5_DSA_SPARSE_FLASH_MLA_OP):
-        pytest.skip(f"{A5_DSA_SPARSE_FLASH_MLA_OP} is registered in this environment")
+def test_a5_non_quant_dsa_sparse_attention_reports_missing_sparse_flash_mla_op():
+    vllm_config = SimpleNamespace(quant_config=None)
+    with mock.patch("vllm_ascend.device.device_op.get_ascend_device_type", return_value=AscendDeviceType.A5):
+        if hasattr(torch.ops.cann_ops_transformer, A5_DSA_SPARSE_FLASH_MLA_OP) or hasattr(
+            torch.ops._C_ascend, A5_DSA_SPARSE_FLASH_MLA_OP
+        ):
+            pytest.skip(f"{A5_DSA_SPARSE_FLASH_MLA_OP} is registered in this environment")
 
-    with pytest.raises(RuntimeError, match="--ops=sparse_flash_mla,sparse_flash_mla_metadata"):
-        A5DeviceAdaptor.get_dsa_sparse_attn_op()
+        with pytest.raises(RuntimeError, match="--ops=sparse_flash_mla,sparse_flash_mla_metadata"):
+            A5DeviceAdaptor.get_dsa_sparse_attn_op(vllm_config)(torch.empty(1))
