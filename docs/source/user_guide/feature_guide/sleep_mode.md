@@ -87,7 +87,7 @@ The following is a simple example of how to use sleep mode.
     :::{note}
     Set `VLLM_USE_MODELSCOPE` before importing `vllm`, otherwise vLLM falls back to Hugging Face Hub and may fail to download the model. Install ModelScope with `pip install modelscope`.
 
-    If your environment uses a corporate proxy with TLS inspection and ModelScope download fails with `SSL: CERTIFICATE_VERIFY_FAILED`, either configure your corporate CA with `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`, or pre-download the model and pass the local directory to `LLM()` / `MODEL_PATH`.
+    If your environment uses a corporate proxy with TLS inspection and ModelScope download fails with `SSL: CERTIFICATE_VERIFY_FAILED`, configure your corporate CA with `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE`.
     :::
 
     ```python
@@ -108,9 +108,7 @@ The following is a simple example of how to use sleep mode.
         print(f"Free memory before sleep: {free / 1024 ** 3:.2f} GiB")
         # record npu memory use baseline in case other process is running
         used_bytes_baseline = total - free
-        # Use a local model directory when online download is blocked.
-        model = os.environ.get("MODEL_PATH", "Qwen/Qwen2.5-0.5B-Instruct")
-        llm = LLM(model, enable_sleep_mode=True)
+        llm = LLM("Qwen/Qwen3-0.6B", enable_sleep_mode=True)
         sampling_params = SamplingParams(temperature=0, max_tokens=10)
         output = llm.generate(prompt, sampling_params)
 
@@ -120,7 +118,7 @@ The following is a simple example of how to use sleep mode.
         print(f"Free memory after sleep: {free_npu_bytes_after_sleep / 1024 ** 3:.2f} GiB")
         used_bytes = total - free_npu_bytes_after_sleep - used_bytes_baseline
         # now the memory usage should be less than the model weights
-        # (0.5B model, 1GiB weights)
+        # (0.6B model, ~1GiB weights)
         assert used_bytes < 1 * GiB_bytes
 
         llm.wake_up()
