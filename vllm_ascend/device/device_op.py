@@ -35,11 +35,23 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
+A5_DSA_SPARSE_FLASH_MLA_OP = "sparse_flash_mla"
+A5_DSA_SPARSE_FLASH_MLA_METADATA_OP = "sparse_flash_mla_metadata"
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
     triton_q_rms = None  # type: ignore
+
+
+def _get_ascend_custom_op(op_name: str):
+    try:
+        return getattr(torch.ops._C_ascend, op_name)
+    except AttributeError as exc:
+        raise RuntimeError(
+            f"Required Ascend custom op '{op_name}' is not registered. "
+            "Install it with --ops=sparse_flash_mla,sparse_flash_mla_metadata."
+        ) from exc
 
 
 class BaseDeviceAdaptor:
@@ -1155,7 +1167,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_op():
-        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
+        return _get_ascend_custom_op(A5_DSA_SPARSE_FLASH_MLA_METADATA_OP)
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_kwargs(device):
@@ -1163,7 +1175,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def get_dsa_sparse_attn_op():
-        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
+        return _get_ascend_custom_op(A5_DSA_SPARSE_FLASH_MLA_OP)
 
     @staticmethod
     def get_dsa_sparse_attn_base_kwargs():

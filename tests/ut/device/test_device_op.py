@@ -3,7 +3,12 @@ from unittest import mock
 import pytest
 import torch
 
-from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+from vllm_ascend.device.device_op import (
+    A5_DSA_SPARSE_FLASH_MLA_METADATA_OP,
+    A5_DSA_SPARSE_FLASH_MLA_OP,
+    A5DeviceAdaptor,
+    BaseDeviceAdaptor,
+)
 
 
 def test_npu_flash_attention_uses_fusion_attention_for_fp32():
@@ -117,3 +122,35 @@ def test_a5_npu_flash_attention_uses_python_sequence_lengths():
     assert call_kwargs["actual_seq_qlen"] == [2, 5]
     assert all(isinstance(seq_len, int) for seq_len in call_kwargs["actual_seq_qlen"])
     assert call_kwargs["actual_seq_kvlen"] is call_kwargs["actual_seq_qlen"]
+
+
+def test_base_dsa_sparse_attention_keeps_sharedkv_ops():
+    with (
+        mock.patch.object(torch.ops._C_ascend, "npu_sparse_attn_sharedkv_metadata", create=True) as metadata_op,
+        mock.patch.object(torch.ops._C_ascend, "npu_sparse_attn_sharedkv", create=True) as attn_op,
+    ):
+        assert BaseDeviceAdaptor.get_dsa_sparse_attn_metadata_op() is metadata_op
+        assert BaseDeviceAdaptor.get_dsa_sparse_attn_op() is attn_op
+
+
+def test_a5_dsa_sparse_attention_uses_sparse_flash_mla_ops():
+    with (
+        mock.patch.object(torch.ops._C_ascend, A5_DSA_SPARSE_FLASH_MLA_METADATA_OP, create=True) as metadata_op,
+        mock.patch.object(torch.ops._C_ascend, A5_DSA_SPARSE_FLASH_MLA_OP, create=True) as attn_op,
+    ):
+        assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_op() is metadata_op
+        assert A5DeviceAdaptor.get_dsa_sparse_attn_op() is attn_op
+        assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
+        assert A5DeviceAdaptor.get_dsa_sparse_attn_base_kwargs() == {
+            "kv_quant_mode": 1,
+            "tile_size": 64,
+            "rope_head_dim": 64,
+        }
+
+
+def test_a5_dsa_sparse_attention_reports_missing_sparse_flash_mla_op():
+    if hasattr(torch.ops._C_ascend, A5_DSA_SPARSE_FLASH_MLA_OP):
+        pytest.skip(f"{A5_DSA_SPARSE_FLASH_MLA_OP} is registered in this environment")
+
+    with pytest.raises(RuntimeError, match="--ops=sparse_flash_mla,sparse_flash_mla_metadata"):
+        A5DeviceAdaptor.get_dsa_sparse_attn_op()
