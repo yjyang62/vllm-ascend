@@ -127,6 +127,11 @@ The following is a simple example of how to use sleep mode.
         output2 = llm.generate(prompt, sampling_params)
         # cmp output
         assert output[0].outputs[0].text == output2[0].outputs[0].text
+        print(
+            f"Outputs match: {output[0].outputs[0].text!r}",
+            flush=True,
+        )
+        print("Sleep mode test passed!", flush=True)
     ```
 
 - Online serving:
