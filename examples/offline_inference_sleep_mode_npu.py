@@ -24,6 +24,7 @@ from vllm.utils.mem_constants import GiB_bytes
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
 
 
 def main():
