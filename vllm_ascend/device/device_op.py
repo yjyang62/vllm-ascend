@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import importlib
+import logging
 from typing import Any
 
 import torch
@@ -38,6 +39,7 @@ DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 A5_DSA_SPARSE_FLASH_MLA_OP = "sparse_flash_mla"
 A5_DSA_SPARSE_FLASH_MLA_METADATA_OP = "sparse_flash_mla_metadata"
+logger = logging.getLogger(__name__)
 _SPARSE_FLASH_MLA_NAMESPACES = ("cann_ops_transformer", "_C_ascend")
 _SPARSE_FLASH_MLA_IMPORT_ATTEMPTED = False
 _SPARSE_FLASH_MLA_IMPORT_ERROR: Exception | None = None
@@ -1356,11 +1358,35 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         Input x is unquantized bf16; cache shape is [..., head_dim]."""
         if not quantized:
             flat_cache = cache.view(-1, cache.shape[-2], cache.shape[-1])
-            flat_cache.index_copy_(
-                0,
-                slot_mapping.to(torch.int64),
-                x.view(-1, x.shape[-2], x.shape[-1]),
-            )
+            source = x.view(-1, x.shape[-2], x.shape[-1])
+            slot_mapping_flat = slot_mapping.reshape(-1).to(torch.int64)
+            if slot_mapping_flat.shape[0] != source.shape[0]:
+                common_len = min(slot_mapping_flat.shape[0], source.shape[0])
+                logger.warning(
+                    "A5 DSA non-quant scatter length mismatch: slot_rows=%d kv_rows=%d, truncating to %d",
+                    slot_mapping_flat.shape[0],
+                    source.shape[0],
+                    common_len,
+                )
+                slot_mapping_flat = slot_mapping_flat[:common_len]
+                source = source[:common_len]
+            valid_mask = (slot_mapping_flat >= 0) & (slot_mapping_flat < flat_cache.shape[0])
+            valid_indices = valid_mask.nonzero(as_tuple=True)[0]
+            if valid_indices.shape[0] != slot_mapping_flat.shape[0]:
+                logger.warning(
+                    "A5 DSA non-quant scatter filtered invalid slots: invalid=%d total=%d cache_rows=%d",
+                    slot_mapping_flat.shape[0] - valid_indices.shape[0],
+                    slot_mapping_flat.shape[0],
+                    flat_cache.shape[0],
+                )
+            if valid_indices.shape[0] == 0:
+                return
+            if valid_indices.shape[0] != slot_mapping_flat.shape[0]:
+                slot_mapping_flat = slot_mapping_flat.index_select(0, valid_indices)
+                source = source.index_select(0, valid_indices)
+            if source.shape[0] == 0:
+                return
+            flat_cache.index_copy_(0, slot_mapping_flat, source)
             return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
