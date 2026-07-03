@@ -15,6 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import importlib
 from typing import Any
 
 import torch
@@ -38,6 +39,8 @@ DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 A5_DSA_SPARSE_FLASH_MLA_OP = "sparse_flash_mla"
 A5_DSA_SPARSE_FLASH_MLA_METADATA_OP = "sparse_flash_mla_metadata"
 _SPARSE_FLASH_MLA_NAMESPACES = ("cann_ops_transformer", "_C_ascend")
+_SPARSE_FLASH_MLA_IMPORT_ATTEMPTED = False
+_SPARSE_FLASH_MLA_IMPORT_ERROR: Exception | None = None
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -46,14 +49,28 @@ else:
 
 
 def _get_sparse_flash_mla_custom_op(op_name: str):
+    global _SPARSE_FLASH_MLA_IMPORT_ATTEMPTED, _SPARSE_FLASH_MLA_IMPORT_ERROR
+    if not _SPARSE_FLASH_MLA_IMPORT_ATTEMPTED:
+        _SPARSE_FLASH_MLA_IMPORT_ATTEMPTED = True
+        try:
+            importlib.import_module("cann_ops_transformer")
+        except Exception as exc:
+            _SPARSE_FLASH_MLA_IMPORT_ERROR = exc
+
     for namespace in _SPARSE_FLASH_MLA_NAMESPACES:
         try:
             return getattr(getattr(torch.ops, namespace), op_name)
         except AttributeError:
             continue
+    detail = (
+        f" Importing cann_ops_transformer failed with: {_SPARSE_FLASH_MLA_IMPORT_ERROR}."
+        if _SPARSE_FLASH_MLA_IMPORT_ERROR is not None
+        else ""
+    )
     raise RuntimeError(
         f"Required Ascend custom op '{op_name}' is not registered. "
         "Install it with --ops=sparse_flash_mla,sparse_flash_mla_metadata."
+        f"{detail}"
     )
 
 
