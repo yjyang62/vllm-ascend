@@ -698,7 +698,7 @@ class BaseDeviceAdaptor:
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping, *, quantized: bool = True):
+    def dsa_kv_compress_scatter(cache, x, slot_mapping, *, quantized: bool = True, debug_label: str = "default"):
         """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
         torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
 
@@ -1352,7 +1352,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping, *, quantized: bool = True):
+    def dsa_kv_compress_scatter(cache, x, slot_mapping, *, quantized: bool = True, debug_label: str = "default"):
         """Scatter KV into cache with fused quantization+compression.
         A5: kv_compress_epilog handles quant/compress/scatter internally.
         Input x is unquantized bf16; cache shape is [..., head_dim]."""
@@ -1362,7 +1362,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 source = x.reshape(-1, flat_cache.shape[-2], flat_cache.shape[-1])
             except RuntimeError as exc:
                 logger.warning(
-                    "A5 DSA non-quant scatter source reshape failed: x_shape=%s cache_slice_shape=(%d,%d)",
+                    "A5 DSA non-quant scatter source reshape failed [%s]: x_shape=%s cache_slice_shape=(%d,%d)",
+                    debug_label,
                     tuple(x.shape),
                     flat_cache.shape[-2],
                     flat_cache.shape[-1],
@@ -1375,13 +1376,21 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             valid_indices = valid_mask.nonzero(as_tuple=True)[0]
             if valid_indices.shape[0] != slot_mapping_flat.shape[0]:
                 logger.warning(
-                    "A5 DSA non-quant scatter filtered invalid slots: invalid=%d total=%d cache_rows=%d",
+                    "A5 DSA non-quant scatter filtered invalid slots [%s]: invalid=%d total=%d cache_rows=%d kv_rows=%d",
+                    debug_label,
                     slot_mapping_flat.shape[0] - valid_indices.shape[0],
                     slot_mapping_flat.shape[0],
                     flat_cache.shape[0],
+                    source.shape[0],
                 )
             valid_slots = slot_mapping_flat.index_select(0, valid_indices)
             if valid_slots.shape[0] == 0:
+                logger.warning(
+                    "A5 DSA non-quant scatter dropped all rows [%s]: slot_rows=%d kv_rows=%d",
+                    debug_label,
+                    slot_mapping_flat.shape[0],
+                    source.shape[0],
+                )
                 return
             if source.shape[0] == slot_mapping_flat.shape[0]:
                 slot_mapping_flat = slot_mapping_flat.index_select(0, valid_indices)
@@ -1390,7 +1399,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 slot_mapping_flat = valid_slots
             else:
                 logger.warning(
-                    "A5 DSA non-quant scatter cannot align slot/source rows: slot_rows=%d valid_slot_rows=%d kv_rows=%d",
+                    "A5 DSA non-quant scatter cannot align slot/source rows [%s]: slot_rows=%d valid_slot_rows=%d kv_rows=%d",
+                    debug_label,
                     slot_mapping_flat.shape[0],
                     valid_slots.shape[0],
                     source.shape[0],

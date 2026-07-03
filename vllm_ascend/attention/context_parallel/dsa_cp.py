@@ -1228,7 +1228,12 @@ class AscendDSACPImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
+        DeviceOperator.dsa_kv_compress_scatter(
+            swa_kv_cache,
+            kv,
+            swa_metadata.req_metadata.slot_mapping,
+            debug_label=f"{layer_name}-cp-swa",
+        )
 
         compress_topk_idxs = None
         if self.compress_ratio > 1:
@@ -1286,7 +1291,12 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 compress_kv_cache,
             )
             if compressed_kv.shape[0] > 0:
-                DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+                DeviceOperator.dsa_kv_compress_scatter(
+                    compress_kv_cache,
+                    compressed_kv,
+                    compress_slot_mapping,
+                    debug_label=f"{layer_name}-cp-compress",
+                )
 
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()

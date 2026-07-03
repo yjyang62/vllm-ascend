@@ -1834,7 +1834,11 @@ class AscendDSAImpl(DSAAttentionImpl):
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
             DeviceOperator.dsa_kv_compress_scatter(
-                swa_kv_cache, kv, slot_mapping, quantized=self.use_quantized_dsa_cache
+                swa_kv_cache,
+                kv,
+                slot_mapping,
+                quantized=self.use_quantized_dsa_cache,
+                debug_label=f"mla-prolog-{'prefill' if is_prefill else 'decode'}-swa",
             )
 
         if is_prefill:
@@ -1972,7 +1976,11 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # swa exec kv
             DeviceOperator.dsa_kv_compress_scatter(
-                swa_kv_cache, kv, swa_prefill_metadata.slot_mapping, quantized=self.use_quantized_dsa_cache
+                swa_kv_cache,
+                kv,
+                swa_prefill_metadata.slot_mapping,
+                quantized=self.use_quantized_dsa_cache,
+                debug_label=f"{layer_name}-prefill-swa",
             )
 
         attn_op = DeviceOperator.get_dsa_sparse_attn_op(self.vllm_config)
@@ -2087,7 +2095,11 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
             if compressed_kv.shape[0] > 0:
                 DeviceOperator.dsa_kv_compress_scatter(
-                    compress_kv_cache, compressed_kv, compress_slot_mapping, quantized=self.use_quantized_dsa_cache
+                    compress_kv_cache,
+                    compressed_kv,
+                    compress_slot_mapping,
+                    quantized=self.use_quantized_dsa_cache,
+                    debug_label=f"{layer_name}-prefill-compress",
                 )
 
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
@@ -2299,7 +2311,11 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # swa exec kv
             DeviceOperator.dsa_kv_compress_scatter(
-                swa_kv_cache, kv, swa_decode_metadata.slot_mapping, quantized=self.use_quantized_dsa_cache
+                swa_kv_cache,
+                kv,
+                swa_decode_metadata.slot_mapping,
+                quantized=self.use_quantized_dsa_cache,
+                debug_label=f"{layer_name}-decode-swa",
             )
 
         if self.compress_ratio > 1:
@@ -2388,7 +2404,11 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
             if compressed_kv.shape[0] > 0:
                 DeviceOperator.dsa_kv_compress_scatter(
-                    compress_kv_cache, compressed_kv, compress_slot_mapping, quantized=self.use_quantized_dsa_cache
+                    compress_kv_cache,
+                    compressed_kv,
+                    compress_slot_mapping,
+                    quantized=self.use_quantized_dsa_cache,
+                    debug_label=f"{layer_name}-decode-compress",
                 )
 
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
