@@ -298,3 +298,23 @@ def test_a5_dsa_kv_compress_scatter_non_quant_accepts_2d_source_tensor():
     torch.testing.assert_close(cache[2, 0], x[0])
     torch.testing.assert_close(cache[0, 0], x[1])
     torch.testing.assert_close(cache[1], torch.zeros_like(cache[1]))
+
+
+def test_a5_dsa_kv_compress_scatter_non_quant_aligns_source_with_valid_slots():
+    cache = torch.zeros((4, 1, 2), dtype=torch.float32)
+    x = torch.tensor(
+        [
+            [11.0, 12.0],
+            [21.0, 22.0],
+        ],
+        dtype=torch.float32,
+    )
+    # Interleaved invalid slots: source rows should map to valid slots [3, 1].
+    slot_mapping = torch.tensor([-1, 3, -1, 1], dtype=torch.int64)
+
+    A5DeviceAdaptor.dsa_kv_compress_scatter(cache, x, slot_mapping, quantized=False)
+
+    torch.testing.assert_close(cache[3, 0], x[0])
+    torch.testing.assert_close(cache[1, 0], x[1])
+    torch.testing.assert_close(cache[0], torch.zeros_like(cache[0]))
+    torch.testing.assert_close(cache[2], torch.zeros_like(cache[2]))

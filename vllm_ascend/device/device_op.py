@@ -1371,16 +1371,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     "A5 DSA non-quant scatter cannot reshape source to cache slice shape"
                 ) from exc
             slot_mapping_flat = slot_mapping.reshape(-1).to(torch.int64)
-            if slot_mapping_flat.shape[0] != source.shape[0]:
-                common_len = min(slot_mapping_flat.shape[0], source.shape[0])
-                logger.warning(
-                    "A5 DSA non-quant scatter length mismatch: slot_rows=%d kv_rows=%d, truncating to %d",
-                    slot_mapping_flat.shape[0],
-                    source.shape[0],
-                    common_len,
-                )
-                slot_mapping_flat = slot_mapping_flat[:common_len]
-                source = source[:common_len]
             valid_mask = (slot_mapping_flat >= 0) & (slot_mapping_flat < flat_cache.shape[0])
             valid_indices = valid_mask.nonzero(as_tuple=True)[0]
             if valid_indices.shape[0] != slot_mapping_flat.shape[0]:
@@ -1390,13 +1380,24 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     slot_mapping_flat.shape[0],
                     flat_cache.shape[0],
                 )
-            if valid_indices.shape[0] == 0:
+            valid_slots = slot_mapping_flat.index_select(0, valid_indices)
+            if valid_slots.shape[0] == 0:
                 return
-            if valid_indices.shape[0] != slot_mapping_flat.shape[0]:
+            if source.shape[0] == slot_mapping_flat.shape[0]:
                 slot_mapping_flat = slot_mapping_flat.index_select(0, valid_indices)
                 source = source.index_select(0, valid_indices)
-            if source.shape[0] == 0:
-                return
+            elif source.shape[0] == valid_slots.shape[0]:
+                slot_mapping_flat = valid_slots
+            else:
+                logger.warning(
+                    "A5 DSA non-quant scatter cannot align slot/source rows: slot_rows=%d valid_slot_rows=%d kv_rows=%d",
+                    slot_mapping_flat.shape[0],
+                    valid_slots.shape[0],
+                    source.shape[0],
+                )
+                raise RuntimeError(
+                    "A5 DSA non-quant scatter slot/source rows are inconsistent and cannot be aligned safely"
+                )
             flat_cache.index_copy_(0, slot_mapping_flat, source)
             return
         torch.ops._C_ascend.kv_compress_epilog(
