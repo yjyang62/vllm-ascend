@@ -1,3 +1,4 @@
+import logging
 import math
 from dataclasses import dataclass
 from typing import ClassVar, TypeVar
@@ -24,6 +25,8 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     olora_tp_enable,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def hadamard_transform_ref(
@@ -914,6 +917,31 @@ class AscendDSACPImpl(DSAAttentionImpl):
     understand this class
     """
 
+    @staticmethod
+    def _log_compressor_scatter_stats(
+        stage: str, compressed_kv: torch.Tensor, slot_mapping: torch.Tensor, cache: torch.Tensor
+    ) -> None:
+        slot_rows = slot_mapping.reshape(-1).shape[0]
+        kv_rows = compressed_kv.shape[0]
+        cache_rows = cache.view(-1, cache.shape[-2], cache.shape[-1]).shape[0]
+        if slot_rows != kv_rows or slot_rows > cache_rows:
+            logger.warning(
+                "DSA-CP compressor scatter shape mismatch at %s: slot_rows=%d kv_rows=%d cache_rows=%d",
+                stage,
+                slot_rows,
+                kv_rows,
+                cache_rows,
+            )
+            return
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "DSA-CP compressor scatter stats at %s: slot_rows=%d kv_rows=%d cache_rows=%d",
+                stage,
+                slot_rows,
+                kv_rows,
+                cache_rows,
+            )
+
     def __init__(
         self,
         n_heads: int,
@@ -1251,6 +1279,12 @@ class AscendDSACPImpl(DSAAttentionImpl):
             )
 
             # Zero-row compressor output has no KV writes.
+            self._log_compressor_scatter_stats(
+                "prefill" if has_prefill else "decode",
+                compressed_kv,
+                compress_slot_mapping,
+                compress_kv_cache,
+            )
             if compressed_kv.shape[0] > 0:
                 DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
 

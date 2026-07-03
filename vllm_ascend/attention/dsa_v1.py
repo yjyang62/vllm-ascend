@@ -1,3 +1,4 @@
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
@@ -50,6 +51,7 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 _DSV4_DSA_OVERLAP_STREAM = None
+logger = logging.getLogger(__name__)
 
 
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
@@ -1358,6 +1360,31 @@ class AscendDSAImpl(DSAAttentionImpl):
     understand this class
     """
 
+    @staticmethod
+    def _log_compressor_scatter_stats(
+        stage: str, compressed_kv: torch.Tensor, slot_mapping: torch.Tensor, cache: torch.Tensor
+    ) -> None:
+        slot_rows = slot_mapping.reshape(-1).shape[0]
+        kv_rows = compressed_kv.shape[0]
+        cache_rows = cache.view(-1, cache.shape[-2], cache.shape[-1]).shape[0]
+        if slot_rows != kv_rows or slot_rows > cache_rows:
+            logger.warning(
+                "DSA compressor scatter shape mismatch at %s: slot_rows=%d kv_rows=%d cache_rows=%d",
+                stage,
+                slot_rows,
+                kv_rows,
+                cache_rows,
+            )
+            return
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "DSA compressor scatter stats at %s: slot_rows=%d kv_rows=%d cache_rows=%d",
+                stage,
+                slot_rows,
+                kv_rows,
+                cache_rows,
+            )
+
     def __init__(
         self,
         n_heads: int,
@@ -2052,6 +2079,12 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # A zero-row compressor output has no KV writes. Skip scatter
             # instead of passing None; A5 scatter dereferences x.view().
+            self._log_compressor_scatter_stats(
+                "prefill",
+                compressed_kv,
+                compress_slot_mapping,
+                compress_kv_cache,
+            )
             if compressed_kv.shape[0] > 0:
                 DeviceOperator.dsa_kv_compress_scatter(
                     compress_kv_cache, compressed_kv, compress_slot_mapping, quantized=self.use_quantized_dsa_cache
@@ -2347,6 +2380,12 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # A zero-row compressor output has no KV writes. Skip scatter
             # instead of passing None; A5 scatter dereferences x.view().
+            self._log_compressor_scatter_stats(
+                "decode",
+                compressed_kv,
+                compress_slot_mapping,
+                compress_kv_cache,
+            )
             if compressed_kv.shape[0] > 0:
                 DeviceOperator.dsa_kv_compress_scatter(
                     compress_kv_cache, compressed_kv, compress_slot_mapping, quantized=self.use_quantized_dsa_cache
