@@ -1,6 +1,6 @@
 # Performance and Debug
 
-:::::{toctree}
+::::::{toctree}
 :caption: Performance and Debug
 :maxdepth: 1
 performance_benchmark
@@ -8,4 +8,5 @@ optimization_and_tuning
 service_profiling_guide
 msprobe_guide
 rl_log_location_guide
-:::::
+rl_code_view_guide
+::::::
