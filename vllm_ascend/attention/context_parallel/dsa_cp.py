@@ -1250,9 +1250,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 cache_mode=1,
             )
 
-            if compressed_kv.numel() == 0:
-                compressed_kv = None
-            DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+            # Zero-row compressor output has no KV writes.
+            if compressed_kv.shape[0] > 0:
+                DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
 
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()

@@ -239,3 +239,43 @@ def test_a5_non_quant_dsa_sparse_attention_reports_missing_sparse_flash_mla_op()
 
         with pytest.raises(RuntimeError, match="--ops=sparse_flash_mla,sparse_flash_mla_metadata"):
             A5DeviceAdaptor.get_dsa_sparse_attn_op(vllm_config)(torch.empty(1))
+
+
+def test_a5_dsa_kv_compress_scatter_non_quant_filters_invalid_slots():
+    cache = torch.zeros((4, 1, 3), dtype=torch.float32)
+    x = torch.tensor(
+        [
+            [[1.0, 1.1, 1.2]],
+            [[2.0, 2.1, 2.2]],
+            [[3.0, 3.1, 3.2]],
+            [[4.0, 4.1, 4.2]],
+        ],
+        dtype=torch.float32,
+    )
+    slot_mapping = torch.tensor([2, -1, 9, 0], dtype=torch.int64)
+
+    A5DeviceAdaptor.dsa_kv_compress_scatter(cache, x, slot_mapping, quantized=False)
+
+    torch.testing.assert_close(cache[2], x[0])
+    torch.testing.assert_close(cache[0], x[3])
+    torch.testing.assert_close(cache[1], torch.zeros_like(cache[1]))
+    torch.testing.assert_close(cache[3], torch.zeros_like(cache[3]))
+
+
+def test_a5_dsa_kv_compress_scatter_non_quant_handles_mapping_length_mismatch():
+    cache = torch.zeros((3, 1, 2), dtype=torch.float32)
+    x = torch.tensor(
+        [
+            [[10.0, 11.0]],
+            [[20.0, 21.0]],
+            [[30.0, 31.0]],
+        ],
+        dtype=torch.float32,
+    )
+    slot_mapping = torch.tensor([1, 2, -1, 0], dtype=torch.int64)
+
+    A5DeviceAdaptor.dsa_kv_compress_scatter(cache, x, slot_mapping, quantized=False)
+
+    torch.testing.assert_close(cache[1], x[0])
+    torch.testing.assert_close(cache[2], x[1])
+    torch.testing.assert_close(cache[0], torch.zeros_like(cache[0]))

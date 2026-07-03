@@ -1356,11 +1356,22 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         Input x is unquantized bf16; cache shape is [..., head_dim]."""
         if not quantized:
             flat_cache = cache.view(-1, cache.shape[-2], cache.shape[-1])
-            flat_cache.index_copy_(
-                0,
-                slot_mapping.to(torch.int64),
-                x.view(-1, x.shape[-2], x.shape[-1]),
-            )
+            source = x.view(-1, x.shape[-2], x.shape[-1])
+            slot_mapping_flat = slot_mapping.reshape(-1).to(torch.int64)
+            if slot_mapping_flat.shape[0] != source.shape[0]:
+                common_len = min(slot_mapping_flat.shape[0], source.shape[0])
+                slot_mapping_flat = slot_mapping_flat[:common_len]
+                source = source[:common_len]
+            valid_mask = (slot_mapping_flat >= 0) & (slot_mapping_flat < flat_cache.shape[0])
+            if not valid_mask.all():
+                valid_indices = valid_mask.nonzero(as_tuple=True)[0]
+                if valid_indices.shape[0] == 0:
+                    return
+                slot_mapping_flat = slot_mapping_flat.index_select(0, valid_indices)
+                source = source.index_select(0, valid_indices)
+            if source.shape[0] == 0:
+                return
+            flat_cache.index_copy_(0, slot_mapping_flat, source)
             return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
