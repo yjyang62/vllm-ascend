@@ -39,6 +39,14 @@ DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
 REPO_ROOT = Path(__file__).resolve().parents[4]
 EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.py"
 EXTERNAL_LAUNCHER_TIMEOUT_S = 720
+FAST_INFERENCE_ARGS = [
+    "--prompt-repeat",
+    "1",
+    "--max-tokens",
+    "4",
+    "--exit-wait-seconds",
+    "1",
+]
 
 
 def _decode_output(output):
@@ -95,7 +103,7 @@ def test_qwen3_external_launcher(model):
         "--proc-per-node",
         "2",
         "--trust-remote-code",
-    ]
+    ] + FAST_INFERENCE_ARGS
 
     proc, output = _run_external_launcher(cmd, env)
 
@@ -125,7 +133,7 @@ def test_qwen3_moe_external_launcher_ep_tp2(model):
         "2",
         "--trust-remote-code",
         "--enable-expert-parallel",
-    ]
+    ] + FAST_INFERENCE_ARGS
 
     proc, output = _run_external_launcher(cmd, env)
 
@@ -158,7 +166,7 @@ def test_qwen3_external_launcher_with_sleepmode():
         "0",
         "--model-weight-gib",
         "16",
-    ]
+    ] + FAST_INFERENCE_ARGS
 
     proc, output = _run_external_launcher(cmd, env)
 
@@ -197,7 +205,7 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
         "16",
         "--sleep-mode-level",
         "2",
-    ]
+    ] + FAST_INFERENCE_ARGS
 
     proc, output = _run_external_launcher(cmd, env)
 
@@ -221,7 +229,7 @@ def test_qwen3_external_launcher_with_matmul_allreduce(model):
         "--model",
         model,
         "--trust-remote-code",
-    ]
+    ] + FAST_INFERENCE_ARGS
 
     proc, output = _run_external_launcher(cmd, env)
 

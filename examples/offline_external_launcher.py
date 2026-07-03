@@ -139,6 +139,24 @@ def parse_args():
         default=1,
         help="Sleep mode level: 1 or 2. This example of level 2 is only supported for dense model.",
     )
+    parser.add_argument(
+        "--prompt-repeat",
+        type=int,
+        default=10,
+        help="Repeat the prompt set this many times for generation.",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=10,
+        help="Maximum generated tokens per prompt.",
+    )
+    parser.add_argument(
+        "--exit-wait-seconds",
+        type=float,
+        default=5,
+        help="Wait time before process exit to let engine loops pause.",
+    )
 
     args = parser.parse_args()
     if args.enable_sleep_mode:
@@ -150,6 +168,12 @@ def parse_args():
             parser.error("model-weight-gib must be greater than 0 when enable-sleep-mode is set.")
         if args.model == parser.get_default("model") and args.model_weight_gib is None:
             parser.error("model-weight-gib must be provided for default model when enable-sleep-mode is set.")
+    if args.prompt_repeat <= 0:
+        parser.error("prompt-repeat must be greater than 0.")
+    if args.max_tokens <= 0:
+        parser.error("max-tokens must be greater than 0.")
+    if args.exit_wait_seconds < 0:
+        parser.error("exit-wait-seconds must be greater than or equal to 0.")
 
     return args
 
@@ -169,6 +193,9 @@ def main(
     enable_sleep_mode: bool = False,
     temperature: float = 0.8,
     sleep_mode_level: int = 1,
+    prompt_repeat: int = 10,
+    max_tokens: int = 10,
+    exit_wait_seconds: float = 5,
 ):
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = str(master_port)
@@ -186,11 +213,11 @@ def main(
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
-    ] * 10
+    ] * prompt_repeat
     sampling_params = SamplingParams(
         temperature=temperature,
         top_p=0.95,
-        max_tokens=10,
+        max_tokens=max_tokens,
     )
     llm = LLM(
         model=model,
@@ -243,7 +270,8 @@ def main(
         print(f"Global rank: {rank}, Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     # Give engines time to pause their processing loops before exiting.
-    sleep(5)
+    if exit_wait_seconds > 0:
+        sleep(exit_wait_seconds)
     del llm
     cleanup_env_and_memory()
 
@@ -294,6 +322,9 @@ if __name__ == "__main__":
                 args.enable_sleep_mode,
                 args.temperature,
                 args.sleep_mode_level,
+                args.prompt_repeat,
+                args.max_tokens,
+                args.exit_wait_seconds,
             ),
         )
 
