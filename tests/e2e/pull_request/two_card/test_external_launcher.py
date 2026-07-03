@@ -23,6 +23,7 @@ Run `pytest tests/e2e/pull_request/two_card/test_external_launcher.py`.
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -39,6 +40,7 @@ DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
 REPO_ROOT = Path(__file__).resolve().parents[4]
 EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.py"
 EXTERNAL_LAUNCHER_TIMEOUT_S = 720
+MODULE_START_TIME = time.perf_counter()
 
 
 def _decode_output(output):
@@ -74,6 +76,19 @@ def _run_external_launcher(cmd, env):
     output = _decode_output(proc.stdout)
     print(output)
     return proc, output
+
+
+@pytest.fixture(autouse=True)
+def _log_test_duration(request):
+    start_time = time.perf_counter()
+    yield
+    elapsed = time.perf_counter() - start_time
+    print(f"[test_external_launcher] {request.node.name} took {elapsed:.2f}s")
+
+
+def teardown_module(_module):
+    elapsed = time.perf_counter() - MODULE_START_TIME
+    print(f"[test_external_launcher] total module runtime: {elapsed:.2f}s")
 
 
 @pytest.mark.parametrize("model", MODELS)
