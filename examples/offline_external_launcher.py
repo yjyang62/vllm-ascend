@@ -150,7 +150,6 @@ def parse_args():
             parser.error("model-weight-gib must be greater than 0 when enable-sleep-mode is set.")
         if args.model == parser.get_default("model") and args.model_weight_gib is None:
             parser.error("model-weight-gib must be provided for default model when enable-sleep-mode is set.")
-
     return args
 
 
