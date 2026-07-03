@@ -1358,7 +1358,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         Input x is unquantized bf16; cache shape is [..., head_dim]."""
         if not quantized:
             flat_cache = cache.view(-1, cache.shape[-2], cache.shape[-1])
-            source = x.view(-1, x.shape[-2], x.shape[-1])
+            try:
+                source = x.reshape(-1, flat_cache.shape[-2], flat_cache.shape[-1])
+            except RuntimeError as exc:
+                logger.warning(
+                    "A5 DSA non-quant scatter source reshape failed: x_shape=%s cache_slice_shape=(%d,%d)",
+                    tuple(x.shape),
+                    flat_cache.shape[-2],
+                    flat_cache.shape[-1],
+                )
+                raise RuntimeError(
+                    "A5 DSA non-quant scatter cannot reshape source to cache slice shape"
+                ) from exc
             slot_mapping_flat = slot_mapping.reshape(-1).to(torch.int64)
             if slot_mapping_flat.shape[0] != source.shape[0]:
                 common_len = min(slot_mapping_flat.shape[0], source.shape[0])

@@ -279,3 +279,22 @@ def test_a5_dsa_kv_compress_scatter_non_quant_handles_mapping_length_mismatch():
     torch.testing.assert_close(cache[1], x[0])
     torch.testing.assert_close(cache[2], x[1])
     torch.testing.assert_close(cache[0], torch.zeros_like(cache[0]))
+
+
+def test_a5_dsa_kv_compress_scatter_non_quant_accepts_2d_source_tensor():
+    cache = torch.zeros((3, 1, 2), dtype=torch.float32)
+    x = torch.tensor(
+        [
+            [5.0, 6.0],
+            [7.0, 8.0],
+            [9.0, 10.0],
+        ],
+        dtype=torch.float32,
+    )
+    slot_mapping = torch.tensor([2, 0, -1], dtype=torch.int64)
+
+    A5DeviceAdaptor.dsa_kv_compress_scatter(cache, x, slot_mapping, quantized=False)
+
+    torch.testing.assert_close(cache[2, 0], x[0])
+    torch.testing.assert_close(cache[0, 0], x[1])
+    torch.testing.assert_close(cache[1], torch.zeros_like(cache[1]))
