@@ -138,7 +138,7 @@ def test_base_dsa_sparse_attention_keeps_sharedkv_ops():
 def test_a5_dsa_sparse_attention_uses_sparse_flash_mla_ops():
     vllm_config = SimpleNamespace(quant_config=None)
     q = torch.randn(2, 4, 512, dtype=torch.bfloat16)
-    kv = torch.randn(8, 128, 1, 512, dtype=torch.bfloat16)
+    kv = torch.randn(8, 128, 512, dtype=torch.bfloat16)
     seq_lens = torch.tensor([18, 16], dtype=torch.int32)
     expected = torch.empty_like(q)
 
@@ -175,7 +175,7 @@ def test_a5_dsa_sparse_attention_uses_sparse_flash_mla_ops():
             q,
             ori_kv=kv,
             cmp_kv=kv,
-            cmp_sparse_indices=torch.zeros(2, 1, 512, dtype=torch.int32),
+            cmp_sparse_indices=torch.zeros(2, 512, dtype=torch.int32),
             ori_block_table=torch.zeros(2, 1, dtype=torch.int32),
             cmp_block_table=torch.zeros(2, 1, dtype=torch.int32),
             seqused_kv=seq_lens,
@@ -201,6 +201,9 @@ def test_a5_dsa_sparse_attention_uses_sparse_flash_mla_ops():
     assert metadata_kwargs["max_seqlen_cmp_kv"] == 4
     attn_kwargs = attn_op.call_args.kwargs
     assert attn_kwargs["layout_kv"] == "PA_BBND"
+    assert attn_kwargs["ori_kv"].shape == (8, 128, 1, 512)
+    assert attn_kwargs["cmp_kv"].shape == (8, 128, 1, 512)
+    assert attn_kwargs["cmp_sparse_indices"].shape == (2, 1, 512)
     assert "kv_quant_mode" not in attn_kwargs
     torch.testing.assert_close(attn_kwargs["seqused_ori_kv"], seq_lens)
     torch.testing.assert_close(attn_kwargs["seqused_cmp_kv"], torch.tensor([4, 4], dtype=torch.int32))

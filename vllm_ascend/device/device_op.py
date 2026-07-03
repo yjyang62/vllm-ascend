@@ -86,6 +86,22 @@ def _layout_kv_for_sparse_flash_mla(layout_kv: str | None) -> str | None:
     return "PA_BBND" if layout_kv == "PA_ND" else layout_kv
 
 
+def _pa_nd_to_sparse_flash_mla_cache(cache):
+    if cache is None:
+        return None
+    if cache.dim() == 3:
+        return cache.unsqueeze(2)
+    return cache
+
+
+def _sparse_indices_to_sparse_flash_mla(indices):
+    if indices is None:
+        return None
+    if indices.dim() == 2:
+        return indices.unsqueeze(1)
+    return indices
+
+
 def _to_optional_int(value):
     if value is None:
         return None
@@ -163,10 +179,10 @@ def _sparse_flash_mla_from_dsa(q, **kwargs):
 
     return op(
         q,
-        ori_kv=kwargs.get("ori_kv"),
-        cmp_kv=kwargs.get("cmp_kv"),
-        ori_sparse_indices=kwargs.get("ori_sparse_indices"),
-        cmp_sparse_indices=kwargs.get("cmp_sparse_indices"),
+        ori_kv=_pa_nd_to_sparse_flash_mla_cache(kwargs.get("ori_kv")),
+        cmp_kv=_pa_nd_to_sparse_flash_mla_cache(kwargs.get("cmp_kv")),
+        ori_sparse_indices=_sparse_indices_to_sparse_flash_mla(kwargs.get("ori_sparse_indices")),
+        cmp_sparse_indices=_sparse_indices_to_sparse_flash_mla(kwargs.get("cmp_sparse_indices")),
         ori_block_table=kwargs.get("ori_block_table"),
         cmp_block_table=kwargs.get("cmp_block_table"),
         cu_seqlens_q=kwargs.get("cu_seqlens_q"),
