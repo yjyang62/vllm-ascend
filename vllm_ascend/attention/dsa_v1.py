@@ -1551,6 +1551,14 @@ class AscendDSAImpl(DSAAttentionImpl):
             x = x_rot.reshape(1, num_tokens, -1, rotary_dim)
         return x
 
+    def _wo_a_weight_for_transpose_batchmatmul(self) -> torch.Tensor:
+        weight = self.wo_a.weight
+        if weight.ndim == 3:
+            return weight
+        return (
+            weight.view(self.n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
+        )
+
     def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         num_tokens = o_proj_input.shape[0]
         group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
@@ -1618,7 +1626,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             o_proj_input = recv.view(oproj_tp_size * exchange_num_tokens, groups_per_rank, group_hidden_dim)
             o_proj_input = torch_npu.npu_transpose_batchmatmul(
                 o_proj_input,
-                self.wo_a.weight,
+                self._wo_a_weight_for_transpose_batchmatmul(),
                 bias=None,
                 scale=None,
                 perm_x1=(1, 0, 2),
@@ -1647,7 +1655,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             o_proj_input = torch_npu.npu_transpose_batchmatmul(
                 o_proj_input,
-                self.wo_a.weight,
+                self._wo_a_weight_for_transpose_batchmatmul(),
                 bias=None,
                 scale=None,
                 perm_x1=(1, 0, 2),
