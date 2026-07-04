@@ -1495,6 +1495,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         self.skip_topk = kwargs.get("skip_topk", False)
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
         self._decode_invalid_compress_bypass_warned = False
+        self._force_swa_only_warned = False
         self.use_index_cache = self.skip_topk or getattr(
             self.vllm_config.model_config.hf_config,
             "use_index_cache",
@@ -1914,6 +1915,13 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = common_prefill_metadata.sin[layer_name]
         actual_seq_lengths_query = common_prefill_metadata.query_start_loc
         actual_seq_lengths_key = common_prefill_metadata.seq_lens
+        force_swa_only = envs_ascend.VLLM_ASCEND_DSA_DEBUG_FORCE_SWA_ONLY
+        if force_swa_only and not self._force_swa_only_warned:
+            logger.warning(
+                "DSA debug force SWA-only enabled: bypass prefill/decode compress-indexer paths (layer=%s)",
+                layer_name,
+            )
+            self._force_swa_only_warned = True
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
@@ -1999,7 +2007,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs(self.vllm_config)
         DeviceOperator.add_dsa_sparse_attn_extra_kwargs(extra_attn_kwargs, cu_seqlens_ori_kv=actual_seq_lengths_query)
 
-        if self.compress_ratio <= 1:
+        if self.compress_ratio <= 1 or force_swa_only:
             return attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -2018,7 +2026,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 **extra_attn_kwargs,
             )[0]
 
-        if self.compress_ratio > 1:
+        if self.compress_ratio > 1 and not force_swa_only:
             compressor_prefill_metadata = _require_prefill_metadata(compressor_attn_metadata)
             compressor_state_prefill_metadata = _require_prefill_metadata(compressor_kv_state_metadata)
             compress_topk_idxs = None
@@ -2234,7 +2242,14 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = common_decode_metadata.sin[layer_name]
         actual_seq_lengths_query = common_decode_metadata.query_start_loc
         actual_seq_lengths_key = common_decode_metadata.seq_lens
-        decode_force_swa_only = (
+        force_swa_only = envs_ascend.VLLM_ASCEND_DSA_DEBUG_FORCE_SWA_ONLY
+        if force_swa_only and not self._force_swa_only_warned:
+            logger.warning(
+                "DSA debug force SWA-only enabled: bypass prefill/decode compress-indexer paths (layer=%s)",
+                layer_name,
+            )
+            self._force_swa_only_warned = True
+        decode_force_swa_only = force_swa_only or (
             self.compress_ratio > 1
             and envs_ascend.VLLM_ASCEND_DSA_DEBUG_DECODE_BYPASS_ON_INVALID_COMPRESS
             and not self._decode_has_compressed_rows(
@@ -2243,7 +2258,11 @@ class AscendDSAImpl(DSAAttentionImpl):
                 self.compress_ratio,
             )
         )
-        if decode_force_swa_only and not self._decode_invalid_compress_bypass_warned:
+        if (
+            decode_force_swa_only
+            and not force_swa_only
+            and not self._decode_invalid_compress_bypass_warned
+        ):
             logger.warning(
                 "DSA decode debug bypass enabled: skip decode compress/indexer when no compressed rows "
                 "would be produced (layer=%s, compress_ratio=%d)",

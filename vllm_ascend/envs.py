@@ -117,6 +117,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_DSA_DEBUG_DECODE_BYPASS_ON_INVALID_COMPRESS": lambda: bool(
         int(os.getenv("VLLM_ASCEND_DSA_DEBUG_DECODE_BYPASS_ON_INVALID_COMPRESS", "0"))
     ),
+    # Debug-only switch for DSA: force SWA-only attention by bypassing
+    # compress/indexer updates in both prefill and decode paths.
+    # 0 (default): keep normal DSA behavior.
+    # 1: bypass compress/indexer and use SWA-only attention.
+    "VLLM_ASCEND_DSA_DEBUG_FORCE_SWA_ONLY": lambda: bool(int(os.getenv("VLLM_ASCEND_DSA_DEBUG_FORCE_SWA_ONLY", "0"))),
 }
 
 # end-env-vars-definition
