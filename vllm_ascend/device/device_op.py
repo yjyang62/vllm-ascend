@@ -15,6 +15,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import importlib
+import logging
+from collections import defaultdict
 from typing import Any
 
 import torch
@@ -35,11 +38,177 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
+A5_DSA_SPARSE_FLASH_MLA_OP = "sparse_flash_mla"
+A5_DSA_SPARSE_FLASH_MLA_METADATA_OP = "sparse_flash_mla_metadata"
+logger = logging.getLogger(__name__)
+_A5_DSA_WARN_COUNTS: dict[str, int] = defaultdict(int)
+_SPARSE_FLASH_MLA_NAMESPACES = ("cann_ops_transformer", "_C_ascend")
+_SPARSE_FLASH_MLA_IMPORT_ATTEMPTED = False
+_SPARSE_FLASH_MLA_IMPORT_ERROR: Exception | None = None
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
     triton_q_rms = None  # type: ignore
+
+
+def _get_sparse_flash_mla_custom_op(op_name: str):
+    global _SPARSE_FLASH_MLA_IMPORT_ATTEMPTED, _SPARSE_FLASH_MLA_IMPORT_ERROR
+    if not _SPARSE_FLASH_MLA_IMPORT_ATTEMPTED:
+        _SPARSE_FLASH_MLA_IMPORT_ATTEMPTED = True
+        try:
+            importlib.import_module("cann_ops_transformer")
+        except Exception as exc:
+            _SPARSE_FLASH_MLA_IMPORT_ERROR = exc
+
+    for namespace in _SPARSE_FLASH_MLA_NAMESPACES:
+        try:
+            return getattr(getattr(torch.ops, namespace), op_name)
+        except AttributeError:
+            continue
+    detail = (
+        f" Importing cann_ops_transformer failed with: {_SPARSE_FLASH_MLA_IMPORT_ERROR}."
+        if _SPARSE_FLASH_MLA_IMPORT_ERROR is not None
+        else ""
+    )
+    raise RuntimeError(
+        f"Required Ascend custom op '{op_name}' is not registered. "
+        "Install it with --ops=sparse_flash_mla,sparse_flash_mla_metadata."
+        f"{detail}"
+    )
+
+
+def _is_non_quant_dsv4(vllm_config=None) -> bool:
+    return (
+        get_ascend_device_type() == AscendDeviceType.A5
+        and vllm_config is not None
+        and getattr(vllm_config, "quant_config", None) is None
+    )
+
+
+def _layout_kv_for_sparse_flash_mla(layout_kv: str | None) -> str | None:
+    return "PA_BBND" if layout_kv == "PA_ND" else layout_kv
+
+
+def _pa_nd_to_sparse_flash_mla_cache(cache):
+    if cache is None:
+        return None
+    if cache.dim() == 3:
+        return cache.unsqueeze(2)
+    return cache
+
+
+def _sparse_indices_to_sparse_flash_mla(indices):
+    if indices is None:
+        return None
+    if indices.dim() == 2:
+        return indices.unsqueeze(1)
+    return indices
+
+
+def _to_optional_int(value):
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if hasattr(value, "item"):
+        return int(value.item())
+    return int(value)
+
+
+def _get_cmp_lengths(seqused_ori_kv, cmp_ratio: int):
+    if seqused_ori_kv is None or cmp_ratio <= 1:
+        return None, None
+    seqused_cmp_kv = torch.div(seqused_ori_kv, cmp_ratio, rounding_mode="floor").to(torch.int32)
+    cmp_residual_kv = (seqused_ori_kv - seqused_cmp_kv * cmp_ratio).to(torch.int32)
+    return seqused_cmp_kv, cmp_residual_kv
+
+
+def _max_cmp_len(seqused_cmp_kv, max_seqlen_ori_kv, cmp_ratio: int):
+    if cmp_ratio <= 1:
+        return 0
+    if seqused_cmp_kv is not None:
+        return _to_optional_int(seqused_cmp_kv.max())
+    max_seqlen_ori_kv = _to_optional_int(max_seqlen_ori_kv)
+    return None if max_seqlen_ori_kv is None else max_seqlen_ori_kv // cmp_ratio
+
+
+def _sparse_flash_mla_metadata_from_dsa(**kwargs):
+    op = _get_sparse_flash_mla_custom_op(A5_DSA_SPARSE_FLASH_MLA_METADATA_OP)
+    cmp_ratio = kwargs.get("cmp_ratio", 1)
+    seqused_ori_kv = kwargs.get("seqused_ori_kv", kwargs.pop("seqused_kv", None))
+    seqused_cmp_kv = kwargs.get("seqused_cmp_kv")
+    cmp_residual_kv = kwargs.get("cmp_residual_kv")
+    if cmp_ratio > 1 and (seqused_cmp_kv is None or cmp_residual_kv is None):
+        seqused_cmp_kv, cmp_residual_kv = _get_cmp_lengths(seqused_ori_kv, cmp_ratio)
+
+    max_seqlen_ori_kv = kwargs.get("max_seqlen_ori_kv", kwargs.pop("max_seqlen_kv", None))
+    return op(
+        num_heads_q=kwargs["num_heads_q"],
+        num_heads_kv=kwargs["num_heads_kv"],
+        head_dim=kwargs["head_dim"],
+        cu_seqlens_q=kwargs.get("cu_seqlens_q"),
+        cu_seqlens_ori_kv=kwargs.get("cu_seqlens_ori_kv"),
+        cu_seqlens_cmp_kv=kwargs.get("cu_seqlens_cmp_kv"),
+        seqused_q=kwargs.get("seqused_q"),
+        seqused_ori_kv=seqused_ori_kv,
+        seqused_cmp_kv=seqused_cmp_kv,
+        cmp_residual_kv=cmp_residual_kv,
+        batch_size=kwargs.get("batch_size"),
+        max_seqlen_q=_to_optional_int(kwargs.get("max_seqlen_q")),
+        max_seqlen_ori_kv=_to_optional_int(max_seqlen_ori_kv),
+        max_seqlen_cmp_kv=_max_cmp_len(seqused_cmp_kv, max_seqlen_ori_kv, cmp_ratio),
+        ori_topk=kwargs.get("ori_topk", 0),
+        cmp_topk=kwargs.get("cmp_topk", 0),
+        cmp_ratio=cmp_ratio,
+        ori_mask_mode=kwargs.get("ori_mask_mode"),
+        cmp_mask_mode=kwargs.get("cmp_mask_mode", 0),
+        ori_win_left=kwargs.get("ori_win_left"),
+        ori_win_right=kwargs.get("ori_win_right"),
+        layout_q=kwargs.get("layout_q"),
+        layout_kv=_layout_kv_for_sparse_flash_mla(kwargs.get("layout_kv")),
+        has_ori_kv=kwargs.get("has_ori_kv"),
+        has_cmp_kv=kwargs.get("has_cmp_kv"),
+    )
+
+
+def _sparse_flash_mla_from_dsa(q, **kwargs):
+    op = _get_sparse_flash_mla_custom_op(A5_DSA_SPARSE_FLASH_MLA_OP)
+    cmp_ratio = kwargs.get("cmp_ratio", 1)
+    seqused_ori_kv = kwargs.get("seqused_ori_kv", kwargs.pop("seqused_kv", None))
+    seqused_cmp_kv = kwargs.get("seqused_cmp_kv")
+    cmp_residual_kv = kwargs.get("cmp_residual_kv")
+    if cmp_ratio > 1 and (seqused_cmp_kv is None or cmp_residual_kv is None):
+        seqused_cmp_kv, cmp_residual_kv = _get_cmp_lengths(seqused_ori_kv, cmp_ratio)
+
+    return op(
+        q,
+        ori_kv=_pa_nd_to_sparse_flash_mla_cache(kwargs.get("ori_kv")),
+        cmp_kv=_pa_nd_to_sparse_flash_mla_cache(kwargs.get("cmp_kv")),
+        ori_sparse_indices=_sparse_indices_to_sparse_flash_mla(kwargs.get("ori_sparse_indices")),
+        cmp_sparse_indices=_sparse_indices_to_sparse_flash_mla(kwargs.get("cmp_sparse_indices")),
+        ori_block_table=kwargs.get("ori_block_table"),
+        cmp_block_table=kwargs.get("cmp_block_table"),
+        cu_seqlens_q=kwargs.get("cu_seqlens_q"),
+        cu_seqlens_ori_kv=kwargs.get("cu_seqlens_ori_kv"),
+        cu_seqlens_cmp_kv=kwargs.get("cu_seqlens_cmp_kv"),
+        seqused_q=kwargs.get("seqused_q"),
+        seqused_ori_kv=seqused_ori_kv,
+        seqused_cmp_kv=seqused_cmp_kv,
+        cmp_residual_kv=cmp_residual_kv,
+        sinks=kwargs.get("sinks"),
+        metadata=kwargs.get("metadata"),
+        softmax_scale=kwargs.get("softmax_scale", 1.0),
+        cmp_ratio=cmp_ratio,
+        ori_mask_mode=kwargs.get("ori_mask_mode", 4),
+        cmp_mask_mode=kwargs.get("cmp_mask_mode", 3),
+        ori_win_left=kwargs.get("ori_win_left", 127),
+        ori_win_right=kwargs.get("ori_win_right", 0),
+        layout_q=kwargs.get("layout_q", "BSND"),
+        layout_kv=_layout_kv_for_sparse_flash_mla(kwargs.get("layout_kv", "BSND")),
+        topk_value_mode=1,
+        return_softmax_lse=kwargs.get("return_softmax_lse", False),
+    )
 
 
 class BaseDeviceAdaptor:
@@ -509,7 +678,7 @@ class BaseDeviceAdaptor:
         return torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
 
     @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
+    def get_dsa_sparse_attn_metadata_kwargs(device, vllm_config=None):
         """Returns kwargs for sparse attention metadata builder."""
         return {"device": str(device)}
 
@@ -531,7 +700,7 @@ class BaseDeviceAdaptor:
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping):
+    def dsa_kv_compress_scatter(cache, x, slot_mapping, *, quantized: bool = True, debug_label: str = "default"):
         """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
         torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
 
@@ -546,7 +715,9 @@ class BaseDeviceAdaptor:
         return q_quant, q_scale
 
     @staticmethod
-    def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
+    def indexer_quant_scatter(
+        q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping, debug_label: str = "default"
+    ):
         """Quantize q and scatter kv into indexer cache.
         Non-A5: int8 quant + 2x scatter_nd_update_v2 for k_cache and scale_cache."""
         q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.int8)
@@ -565,7 +736,9 @@ class BaseDeviceAdaptor:
         return q, q_scale, kv_out, kv_scale_out
 
     @staticmethod
-    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_full_cache, slot_mapping):
+    def indexer_quant_scatter_part1(
+        kv, indexer_k_cache, indexer_full_cache, slot_mapping, debug_label: str = "default"
+    ):
         """Part1 of multi-stream indexer scatter.
         Non-A5: quantize kv + scatter k_cache.
         Returns (kv_quant, kv_scale) for use in Part3, or (None, None) if kv is None."""
@@ -797,6 +970,62 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
+    @staticmethod
+    def _warning_every_500(event_key: str, message: str, *args) -> None:
+        _A5_DSA_WARN_COUNTS[event_key] += 1
+        warn_count = _A5_DSA_WARN_COUNTS[event_key]
+        if warn_count % 500 == 0:
+            logger.warning(message + " [occurrence=%d]", *args, warn_count)
+
+    @staticmethod
+    def _align_valid_slot_mapping(
+        slot_mapping: torch.Tensor,
+        source_rows: int,
+        cache_rows: int,
+        *,
+        op_name: str,
+        debug_label: str,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        slot_mapping_flat = slot_mapping.reshape(-1)
+        valid_mask = (slot_mapping_flat >= 0) & (slot_mapping_flat < cache_rows)
+        valid_indices = valid_mask.nonzero(as_tuple=True)[0]
+        if valid_indices.shape[0] != slot_mapping_flat.shape[0]:
+            A5DeviceAdaptor._warning_every_500(
+                f"{op_name}:filtered-invalid:{debug_label}",
+                "A5 %s filtered invalid slots [%s]: invalid=%d total=%d cache_rows=%d kv_rows=%d",
+                op_name,
+                debug_label,
+                slot_mapping_flat.shape[0] - valid_indices.shape[0],
+                slot_mapping_flat.shape[0],
+                cache_rows,
+                source_rows,
+            )
+        valid_slots = slot_mapping_flat.index_select(0, valid_indices)
+        if valid_slots.shape[0] == 0:
+            A5DeviceAdaptor._warning_every_500(
+                f"{op_name}:drop-all:{debug_label}",
+                "A5 %s dropped all rows [%s]: slot_rows=%d kv_rows=%d",
+                op_name,
+                debug_label,
+                slot_mapping_flat.shape[0],
+                source_rows,
+            )
+            return None, None
+        if source_rows == slot_mapping_flat.shape[0]:
+            return valid_slots, valid_indices
+        if source_rows == valid_slots.shape[0]:
+            return valid_slots, None
+        A5DeviceAdaptor._warning_every_500(
+            f"{op_name}:cannot-align:{debug_label}",
+            "A5 %s cannot align slot/source rows [%s]: slot_rows=%d valid_slot_rows=%d kv_rows=%d",
+            op_name,
+            debug_label,
+            slot_mapping_flat.shape[0],
+            valid_slots.shape[0],
+            source_rows,
+        )
+        raise RuntimeError(f"A5 {op_name} slot/source rows are inconsistent and cannot be aligned safely")
+
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
         torch_npu.npu_scatter_pa_kv_cache(
@@ -1154,19 +1383,27 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     # ===== Sparse Attention Metadata & Op Selectors =====
 
     @staticmethod
-    def get_dsa_sparse_attn_metadata_op():
+    def get_dsa_sparse_attn_metadata_op(vllm_config=None):
+        if _is_non_quant_dsv4(vllm_config):
+            return _sparse_flash_mla_metadata_from_dsa
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
 
     @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
+    def get_dsa_sparse_attn_metadata_kwargs(device, vllm_config=None):
+        if _is_non_quant_dsv4(vllm_config):
+            return {}
         return {"kv_quant_mode": 1}
 
     @staticmethod
-    def get_dsa_sparse_attn_op():
+    def get_dsa_sparse_attn_op(vllm_config=None):
+        if _is_non_quant_dsv4(vllm_config):
+            return _sparse_flash_mla_from_dsa
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
 
     @staticmethod
-    def get_dsa_sparse_attn_base_kwargs():
+    def get_dsa_sparse_attn_base_kwargs(vllm_config=None):
+        if _is_non_quant_dsv4(vllm_config):
+            return {}
         return {"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64}
 
     @staticmethod
@@ -1177,10 +1414,39 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping):
+    def dsa_kv_compress_scatter(cache, x, slot_mapping, *, quantized: bool = True, debug_label: str = "default"):
         """Scatter KV into cache with fused quantization+compression.
         A5: kv_compress_epilog handles quant/compress/scatter internally.
         Input x is unquantized bf16; cache shape is [..., head_dim]."""
+        if not quantized:
+            flat_cache = cache.view(-1, cache.shape[-2], cache.shape[-1])
+            try:
+                source = x.reshape(-1, flat_cache.shape[-2], flat_cache.shape[-1])
+            except RuntimeError as exc:
+                A5DeviceAdaptor._warning_every_500(
+                    f"DSA non-quant scatter:reshape-failed:{debug_label}",
+                    "A5 DSA non-quant scatter source reshape failed [%s]: x_shape=%s cache_slice_shape=(%d,%d)",
+                    debug_label,
+                    tuple(x.shape),
+                    flat_cache.shape[-2],
+                    flat_cache.shape[-1],
+                )
+                raise RuntimeError(
+                    "A5 DSA non-quant scatter cannot reshape source to cache slice shape"
+                ) from exc
+            slot_mapping_aligned, source_indices = A5DeviceAdaptor._align_valid_slot_mapping(
+                slot_mapping,
+                source.shape[0],
+                flat_cache.shape[0],
+                op_name="DSA non-quant scatter",
+                debug_label=debug_label,
+            )
+            if slot_mapping_aligned is None:
+                return
+            if source_indices is not None:
+                source = source.index_select(0, source_indices)
+            flat_cache.index_copy_(0, slot_mapping_aligned.to(torch.int64), source)
+            return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
             x=x.view(-1, x.shape[-1]),
@@ -1200,7 +1466,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return q_quant, q_scale
 
     @staticmethod
-    def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
+    def indexer_quant_scatter(
+        q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping, debug_label: str = "default"
+    ):
         """Quantize q (fp8) and scatter kv via fused indexer_compress_epilog_v2.
         On A5, the fused op handles kv quantization, k_cache scatter, and
         scale_cache scatter internally. q is quantized separately for use
@@ -1210,29 +1478,55 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         kv_out = kv
         kv_scale_out = None
         if kv is not None:
+            kv_for_scatter = kv
+            cache_rows = indexer_full_cache.view(-1, 1, indexer_full_cache.shape[-1]).shape[0]
+            slot_mapping_aligned, source_indices = A5DeviceAdaptor._align_valid_slot_mapping(
+                slot_mapping,
+                kv.shape[0],
+                cache_rows,
+                op_name="indexer fused scatter",
+                debug_label=debug_label,
+            )
+            if slot_mapping_aligned is None:
+                return q, q_scale, kv_out, kv_scale_out
+            if source_indices is not None:
+                kv_for_scatter = kv_for_scatter.index_select(0, source_indices)
             torch.ops._C_ascend.indexer_compress_epilog_v2(
                 indexer_compress_cache=indexer_full_cache.view(torch.uint8),
-                x=kv,
-                slot_mapping=slot_mapping,
+                x=kv_for_scatter,
+                slot_mapping=slot_mapping_aligned.to(slot_mapping.dtype),
                 layout=2,
             )
 
         return q, q_scale, kv_out, kv_scale_out
 
     @staticmethod
-    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_full_cache, slot_mapping):
+    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_full_cache, slot_mapping, debug_label: str = "default"):
         """Part1 of multi-stream indexer scatter.
         A5: fused indexer_compress_epilog_v2 handles both k_cache and scale_cache.
         Returns (kv, None) to signal Part3 is a no-op."""
         if kv is None:
             return None, None
+        kv_for_scatter = kv
+        cache_rows = indexer_full_cache.view(-1, 1, indexer_full_cache.shape[-1]).shape[0]
+        slot_mapping_aligned, source_indices = A5DeviceAdaptor._align_valid_slot_mapping(
+            slot_mapping,
+            kv.shape[0],
+            cache_rows,
+            op_name="indexer fused scatter part1",
+            debug_label=debug_label,
+        )
+        if slot_mapping_aligned is None:
+            return None, None
+        if source_indices is not None:
+            kv_for_scatter = kv_for_scatter.index_select(0, source_indices)
         torch.ops._C_ascend.indexer_compress_epilog_v2(
             indexer_compress_cache=indexer_full_cache.view(torch.uint8),
-            x=kv,
-            slot_mapping=slot_mapping,
+            x=kv_for_scatter,
+            slot_mapping=slot_mapping_aligned.to(slot_mapping.dtype),
             layout=2,
         )
-        return kv, None
+        return kv_for_scatter, None
 
     @staticmethod
     def dsa_indexer_scatter_scale_part3(kv_scale, indexer_scale_cache, slot_mapping):

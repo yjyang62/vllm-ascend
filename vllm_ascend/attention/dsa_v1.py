@@ -1,4 +1,7 @@
+import atexit
+import logging
 import math
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
@@ -14,6 +17,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -50,6 +54,47 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 _DSV4_DSA_OVERLAP_STREAM = None
+logger = logging.getLogger(__name__)
+_DSA_DEBUG_DEFERRED_ACCUM: dict[str, tuple[str, int, torch.Tensor, torch.Tensor]] = {}
+_DSA_DEBUG_DEFERRED_SEEN: set[str] = set()
+
+
+def _dsa_debug_layer_sort_key(key: str) -> tuple[int, str]:
+    match = re.search(r"\.layers\.(\d+)\.", key)
+    return (int(match.group(1)), key) if match else (10**9, key)
+
+
+def _dsa_debug_accumulate_output_stats(stage: str, layer_name: str, compress_ratio: int, output: torch.Tensor) -> None:
+    """Deferred, non-masking output diagnostics for DSA.
+
+    Collect NaN/Inf/abs-max on-device and defer all .item() host reads until
+    a full step boundary (detected by repeated (stage, layer) key).
+    """
+    key = f"{stage}:{layer_name}"
+    if key in _DSA_DEBUG_DEFERRED_SEEN:
+        _dsa_debug_flush_deferred()
+    _DSA_DEBUG_DEFERRED_SEEN.add(key)
+    out = output.detach()
+    bad = torch.logical_or(torch.isnan(out).any(), torch.isinf(out).any())
+    abs_max = out.float().abs().amax()
+    _DSA_DEBUG_DEFERRED_ACCUM[key] = (stage, compress_ratio, bad, abs_max)
+
+
+def _dsa_debug_flush_deferred() -> None:
+    for key in sorted(_DSA_DEBUG_DEFERRED_ACCUM, key=_dsa_debug_layer_sort_key):
+        _, compress_ratio, bad, abs_max = _DSA_DEBUG_DEFERRED_ACCUM[key]
+        logger.info(
+            "[DSA_DEBUG_DEFERRED] %s compress_ratio=%s bad=%s abs_max=%.4g",
+            key,
+            compress_ratio,
+            bool(bad.item()),
+            abs_max.item(),
+        )
+    _DSA_DEBUG_DEFERRED_ACCUM.clear()
+    _DSA_DEBUG_DEFERRED_SEEN.clear()
+
+
+atexit.register(_dsa_debug_flush_deferred)
 
 
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
@@ -735,8 +780,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_c4_cmp_seqlen_list = None
         cu_c128_cmp_seqlen_list = None
 
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.vllm_config)
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device, self.vllm_config)
         if self.compressor_ratio <= 1:
             if self.prefill_ratio_to_sas_metadata.get(layer_name) is None:
                 self.prefill_ratio_to_sas_metadata[layer_name] = metadata_op(
@@ -963,8 +1008,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self._zero_i32,
             self.cu_seqlens_ori_kv,
         )
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.vllm_config)
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device, self.vllm_config)
         cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         if self.compressor_ratio <= 1:
             if self.decode_ratio_to_sas_metadata.get(layer_name) is None:
@@ -1117,8 +1162,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True, draft_index=draft_index)
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(  # type: ignore[index]
-            slot_mapping, self.block_size
+        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = (  # type: ignore[index]
+            DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
         )
 
         prefill_metadata = None
@@ -1183,11 +1228,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         prefill_input_positions = input_positions[tokens_start:]
         cos, sin = get_cos_and_sin_dsa(prefill_input_positions)
 
-        prefill_slot_mapping = self.spec_slot_mapping[draft_index - 1][tokens_start:num_prefill_tokens]  # type: ignore[index]
+        prefill_slot_mapping = self.spec_slot_mapping[draft_index - 1][  # type: ignore[index]
+            tokens_start:num_prefill_tokens
+        ]
         block_table = common_attn_metadata.block_table_tensor[: common_attn_metadata.num_reqs]
 
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.vllm_config)
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device, self.vllm_config)
         sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=n_local_heads,
@@ -1266,8 +1313,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = self.spec_slot_mapping[draft_index - 1][:num_decode_tokens_typed]  # type: ignore[index]
         block_table = common_attn_metadata.block_table_tensor
 
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.vllm_config)
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device, self.vllm_config)
 
         decode_sas_metadata = metadata_op(
             **metadata_kwargs,
@@ -1356,6 +1403,41 @@ class AscendDSAImpl(DSAAttentionImpl):
     understand this class
     """
 
+    @staticmethod
+    def _log_compressor_scatter_stats(
+        stage: str, compressed_kv: torch.Tensor, slot_mapping: torch.Tensor, cache: torch.Tensor
+    ) -> None:
+        slot_rows = slot_mapping.reshape(-1).shape[0]
+        kv_rows = compressed_kv.shape[0]
+        cache_rows = cache.view(-1, cache.shape[-2], cache.shape[-1]).shape[0]
+        if slot_rows != kv_rows or slot_rows > cache_rows:
+            logger.warning(
+                "DSA compressor scatter shape mismatch at %s: slot_rows=%d kv_rows=%d cache_rows=%d",
+                stage,
+                slot_rows,
+                kv_rows,
+                cache_rows,
+            )
+            return
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "DSA compressor scatter stats at %s: slot_rows=%d kv_rows=%d cache_rows=%d",
+                stage,
+                slot_rows,
+                kv_rows,
+                cache_rows,
+            )
+
+    @staticmethod
+    def _decode_has_compressed_rows(start_pos: torch.Tensor, query_start_loc: torch.Tensor, compress_ratio: int) -> bool:
+        if compress_ratio <= 1:
+            return True
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        compressed_rows = torch.div(start_pos + query_lens, compress_ratio, rounding_mode="floor") - torch.div(
+            start_pos, compress_ratio, rounding_mode="floor"
+        )
+        return bool((compressed_rows > 0).any().item())
+
     def __init__(
         self,
         n_heads: int,
@@ -1412,6 +1494,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
         self.vllm_config = get_current_vllm_config()
+        self.use_quantized_dsa_cache = not (
+            get_ascend_device_type() == AscendDeviceType.A5 and self.vllm_config.quant_config is None
+        )
 
         # indexer param
         if self.indexer is not None:
@@ -1451,6 +1536,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         # be kept fresh on non-skip layers so downstream skip layers can read.
         self.skip_topk = kwargs.get("skip_topk", False)
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
+        self._decode_invalid_compress_bypass_warned = False
+        self._force_swa_only_warned = False
         self.use_index_cache = self.skip_topk or getattr(
             self.vllm_config.model_config.hf_config,
             "use_index_cache",
@@ -1546,14 +1633,21 @@ class AscendDSAImpl(DSAAttentionImpl):
             x = x_rot.reshape(1, num_tokens, -1, rotary_dim)
         return x
 
+    def _wo_a_weight_for_transpose_batchmatmul(self) -> torch.Tensor:
+        weight = self.wo_a.weight
+        if weight.ndim == 3:
+            return weight
+        return (
+            weight.view(self.n_local_groups, self.o_lora_rank, -1).transpose(1, 2).contiguous()
+        )
+
     def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
         num_tokens = o_proj_input.shape[0]
         group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
         o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
-        # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
-        # + quantized batch matmul). Preserve it as-is: it predates and is
-        # orthogonal to the OTP / olora_tp paths below, so it must win first.
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        # A5 quantized weights use an FP8 o_proj path. Non-quant bf16 weights
+        # do not have weight_scale, so they must use the regular linear path.
+        if self.use_quantized_dsa_cache:
             o = o_proj_input
             o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
             o = torch_npu.npu_transpose_quant_batchmatmul(
@@ -1614,7 +1708,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             o_proj_input = recv.view(oproj_tp_size * exchange_num_tokens, groups_per_rank, group_hidden_dim)
             o_proj_input = torch_npu.npu_transpose_batchmatmul(
                 o_proj_input,
-                self.wo_a.weight,
+                self._wo_a_weight_for_transpose_batchmatmul(),
                 bias=None,
                 scale=None,
                 perm_x1=(1, 0, 2),
@@ -1643,7 +1737,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             o_proj_input = torch_npu.npu_transpose_batchmatmul(
                 o_proj_input,
-                self.wo_a.weight,
+                self._wo_a_weight_for_transpose_batchmatmul(),
                 bias=None,
                 scale=None,
                 perm_x1=(1, 0, 2),
@@ -1700,6 +1794,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kv_cache,
                 attn_metadata,
             )  # type: ignore[arg-type]
+            if envs_ascend.VLLM_ASCEND_DSA_DEBUG_DEFERRED:
+                _dsa_debug_accumulate_output_stats("raw_attn_prefill", layer_name, self.compress_ratio, output_prefill)
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
             cos = attn_metadata[0].prefill.cos[layer_name]
             sin = attn_metadata[0].prefill.sin[layer_name]
@@ -1707,6 +1803,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         if has_decode:
             assert attn_metadata[0].decode is not None
             output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
+            if envs_ascend.VLLM_ASCEND_DSA_DEBUG_DEFERRED:
+                _dsa_debug_accumulate_output_stats("raw_attn_decode", layer_name, self.compress_ratio, output_decode)
             o_proj_input[:decode_tokens] = output_decode
             cos = attn_metadata[0].decode.cos[layer_name]
             sin = attn_metadata[0].decode.sin[layer_name]
@@ -1724,6 +1822,8 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         # o
         self._forward_o_proj(o_proj_input, output)
+        if envs_ascend.VLLM_ASCEND_DSA_DEBUG_DEFERRED:
+            _dsa_debug_accumulate_output_stats("final_o_proj", layer_name, self.compress_ratio, output)
 
         return output_padded
 
@@ -1794,7 +1894,13 @@ class AscendDSAImpl(DSAAttentionImpl):
                 rotary_mode="interleave",
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
-            DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
+            DeviceOperator.dsa_kv_compress_scatter(
+                swa_kv_cache,
+                kv,
+                slot_mapping,
+                quantized=self.use_quantized_dsa_cache,
+                debug_label=f"mla-prolog-{'prefill' if is_prefill else 'decode'}-swa",
+            )
 
         if is_prefill:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
@@ -1857,6 +1963,13 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = common_prefill_metadata.sin[layer_name]
         actual_seq_lengths_query = common_prefill_metadata.query_start_loc
         actual_seq_lengths_key = common_prefill_metadata.seq_lens
+        force_swa_only = envs_ascend.VLLM_ASCEND_DSA_DEBUG_FORCE_SWA_ONLY
+        if force_swa_only and not self._force_swa_only_warned:
+            logger.warning(
+                "DSA debug force SWA-only enabled: bypass prefill/decode compress-indexer paths (layer=%s)",
+                layer_name,
+            )
+            self._force_swa_only_warned = True
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
@@ -1930,13 +2043,19 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
 
             # swa exec kv
-            DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_prefill_metadata.slot_mapping)
+            DeviceOperator.dsa_kv_compress_scatter(
+                swa_kv_cache,
+                kv,
+                swa_prefill_metadata.slot_mapping,
+                quantized=self.use_quantized_dsa_cache,
+                debug_label=f"{layer_name}-prefill-swa",
+            )
 
-        attn_op = DeviceOperator.get_dsa_sparse_attn_op()
-        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
+        attn_op = DeviceOperator.get_dsa_sparse_attn_op(self.vllm_config)
+        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs(self.vllm_config)
         DeviceOperator.add_dsa_sparse_attn_extra_kwargs(extra_attn_kwargs, cu_seqlens_ori_kv=actual_seq_lengths_query)
 
-        if self.compress_ratio <= 1:
+        if self.compress_ratio <= 1 or force_swa_only:
             return attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -1955,7 +2074,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 **extra_attn_kwargs,
             )[0]
 
-        if self.compress_ratio > 1:
+        if self.compress_ratio > 1 and not force_swa_only:
             compressor_prefill_metadata = _require_prefill_metadata(compressor_attn_metadata)
             compressor_state_prefill_metadata = _require_prefill_metadata(compressor_kv_state_metadata)
             compress_topk_idxs = None
@@ -2036,8 +2155,20 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # A zero-row compressor output has no KV writes. Skip scatter
             # instead of passing None; A5 scatter dereferences x.view().
+            self._log_compressor_scatter_stats(
+                "prefill",
+                compressed_kv,
+                compress_slot_mapping,
+                compress_kv_cache,
+            )
             if compressed_kv.shape[0] > 0:
-                DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+                DeviceOperator.dsa_kv_compress_scatter(
+                    compress_kv_cache,
+                    compressed_kv,
+                    compress_slot_mapping,
+                    quantized=self.use_quantized_dsa_cache,
+                    debug_label=f"{layer_name}-prefill-compress",
+                )
 
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
                 # Wait aux_stream weights_proj done, then compute dot
@@ -2159,6 +2290,34 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = common_decode_metadata.sin[layer_name]
         actual_seq_lengths_query = common_decode_metadata.query_start_loc
         actual_seq_lengths_key = common_decode_metadata.seq_lens
+        force_swa_only = envs_ascend.VLLM_ASCEND_DSA_DEBUG_FORCE_SWA_ONLY
+        if force_swa_only and not self._force_swa_only_warned:
+            logger.warning(
+                "DSA debug force SWA-only enabled: bypass prefill/decode compress-indexer paths (layer=%s)",
+                layer_name,
+            )
+            self._force_swa_only_warned = True
+        decode_force_swa_only = force_swa_only or (
+            self.compress_ratio > 1
+            and envs_ascend.VLLM_ASCEND_DSA_DEBUG_DECODE_BYPASS_ON_INVALID_COMPRESS
+            and not self._decode_has_compressed_rows(
+                common_decode_metadata.start_pos,
+                actual_seq_lengths_query,
+                self.compress_ratio,
+            )
+        )
+        if (
+            decode_force_swa_only
+            and not force_swa_only
+            and not self._decode_invalid_compress_bypass_warned
+        ):
+            logger.warning(
+                "DSA decode debug bypass enabled: skip decode compress/indexer when no compressed rows "
+                "would be produced (layer=%s, compress_ratio=%d)",
+                layer_name,
+                self.compress_ratio,
+            )
+            self._decode_invalid_compress_bypass_warned = True
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
@@ -2247,9 +2406,15 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
 
             # swa exec kv
-            DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_decode_metadata.slot_mapping)
+            DeviceOperator.dsa_kv_compress_scatter(
+                swa_kv_cache,
+                kv,
+                swa_decode_metadata.slot_mapping,
+                quantized=self.use_quantized_dsa_cache,
+                debug_label=f"{layer_name}-decode-swa",
+            )
 
-        if self.compress_ratio > 1:
+        if self.compress_ratio > 1 and not decode_force_swa_only:
             compressor_decode_metadata = _require_decode_metadata(compressor_attn_metadata)
             compressor_state_decode_metadata = _require_decode_metadata(compressor_kv_state_metadata)
             compress_topk_idxs = None
@@ -2327,8 +2492,20 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # A zero-row compressor output has no KV writes. Skip scatter
             # instead of passing None; A5 scatter dereferences x.view().
+            self._log_compressor_scatter_stats(
+                "decode",
+                compressed_kv,
+                compress_slot_mapping,
+                compress_kv_cache,
+            )
             if compressed_kv.shape[0] > 0:
-                DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+                DeviceOperator.dsa_kv_compress_scatter(
+                    compress_kv_cache,
+                    compressed_kv,
+                    compress_slot_mapping,
+                    quantized=self.use_quantized_dsa_cache,
+                    debug_label=f"{layer_name}-decode-compress",
+                )
 
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
                 # Wait aux_stream weights_proj done
@@ -2365,10 +2542,10 @@ class AscendDSAImpl(DSAAttentionImpl):
             if self.compress_ratio == 4 and self.use_index_cache:
                 self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
 
-        attn_op = DeviceOperator.get_dsa_sparse_attn_op()
-        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
+        attn_op = DeviceOperator.get_dsa_sparse_attn_op(self.vllm_config)
+        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs(self.vllm_config)
 
-        if self.compress_ratio <= 1:
+        if self.compress_ratio <= 1 or decode_force_swa_only:
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -2557,6 +2734,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             indexer_scale_cache,
             indexer_full_cache,
             indexer_slot_mapping,
+            debug_label=f"indexer-{'prefill' if with_prefill else 'decode'}",
         )
         return self._indexer_qli(
             q,
@@ -2576,9 +2754,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         indexer_scale_cache: torch.Tensor,
         indexer_full_cache: torch.Tensor | None,
         slot_mapping: torch.Tensor,
+        debug_label: str = "default",
     ):
         return DeviceOperator.indexer_quant_scatter(
-            q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping
+            q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping, debug_label=debug_label
         )
 
     def _indexer_qli(
@@ -2760,7 +2939,11 @@ class AscendDSAImpl(DSAAttentionImpl):
             with npu_stream_switch(aux_stream, enabled=True):
                 torch.npu.current_stream().wait_event(e_kv_ready)
                 kv, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
-                    kv, indexer_k_cache, indexer_full_cache, slot_mapping_indexer
+                    kv,
+                    indexer_k_cache,
+                    indexer_full_cache,
+                    slot_mapping_indexer,
+                    debug_label=f"indexer-multistream-{'prefill' if with_prefill else 'decode'}",
                 )
 
         # Main: matmul q from qr (directly submit, V/C different engines dispatch naturally)

@@ -98,6 +98,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         self.layer_name = prefix
         self.head_size = self.head_dim
         self.swa_cache_layer: DeepseekV4SWACache = extra_impl_args.get("swa_cache_layer")
+        self.use_quantized_a5_cache = get_ascend_device_type() in {AscendDeviceType.A5} and quant_config is not None
 
         assert self.swa_cache_layer is not None
 
@@ -176,13 +177,11 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if self.use_quantized_a5_cache:
             kv_cache_dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
-        cached_head_size = (
-            (self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
-        )
+        cached_head_size = self.head_size + 128 if self.use_quantized_a5_cache else self.head_size
         return AscendMLAAttentionSpec(
             block_size=DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0],
             num_kv_heads=1,

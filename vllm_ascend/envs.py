@@ -110,6 +110,24 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Debug-only switch for DSA decode path:
+    # 0 (default): keep normal decode-compress path.
+    # 1: if a decode step would produce zero compressed rows, bypass decode
+    # compress/indexer and run SWA-only attention for that step.
+    "VLLM_ASCEND_DSA_DEBUG_DECODE_BYPASS_ON_INVALID_COMPRESS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DSA_DEBUG_DECODE_BYPASS_ON_INVALID_COMPRESS", "0"))
+    ),
+    # Debug-only switch for DSA: force SWA-only attention by bypassing
+    # compress/indexer updates in both prefill and decode paths.
+    # 0 (default): keep normal DSA behavior.
+    # 1: bypass compress/indexer and use SWA-only attention.
+    "VLLM_ASCEND_DSA_DEBUG_FORCE_SWA_ONLY": lambda: bool(int(os.getenv("VLLM_ASCEND_DSA_DEBUG_FORCE_SWA_ONLY", "0"))),
+    # Non-masking DSA diagnostic switch. Unlike immediate per-layer logging
+    # that can force device sync and perturb timing, this mode accumulates
+    # per-layer checks on-device and flushes once per full step.
+    # 0 (default): disabled.
+    # 1: enable deferred DSA diagnostics.
+    "VLLM_ASCEND_DSA_DEBUG_DEFERRED": lambda: bool(int(os.getenv("VLLM_ASCEND_DSA_DEBUG_DEFERRED", "0"))),
 }
 
 # end-env-vars-definition
