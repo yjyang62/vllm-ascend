@@ -15,6 +15,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -1385,6 +1386,16 @@ class AscendDSAImpl(DSAAttentionImpl):
                 cache_rows,
             )
 
+    @staticmethod
+    def _decode_has_compressed_rows(start_pos: torch.Tensor, query_start_loc: torch.Tensor, compress_ratio: int) -> bool:
+        if compress_ratio <= 1:
+            return True
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        compressed_rows = torch.div(start_pos + query_lens, compress_ratio, rounding_mode="floor") - torch.div(
+            start_pos, compress_ratio, rounding_mode="floor"
+        )
+        return bool((compressed_rows > 0).any().item())
+
     def __init__(
         self,
         n_heads: int,
@@ -1483,6 +1494,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         # be kept fresh on non-skip layers so downstream skip layers can read.
         self.skip_topk = kwargs.get("skip_topk", False)
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
+        self._decode_invalid_compress_bypass_warned = False
         self.use_index_cache = self.skip_topk or getattr(
             self.vllm_config.model_config.hf_config,
             "use_index_cache",
@@ -2222,6 +2234,23 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin = common_decode_metadata.sin[layer_name]
         actual_seq_lengths_query = common_decode_metadata.query_start_loc
         actual_seq_lengths_key = common_decode_metadata.seq_lens
+        decode_force_swa_only = (
+            self.compress_ratio > 1
+            and envs_ascend.VLLM_ASCEND_DSA_DEBUG_DECODE_BYPASS_ON_INVALID_COMPRESS
+            and not self._decode_has_compressed_rows(
+                common_decode_metadata.start_pos,
+                actual_seq_lengths_query,
+                self.compress_ratio,
+            )
+        )
+        if decode_force_swa_only and not self._decode_invalid_compress_bypass_warned:
+            logger.warning(
+                "DSA decode debug bypass enabled: skip decode compress/indexer when no compressed rows "
+                "would be produced (layer=%s, compress_ratio=%d)",
+                layer_name,
+                self.compress_ratio,
+            )
+            self._decode_invalid_compress_bypass_warned = True
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
@@ -2318,7 +2347,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 debug_label=f"{layer_name}-decode-swa",
             )
 
-        if self.compress_ratio > 1:
+        if self.compress_ratio > 1 and not decode_force_swa_only:
             compressor_decode_metadata = _require_decode_metadata(compressor_attn_metadata)
             compressor_state_decode_metadata = _require_decode_metadata(compressor_kv_state_metadata)
             compress_topk_idxs = None
@@ -2449,7 +2478,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         attn_op = DeviceOperator.get_dsa_sparse_attn_op(self.vllm_config)
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs(self.vllm_config)
 
-        if self.compress_ratio <= 1:
+        if self.compress_ratio <= 1 or decode_force_swa_only:
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
