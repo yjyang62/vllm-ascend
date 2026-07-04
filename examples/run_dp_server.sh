@@ -10,6 +10,17 @@ export OMP_NUM_THREADS=10
 export VLLM_USE_MODELSCOPE=True
 
 export ASCEND_LAUNCH_BLOCKING=0
+export TORCH_EXTENSIONS_DIR=/mnt/share/torch_extensions
+
+# Optional but recommended:
+# Prebuild and persist JIT extensions (e.g. npu_mega_moe.so) before production serve.
+# This avoids on-the-fly compilation in the real serving startup path.
+# bash tools/prebuild_moe_runtime.sh \
+#   --model Qwen/Qwen1.5-MoE-A2.7B \
+#   --served-model-name Qwen \
+#   --port 18008 \
+#   --tensor-parallel-size 4 \
+#   --data-parallel-size 2
 
 vllm serve Qwen/Qwen1.5-MoE-A2.7B  \
   --host 0.0.0.0 \

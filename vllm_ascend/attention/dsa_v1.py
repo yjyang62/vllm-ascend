@@ -57,6 +57,7 @@ _DSV4_DSA_OVERLAP_STREAM = None
 logger = logging.getLogger(__name__)
 _DSA_DEBUG_DEFERRED_ACCUM: dict[str, tuple[str, int, torch.Tensor, torch.Tensor]] = {}
 _DSA_DEBUG_DEFERRED_SEEN: set[str] = set()
+_DSA_DEBUG_SYNC_BOUNDARY_SEEN: set[str] = set()
 
 
 def _dsa_debug_layer_sort_key(key: str) -> tuple[int, str]:
@@ -92,6 +93,20 @@ def _dsa_debug_flush_deferred() -> None:
         )
     _DSA_DEBUG_DEFERRED_ACCUM.clear()
     _DSA_DEBUG_DEFERRED_SEEN.clear()
+
+
+def _dsa_debug_sync_boundary(stage: str, layer_name: str) -> None:
+    if not envs_ascend.VLLM_ASCEND_DSA_DEBUG_SYNC_BOUNDARY:
+        return
+    torch.npu.synchronize()
+    key = f"{stage}:{layer_name}"
+    if key not in _DSA_DEBUG_SYNC_BOUNDARY_SEEN:
+        _DSA_DEBUG_SYNC_BOUNDARY_SEEN.add(key)
+        logger.warning(
+            "DSA debug sync boundary enabled: stage=%s layer=%s",
+            stage,
+            layer_name,
+        )
 
 
 atexit.register(_dsa_debug_flush_deferred)
@@ -1796,6 +1811,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             )  # type: ignore[arg-type]
             if envs_ascend.VLLM_ASCEND_DSA_DEBUG_DEFERRED:
                 _dsa_debug_accumulate_output_stats("raw_attn_prefill", layer_name, self.compress_ratio, output_prefill)
+            _dsa_debug_sync_boundary("raw_attn_prefill", layer_name)
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
             cos = attn_metadata[0].prefill.cos[layer_name]
             sin = attn_metadata[0].prefill.sin[layer_name]
@@ -1805,6 +1821,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
             if envs_ascend.VLLM_ASCEND_DSA_DEBUG_DEFERRED:
                 _dsa_debug_accumulate_output_stats("raw_attn_decode", layer_name, self.compress_ratio, output_decode)
+            _dsa_debug_sync_boundary("raw_attn_decode", layer_name)
             o_proj_input[:decode_tokens] = output_decode
             cos = attn_metadata[0].decode.cos[layer_name]
             sin = attn_metadata[0].decode.sin[layer_name]
@@ -1824,6 +1841,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         self._forward_o_proj(o_proj_input, output)
         if envs_ascend.VLLM_ASCEND_DSA_DEBUG_DEFERRED:
             _dsa_debug_accumulate_output_stats("final_o_proj", layer_name, self.compress_ratio, output)
+        _dsa_debug_sync_boundary("final_o_proj", layer_name)
 
         return output_padded
 
