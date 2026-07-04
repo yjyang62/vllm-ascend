@@ -36,7 +36,8 @@ Notes:
 ```bash
 export TORCH_EXTENSIONS_DIR=/mnt/share/torch_extensions
 
-vllm serve /mnt/share/weight/DeepSeek-V4-Flash-BF16 \
+bash tools/serve_no_jit_moe.sh -- \
+  /mnt/share/weight/DeepSeek-V4-Flash-BF16 \
   --host 0.0.0.0 \
   --max_model_len 32768 \
   --served-model-name auto \
@@ -51,6 +52,10 @@ vllm serve /mnt/share/weight/DeepSeek-V4-Flash-BF16 \
   --async-scheduling \
   --enforce-eager
 ```
+
+`tools/serve_no_jit_moe.sh` performs a hard precheck for `npu_mega_moe.so` in
+`TORCH_EXTENSIONS_DIR`. If artifact is missing, it fails fast instead of
+allowing on-the-fly compilation.
 
 ## Why compile can still happen
 
