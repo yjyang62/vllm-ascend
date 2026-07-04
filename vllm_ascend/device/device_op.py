@@ -975,7 +975,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         _A5_DSA_WARN_COUNTS[event_key] += 1
         warn_count = _A5_DSA_WARN_COUNTS[event_key]
         if warn_count % 500 == 0:
-            logger.warning("%s [occurrence=%d]", message, *args, warn_count)
+            logger.warning(message + " [occurrence=%d]", *args, warn_count)
 
     @staticmethod
     def _align_valid_slot_mapping(
