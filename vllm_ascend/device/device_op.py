@@ -977,7 +977,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         op_name: str,
         debug_label: str,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        slot_mapping_flat = slot_mapping.reshape(-1).to(torch.int64)
+        slot_mapping_flat = slot_mapping.reshape(-1)
         valid_mask = (slot_mapping_flat >= 0) & (slot_mapping_flat < cache_rows)
         valid_indices = valid_mask.nonzero(as_tuple=True)[0]
         if valid_indices.shape[0] != slot_mapping_flat.shape[0]:
@@ -1432,7 +1432,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 return
             if source_indices is not None:
                 source = source.index_select(0, source_indices)
-            flat_cache.index_copy_(0, slot_mapping_aligned, source)
+            flat_cache.index_copy_(0, slot_mapping_aligned.to(torch.int64), source)
             return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
@@ -1465,11 +1465,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         kv_out = kv
         kv_scale_out = None
         if kv is not None:
-            kv_for_scatter = kv.reshape(-1, kv.shape[-1])
+            kv_for_scatter = kv
             cache_rows = indexer_full_cache.view(-1, 1, indexer_full_cache.shape[-1]).shape[0]
             slot_mapping_aligned, source_indices = A5DeviceAdaptor._align_valid_slot_mapping(
                 slot_mapping,
-                kv_for_scatter.shape[0],
+                kv.shape[0],
                 cache_rows,
                 op_name="indexer fused scatter",
                 debug_label=debug_label,
@@ -1481,7 +1481,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             torch.ops._C_ascend.indexer_compress_epilog_v2(
                 indexer_compress_cache=indexer_full_cache.view(torch.uint8),
                 x=kv_for_scatter,
-                slot_mapping=slot_mapping_aligned,
+                slot_mapping=slot_mapping_aligned.to(slot_mapping.dtype),
                 layout=2,
             )
 
@@ -1494,11 +1494,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         Returns (kv, None) to signal Part3 is a no-op."""
         if kv is None:
             return None, None
-        kv_for_scatter = kv.reshape(-1, kv.shape[-1])
+        kv_for_scatter = kv
         cache_rows = indexer_full_cache.view(-1, 1, indexer_full_cache.shape[-1]).shape[0]
         slot_mapping_aligned, source_indices = A5DeviceAdaptor._align_valid_slot_mapping(
             slot_mapping,
-            kv_for_scatter.shape[0],
+            kv.shape[0],
             cache_rows,
             op_name="indexer fused scatter part1",
             debug_label=debug_label,
@@ -1510,7 +1510,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         torch.ops._C_ascend.indexer_compress_epilog_v2(
             indexer_compress_cache=indexer_full_cache.view(torch.uint8),
             x=kv_for_scatter,
-            slot_mapping=slot_mapping_aligned,
+            slot_mapping=slot_mapping_aligned.to(slot_mapping.dtype),
             layout=2,
         )
         return kv_for_scatter, None
