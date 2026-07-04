@@ -41,7 +41,7 @@ DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 A5_DSA_SPARSE_FLASH_MLA_OP = "sparse_flash_mla"
 A5_DSA_SPARSE_FLASH_MLA_METADATA_OP = "sparse_flash_mla_metadata"
 logger = logging.getLogger(__name__)
-_A5_DECODE_COMPRESS_INVALID_SLOT_WARN_COUNTS: dict[str, int] = defaultdict(int)
+_A5_DSA_WARN_COUNTS: dict[str, int] = defaultdict(int)
 _SPARSE_FLASH_MLA_NAMESPACES = ("cann_ops_transformer", "_C_ascend")
 _SPARSE_FLASH_MLA_IMPORT_ATTEMPTED = False
 _SPARSE_FLASH_MLA_IMPORT_ERROR: Exception | None = None
@@ -971,6 +971,13 @@ class BaseDeviceAdaptor:
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
+    def _warning_every_500(event_key: str, message: str, *args) -> None:
+        _A5_DSA_WARN_COUNTS[event_key] += 1
+        warn_count = _A5_DSA_WARN_COUNTS[event_key]
+        if warn_count % 500 == 0:
+            logger.warning("%s [occurrence=%d]", message, *args, warn_count)
+
+    @staticmethod
     def _align_valid_slot_mapping(
         slot_mapping: torch.Tensor,
         source_rows: int,
@@ -983,33 +990,20 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         valid_mask = (slot_mapping_flat >= 0) & (slot_mapping_flat < cache_rows)
         valid_indices = valid_mask.nonzero(as_tuple=True)[0]
         if valid_indices.shape[0] != slot_mapping_flat.shape[0]:
-            if op_name == "DSA non-quant scatter" and "attn-decode-compress" in debug_label:
-                _A5_DECODE_COMPRESS_INVALID_SLOT_WARN_COUNTS[debug_label] += 1
-                warn_count = _A5_DECODE_COMPRESS_INVALID_SLOT_WARN_COUNTS[debug_label]
-                if warn_count % 100 == 0:
-                    logger.warning(
-                        "A5 %s filtered invalid slots [%s]: invalid=%d total=%d cache_rows=%d kv_rows=%d [occurrence=%d]",
-                        op_name,
-                        debug_label,
-                        slot_mapping_flat.shape[0] - valid_indices.shape[0],
-                        slot_mapping_flat.shape[0],
-                        cache_rows,
-                        source_rows,
-                        warn_count,
-                    )
-            else:
-                logger.warning(
-                    "A5 %s filtered invalid slots [%s]: invalid=%d total=%d cache_rows=%d kv_rows=%d",
-                    op_name,
-                    debug_label,
-                    slot_mapping_flat.shape[0] - valid_indices.shape[0],
-                    slot_mapping_flat.shape[0],
-                    cache_rows,
-                    source_rows,
-                )
+            A5DeviceAdaptor._warning_every_500(
+                f"{op_name}:filtered-invalid:{debug_label}",
+                "A5 %s filtered invalid slots [%s]: invalid=%d total=%d cache_rows=%d kv_rows=%d",
+                op_name,
+                debug_label,
+                slot_mapping_flat.shape[0] - valid_indices.shape[0],
+                slot_mapping_flat.shape[0],
+                cache_rows,
+                source_rows,
+            )
         valid_slots = slot_mapping_flat.index_select(0, valid_indices)
         if valid_slots.shape[0] == 0:
-            logger.warning(
+            A5DeviceAdaptor._warning_every_500(
+                f"{op_name}:drop-all:{debug_label}",
                 "A5 %s dropped all rows [%s]: slot_rows=%d kv_rows=%d",
                 op_name,
                 debug_label,
@@ -1021,7 +1015,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             return valid_slots, valid_indices
         if source_rows == valid_slots.shape[0]:
             return valid_slots, None
-        logger.warning(
+        A5DeviceAdaptor._warning_every_500(
+            f"{op_name}:cannot-align:{debug_label}",
             "A5 %s cannot align slot/source rows [%s]: slot_rows=%d valid_slot_rows=%d kv_rows=%d",
             op_name,
             debug_label,
@@ -1428,7 +1423,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             try:
                 source = x.reshape(-1, flat_cache.shape[-2], flat_cache.shape[-1])
             except RuntimeError as exc:
-                logger.warning(
+                A5DeviceAdaptor._warning_every_500(
+                    f"DSA non-quant scatter:reshape-failed:{debug_label}",
                     "A5 DSA non-quant scatter source reshape failed [%s]: x_shape=%s cache_slice_shape=(%d,%d)",
                     debug_label,
                     tuple(x.shape),
