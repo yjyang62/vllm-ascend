@@ -1442,6 +1442,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             indexer_k_cache,
             indexer_full_cache,
             indexer_slot_mapping,
+            debug_label="indexer-cp",
         )
         if kv_scale is not None:
             DeviceOperator.dsa_indexer_scatter_scale_part3(

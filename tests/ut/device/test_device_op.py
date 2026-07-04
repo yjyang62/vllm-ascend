@@ -318,3 +318,49 @@ def test_a5_dsa_kv_compress_scatter_non_quant_aligns_source_with_valid_slots():
     torch.testing.assert_close(cache[1, 0], x[1])
     torch.testing.assert_close(cache[0], torch.zeros_like(cache[0]))
     torch.testing.assert_close(cache[2], torch.zeros_like(cache[2]))
+
+
+def test_a5_indexer_quant_scatter_part1_aligns_with_valid_slots():
+    kv = torch.tensor(
+        [
+            [1.0, 2.0],
+            [3.0, 4.0],
+        ],
+        dtype=torch.float32,
+    )
+    indexer_full_cache = torch.zeros((4, 1, 2), dtype=torch.uint8)
+    slot_mapping = torch.tensor([-1, 3, -1, 1], dtype=torch.int64)
+
+    with mock.patch.object(torch.ops._C_ascend, "indexer_compress_epilog_v2", create=True) as fused_op:
+        kv_out, kv_scale = A5DeviceAdaptor.indexer_quant_scatter_part1(
+            kv,
+            indexer_k_cache=None,
+            indexer_full_cache=indexer_full_cache,
+            slot_mapping=slot_mapping,
+            debug_label="ut-indexer",
+        )
+
+    assert kv_scale is None
+    torch.testing.assert_close(kv_out, kv)
+    fused_kwargs = fused_op.call_args.kwargs
+    torch.testing.assert_close(fused_kwargs["x"], kv)
+    torch.testing.assert_close(fused_kwargs["slot_mapping"], torch.tensor([3, 1], dtype=torch.int64))
+
+
+def test_a5_indexer_quant_scatter_part1_skips_when_all_slots_invalid():
+    kv = torch.tensor([[1.0, 2.0]], dtype=torch.float32)
+    indexer_full_cache = torch.zeros((2, 1, 2), dtype=torch.uint8)
+    slot_mapping = torch.tensor([-1], dtype=torch.int64)
+
+    with mock.patch.object(torch.ops._C_ascend, "indexer_compress_epilog_v2", create=True) as fused_op:
+        kv_out, kv_scale = A5DeviceAdaptor.indexer_quant_scatter_part1(
+            kv,
+            indexer_k_cache=None,
+            indexer_full_cache=indexer_full_cache,
+            slot_mapping=slot_mapping,
+            debug_label="ut-indexer-all-invalid",
+        )
+
+    assert kv_out is None
+    assert kv_scale is None
+    fused_op.assert_not_called()

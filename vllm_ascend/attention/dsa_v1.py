@@ -2638,6 +2638,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             indexer_scale_cache,
             indexer_full_cache,
             indexer_slot_mapping,
+            debug_label=f"indexer-{'prefill' if with_prefill else 'decode'}",
         )
         return self._indexer_qli(
             q,
@@ -2657,9 +2658,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         indexer_scale_cache: torch.Tensor,
         indexer_full_cache: torch.Tensor | None,
         slot_mapping: torch.Tensor,
+        debug_label: str = "default",
     ):
         return DeviceOperator.indexer_quant_scatter(
-            q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping
+            q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping, debug_label=debug_label
         )
 
     def _indexer_qli(
@@ -2841,7 +2843,11 @@ class AscendDSAImpl(DSAAttentionImpl):
             with npu_stream_switch(aux_stream, enabled=True):
                 torch.npu.current_stream().wait_event(e_kv_ready)
                 kv, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
-                    kv, indexer_k_cache, indexer_full_cache, slot_mapping_indexer
+                    kv,
+                    indexer_k_cache,
+                    indexer_full_cache,
+                    slot_mapping_indexer,
+                    debug_label=f"indexer-multistream-{'prefill' if with_prefill else 'decode'}",
                 )
 
         # Main: matmul q from qr (directly submit, V/C different engines dispatch naturally)

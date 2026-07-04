@@ -713,7 +713,9 @@ class BaseDeviceAdaptor:
         return q_quant, q_scale
 
     @staticmethod
-    def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
+    def indexer_quant_scatter(
+        q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping, debug_label: str = "default"
+    ):
         """Quantize q and scatter kv into indexer cache.
         Non-A5: int8 quant + 2x scatter_nd_update_v2 for k_cache and scale_cache."""
         q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.int8)
@@ -732,7 +734,9 @@ class BaseDeviceAdaptor:
         return q, q_scale, kv_out, kv_scale_out
 
     @staticmethod
-    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_full_cache, slot_mapping):
+    def indexer_quant_scatter_part1(
+        kv, indexer_k_cache, indexer_full_cache, slot_mapping, debug_label: str = "default"
+    ):
         """Part1 of multi-stream indexer scatter.
         Non-A5: quantize kv + scatter k_cache.
         Returns (kv_quant, kv_scale) for use in Part3, or (None, None) if kv is None."""
@@ -964,6 +968,52 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
+    @staticmethod
+    def _align_valid_slot_mapping(
+        slot_mapping: torch.Tensor,
+        source_rows: int,
+        cache_rows: int,
+        *,
+        op_name: str,
+        debug_label: str,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        slot_mapping_flat = slot_mapping.reshape(-1).to(torch.int64)
+        valid_mask = (slot_mapping_flat >= 0) & (slot_mapping_flat < cache_rows)
+        valid_indices = valid_mask.nonzero(as_tuple=True)[0]
+        if valid_indices.shape[0] != slot_mapping_flat.shape[0]:
+            logger.warning(
+                "A5 %s filtered invalid slots [%s]: invalid=%d total=%d cache_rows=%d kv_rows=%d",
+                op_name,
+                debug_label,
+                slot_mapping_flat.shape[0] - valid_indices.shape[0],
+                slot_mapping_flat.shape[0],
+                cache_rows,
+                source_rows,
+            )
+        valid_slots = slot_mapping_flat.index_select(0, valid_indices)
+        if valid_slots.shape[0] == 0:
+            logger.warning(
+                "A5 %s dropped all rows [%s]: slot_rows=%d kv_rows=%d",
+                op_name,
+                debug_label,
+                slot_mapping_flat.shape[0],
+                source_rows,
+            )
+            return None, None
+        if source_rows == slot_mapping_flat.shape[0]:
+            return valid_slots, valid_indices
+        if source_rows == valid_slots.shape[0]:
+            return valid_slots, None
+        logger.warning(
+            "A5 %s cannot align slot/source rows [%s]: slot_rows=%d valid_slot_rows=%d kv_rows=%d",
+            op_name,
+            debug_label,
+            slot_mapping_flat.shape[0],
+            valid_slots.shape[0],
+            source_rows,
+        )
+        raise RuntimeError(f"A5 {op_name} slot/source rows are inconsistent and cannot be aligned safely")
+
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
         torch_npu.npu_scatter_pa_kv_cache(
@@ -1371,44 +1421,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 raise RuntimeError(
                     "A5 DSA non-quant scatter cannot reshape source to cache slice shape"
                 ) from exc
-            slot_mapping_flat = slot_mapping.reshape(-1).to(torch.int64)
-            valid_mask = (slot_mapping_flat >= 0) & (slot_mapping_flat < flat_cache.shape[0])
-            valid_indices = valid_mask.nonzero(as_tuple=True)[0]
-            if valid_indices.shape[0] != slot_mapping_flat.shape[0]:
-                logger.warning(
-                    "A5 DSA non-quant scatter filtered invalid slots [%s]: invalid=%d total=%d cache_rows=%d kv_rows=%d",
-                    debug_label,
-                    slot_mapping_flat.shape[0] - valid_indices.shape[0],
-                    slot_mapping_flat.shape[0],
-                    flat_cache.shape[0],
-                    source.shape[0],
-                )
-            valid_slots = slot_mapping_flat.index_select(0, valid_indices)
-            if valid_slots.shape[0] == 0:
-                logger.warning(
-                    "A5 DSA non-quant scatter dropped all rows [%s]: slot_rows=%d kv_rows=%d",
-                    debug_label,
-                    slot_mapping_flat.shape[0],
-                    source.shape[0],
-                )
+            slot_mapping_aligned, source_indices = A5DeviceAdaptor._align_valid_slot_mapping(
+                slot_mapping,
+                source.shape[0],
+                flat_cache.shape[0],
+                op_name="DSA non-quant scatter",
+                debug_label=debug_label,
+            )
+            if slot_mapping_aligned is None:
                 return
-            if source.shape[0] == slot_mapping_flat.shape[0]:
-                slot_mapping_flat = slot_mapping_flat.index_select(0, valid_indices)
-                source = source.index_select(0, valid_indices)
-            elif source.shape[0] == valid_slots.shape[0]:
-                slot_mapping_flat = valid_slots
-            else:
-                logger.warning(
-                    "A5 DSA non-quant scatter cannot align slot/source rows [%s]: slot_rows=%d valid_slot_rows=%d kv_rows=%d",
-                    debug_label,
-                    slot_mapping_flat.shape[0],
-                    valid_slots.shape[0],
-                    source.shape[0],
-                )
-                raise RuntimeError(
-                    "A5 DSA non-quant scatter slot/source rows are inconsistent and cannot be aligned safely"
-                )
-            flat_cache.index_copy_(0, slot_mapping_flat, source)
+            if source_indices is not None:
+                source = source.index_select(0, source_indices)
+            flat_cache.index_copy_(0, slot_mapping_aligned, source)
             return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
@@ -1429,7 +1453,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return q_quant, q_scale
 
     @staticmethod
-    def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
+    def indexer_quant_scatter(
+        q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping, debug_label: str = "default"
+    ):
         """Quantize q (fp8) and scatter kv via fused indexer_compress_epilog_v2.
         On A5, the fused op handles kv quantization, k_cache scatter, and
         scale_cache scatter internally. q is quantized separately for use
@@ -1439,29 +1465,55 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         kv_out = kv
         kv_scale_out = None
         if kv is not None:
+            kv_for_scatter = kv.reshape(-1, kv.shape[-1])
+            cache_rows = indexer_full_cache.view(-1, 1, indexer_full_cache.shape[-1]).shape[0]
+            slot_mapping_aligned, source_indices = A5DeviceAdaptor._align_valid_slot_mapping(
+                slot_mapping,
+                kv_for_scatter.shape[0],
+                cache_rows,
+                op_name="indexer fused scatter",
+                debug_label=debug_label,
+            )
+            if slot_mapping_aligned is None:
+                return q, q_scale, kv_out, kv_scale_out
+            if source_indices is not None:
+                kv_for_scatter = kv_for_scatter.index_select(0, source_indices)
             torch.ops._C_ascend.indexer_compress_epilog_v2(
                 indexer_compress_cache=indexer_full_cache.view(torch.uint8),
-                x=kv,
-                slot_mapping=slot_mapping,
+                x=kv_for_scatter,
+                slot_mapping=slot_mapping_aligned,
                 layout=2,
             )
 
         return q, q_scale, kv_out, kv_scale_out
 
     @staticmethod
-    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_full_cache, slot_mapping):
+    def indexer_quant_scatter_part1(kv, indexer_k_cache, indexer_full_cache, slot_mapping, debug_label: str = "default"):
         """Part1 of multi-stream indexer scatter.
         A5: fused indexer_compress_epilog_v2 handles both k_cache and scale_cache.
         Returns (kv, None) to signal Part3 is a no-op."""
         if kv is None:
             return None, None
+        kv_for_scatter = kv.reshape(-1, kv.shape[-1])
+        cache_rows = indexer_full_cache.view(-1, 1, indexer_full_cache.shape[-1]).shape[0]
+        slot_mapping_aligned, source_indices = A5DeviceAdaptor._align_valid_slot_mapping(
+            slot_mapping,
+            kv_for_scatter.shape[0],
+            cache_rows,
+            op_name="indexer fused scatter part1",
+            debug_label=debug_label,
+        )
+        if slot_mapping_aligned is None:
+            return None, None
+        if source_indices is not None:
+            kv_for_scatter = kv_for_scatter.index_select(0, source_indices)
         torch.ops._C_ascend.indexer_compress_epilog_v2(
             indexer_compress_cache=indexer_full_cache.view(torch.uint8),
-            x=kv,
-            slot_mapping=slot_mapping,
+            x=kv_for_scatter,
+            slot_mapping=slot_mapping_aligned,
             layout=2,
         )
-        return kv, None
+        return kv_for_scatter, None
 
     @staticmethod
     def dsa_indexer_scatter_scale_part3(kv_scale, indexer_scale_cache, slot_mapping):
