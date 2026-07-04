@@ -1,5 +1,7 @@
+import atexit
 import logging
 import math
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
@@ -53,6 +55,46 @@ BUILD_METADATA_STEP_DECODE = 1
 
 _DSV4_DSA_OVERLAP_STREAM = None
 logger = logging.getLogger(__name__)
+_DSA_DEBUG_DEFERRED_ACCUM: dict[str, tuple[str, int, torch.Tensor, torch.Tensor]] = {}
+_DSA_DEBUG_DEFERRED_SEEN: set[str] = set()
+
+
+def _dsa_debug_layer_sort_key(key: str) -> tuple[int, str]:
+    match = re.search(r"\.layers\.(\d+)\.", key)
+    return (int(match.group(1)), key) if match else (10**9, key)
+
+
+def _dsa_debug_accumulate_output_stats(stage: str, layer_name: str, compress_ratio: int, output: torch.Tensor) -> None:
+    """Deferred, non-masking output diagnostics for DSA.
+
+    Collect NaN/Inf/abs-max on-device and defer all .item() host reads until
+    a full step boundary (detected by repeated (stage, layer) key).
+    """
+    key = f"{stage}:{layer_name}"
+    if key in _DSA_DEBUG_DEFERRED_SEEN:
+        _dsa_debug_flush_deferred()
+    _DSA_DEBUG_DEFERRED_SEEN.add(key)
+    out = output.detach()
+    bad = torch.logical_or(torch.isnan(out).any(), torch.isinf(out).any())
+    abs_max = out.float().abs().amax()
+    _DSA_DEBUG_DEFERRED_ACCUM[key] = (stage, compress_ratio, bad, abs_max)
+
+
+def _dsa_debug_flush_deferred() -> None:
+    for key in sorted(_DSA_DEBUG_DEFERRED_ACCUM, key=_dsa_debug_layer_sort_key):
+        _, compress_ratio, bad, abs_max = _DSA_DEBUG_DEFERRED_ACCUM[key]
+        logger.info(
+            "[DSA_DEBUG_DEFERRED] %s compress_ratio=%s bad=%s abs_max=%.4g",
+            key,
+            compress_ratio,
+            bool(bad.item()),
+            abs_max.item(),
+        )
+    _DSA_DEBUG_DEFERRED_ACCUM.clear()
+    _DSA_DEBUG_DEFERRED_SEEN.clear()
+
+
+atexit.register(_dsa_debug_flush_deferred)
 
 
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
@@ -1752,6 +1794,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kv_cache,
                 attn_metadata,
             )  # type: ignore[arg-type]
+            if envs_ascend.VLLM_ASCEND_DSA_DEBUG_DEFERRED:
+                _dsa_debug_accumulate_output_stats("raw_attn_prefill", layer_name, self.compress_ratio, output_prefill)
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
             cos = attn_metadata[0].prefill.cos[layer_name]
             sin = attn_metadata[0].prefill.sin[layer_name]
@@ -1759,6 +1803,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         if has_decode:
             assert attn_metadata[0].decode is not None
             output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
+            if envs_ascend.VLLM_ASCEND_DSA_DEBUG_DEFERRED:
+                _dsa_debug_accumulate_output_stats("raw_attn_decode", layer_name, self.compress_ratio, output_decode)
             o_proj_input[:decode_tokens] = output_decode
             cos = attn_metadata[0].decode.cos[layer_name]
             sin = attn_metadata[0].decode.sin[layer_name]
@@ -1776,6 +1822,8 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         # o
         self._forward_o_proj(o_proj_input, output)
+        if envs_ascend.VLLM_ASCEND_DSA_DEBUG_DEFERRED:
+            _dsa_debug_accumulate_output_stats("final_o_proj", layer_name, self.compress_ratio, output)
 
         return output_padded
 

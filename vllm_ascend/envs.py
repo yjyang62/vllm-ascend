@@ -122,6 +122,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 0 (default): keep normal DSA behavior.
     # 1: bypass compress/indexer and use SWA-only attention.
     "VLLM_ASCEND_DSA_DEBUG_FORCE_SWA_ONLY": lambda: bool(int(os.getenv("VLLM_ASCEND_DSA_DEBUG_FORCE_SWA_ONLY", "0"))),
+    # Non-masking DSA diagnostic switch. Unlike immediate per-layer logging
+    # that can force device sync and perturb timing, this mode accumulates
+    # per-layer checks on-device and flushes once per full step.
+    # 0 (default): disabled.
+    # 1: enable deferred DSA diagnostics.
+    "VLLM_ASCEND_DSA_DEBUG_DEFERRED": lambda: bool(int(os.getenv("VLLM_ASCEND_DSA_DEBUG_DEFERRED", "0"))),
 }
 
 # end-env-vars-definition
