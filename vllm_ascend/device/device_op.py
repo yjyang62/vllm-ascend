@@ -17,6 +17,7 @@
 #
 import importlib
 import logging
+from collections import defaultdict
 from typing import Any
 
 import torch
@@ -40,6 +41,7 @@ DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 A5_DSA_SPARSE_FLASH_MLA_OP = "sparse_flash_mla"
 A5_DSA_SPARSE_FLASH_MLA_METADATA_OP = "sparse_flash_mla_metadata"
 logger = logging.getLogger(__name__)
+_A5_DECODE_COMPRESS_INVALID_SLOT_WARN_COUNTS: dict[str, int] = defaultdict(int)
 _SPARSE_FLASH_MLA_NAMESPACES = ("cann_ops_transformer", "_C_ascend")
 _SPARSE_FLASH_MLA_IMPORT_ATTEMPTED = False
 _SPARSE_FLASH_MLA_IMPORT_ERROR: Exception | None = None
@@ -981,15 +983,30 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         valid_mask = (slot_mapping_flat >= 0) & (slot_mapping_flat < cache_rows)
         valid_indices = valid_mask.nonzero(as_tuple=True)[0]
         if valid_indices.shape[0] != slot_mapping_flat.shape[0]:
-            logger.warning(
-                "A5 %s filtered invalid slots [%s]: invalid=%d total=%d cache_rows=%d kv_rows=%d",
-                op_name,
-                debug_label,
-                slot_mapping_flat.shape[0] - valid_indices.shape[0],
-                slot_mapping_flat.shape[0],
-                cache_rows,
-                source_rows,
-            )
+            if op_name == "DSA non-quant scatter" and "attn-decode-compress" in debug_label:
+                _A5_DECODE_COMPRESS_INVALID_SLOT_WARN_COUNTS[debug_label] += 1
+                warn_count = _A5_DECODE_COMPRESS_INVALID_SLOT_WARN_COUNTS[debug_label]
+                if warn_count % 100 == 0:
+                    logger.warning(
+                        "A5 %s filtered invalid slots [%s]: invalid=%d total=%d cache_rows=%d kv_rows=%d [occurrence=%d]",
+                        op_name,
+                        debug_label,
+                        slot_mapping_flat.shape[0] - valid_indices.shape[0],
+                        slot_mapping_flat.shape[0],
+                        cache_rows,
+                        source_rows,
+                        warn_count,
+                    )
+            else:
+                logger.warning(
+                    "A5 %s filtered invalid slots [%s]: invalid=%d total=%d cache_rows=%d kv_rows=%d",
+                    op_name,
+                    debug_label,
+                    slot_mapping_flat.shape[0] - valid_indices.shape[0],
+                    slot_mapping_flat.shape[0],
+                    cache_rows,
+                    source_rows,
+                )
         valid_slots = slot_mapping_flat.index_select(0, valid_indices)
         if valid_slots.shape[0] == 0:
             logger.warning(
