@@ -114,8 +114,50 @@ class TestTorchNPUProfilerWrapper(TestBase):
         self.assertEqual(profile_kwargs["activities"], ["CPU", "NPU"])
         self.assertTrue(profile_kwargs["profile_memory"])
         self.assertEqual(profile_kwargs["with_modules"], True)
-        self.assertEqual(profile_kwargs["on_trace_ready"], mock_trace_handler_instance)
+        profile_kwargs["on_trace_ready"](MagicMock())
+        mock_trace_handler_instance.assert_called_once()
         self.assertEqual(result, mock_profiler_instance)
+
+    @patch("vllm_ascend.profiler.torch_npu_profiler.multiprocessing.current_process")
+    @patch("torch_npu.profiler.tensorboard_trace_handler")
+    def test_trace_handler_skips_parse_in_daemon_process(self, mock_trace_handler, mock_current_process):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/path/to/traces",
+        )
+        mock_trace_handler_instance = MagicMock()
+        mock_trace_handler.return_value = mock_trace_handler_instance
+        mock_current_process.return_value.daemon = True
+
+        on_trace_ready = TorchNPUProfilerWrapper._create_trace_handler(profiler_config, "trace_name")
+        on_trace_ready(MagicMock())
+
+        mock_trace_handler.assert_called_once_with(
+            "/path/to/traces",
+            worker_name="trace_name",
+        )
+        mock_trace_handler_instance.assert_not_called()
+
+    @patch("vllm_ascend.profiler.torch_npu_profiler.multiprocessing.current_process")
+    @patch("torch_npu.profiler.tensorboard_trace_handler")
+    def test_trace_handler_parses_in_non_daemon_process(self, mock_trace_handler, mock_current_process):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/path/to/traces",
+        )
+        mock_trace_handler_instance = MagicMock()
+        mock_trace_handler.return_value = mock_trace_handler_instance
+        mock_current_process.return_value.daemon = False
+        mock_profiler = MagicMock()
+
+        on_trace_ready = TorchNPUProfilerWrapper._create_trace_handler(profiler_config, "trace_name")
+        on_trace_ready(mock_profiler)
+
+        mock_trace_handler_instance.assert_called_once_with(mock_profiler)
 
     def test_create_profiler_disabled(self):
         from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
