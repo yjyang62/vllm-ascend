@@ -20,6 +20,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.mxfp_compat import (
@@ -1264,9 +1265,17 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def get_dsa_sparse_attn_op():
         if dsv4_use_kv_bf16():
+            logger.info_once(
+                "[DSV4_PATH] Using non-quantized BF16 KV path with SparseFlashMla "
+                "(npu_sparse_flash_mla)."
+            )
             # Wrapper renames the FP8 shared-KV length kwarg to the BF16
             # sparse_flash_mla name (seqused_kv -> seqused_ori_kv).
             return _bf16_sparse_flash_mla
+        logger.info_once(
+            "[DSV4_PATH] Using quantized FP8 KV path with "
+            "npu_kv_quant_sparse_attn_sharedkv."
+        )
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
 
     @staticmethod
