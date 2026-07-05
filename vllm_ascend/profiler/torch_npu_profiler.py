@@ -17,8 +17,11 @@
 #
 
 import multiprocessing
+import subprocess
+import sys
 from collections.abc import Callable
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 import torch_npu
@@ -85,14 +88,48 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
         def on_trace_ready(profiler: Any) -> None:
             if multiprocessing.current_process().daemon:
                 logger.info(
-                    "Skipping torch_npu profiler trace parsing in daemon process. "
-                    "Run offline analyse(%r) after profiling data is dumped.",
+                    "Scheduling torch_npu profiler offline analysis outside daemon process for %r.",
                     profiler_config.torch_profiler_dir,
                 )
+                TorchNPUProfilerWrapper._start_offline_analyse(profiler_config)
                 return
             trace_handler(profiler)
 
         return on_trace_ready
+
+    @staticmethod
+    def _start_offline_analyse(profiler_config: ProfilerConfig) -> None:
+        profiler_dir = Path(profiler_config.torch_profiler_dir)
+        try:
+            profiler_dir.mkdir(parents=True, exist_ok=True)
+            log_file_path = profiler_dir / "offline_analyse.log"
+            with log_file_path.open("ab") as log_file:
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        "from torch_npu.profiler.profiler import analyse; "
+                        "import sys; "
+                        "analyse(sys.argv[1])",
+                        str(profiler_dir),
+                    ],
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            logger.info(
+                "Started torch_npu profiler offline analysis process pid=%s for %r. "
+                "Logs are written to %s.",
+                process.pid,
+                str(profiler_dir),
+                str(log_file_path),
+            )
+        except OSError as e:
+            logger.warning(
+                "Failed to start torch_npu profiler offline analysis for %r: %s",
+                str(profiler_dir),
+                e,
+            )
 
     def _start(self) -> None:
         self.profiler.start()

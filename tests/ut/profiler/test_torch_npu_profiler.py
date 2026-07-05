@@ -1,3 +1,5 @@
+import subprocess
+import tempfile
 from unittest.mock import MagicMock, patch
 
 from vllm.config import ProfilerConfig
@@ -120,7 +122,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
 
     @patch("vllm_ascend.profiler.torch_npu_profiler.multiprocessing.current_process")
     @patch("torch_npu.profiler.tensorboard_trace_handler")
-    def test_trace_handler_skips_parse_in_daemon_process(self, mock_trace_handler, mock_current_process):
+    def test_trace_handler_starts_offline_analyse_in_daemon_process(self, mock_trace_handler, mock_current_process):
         from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 
         profiler_config = ProfilerConfig(
@@ -131,14 +133,16 @@ class TestTorchNPUProfilerWrapper(TestBase):
         mock_trace_handler.return_value = mock_trace_handler_instance
         mock_current_process.return_value.daemon = True
 
-        on_trace_ready = TorchNPUProfilerWrapper._create_trace_handler(profiler_config, "trace_name")
-        on_trace_ready(MagicMock())
+        with patch.object(TorchNPUProfilerWrapper, "_start_offline_analyse") as mock_start_offline_analyse:
+            on_trace_ready = TorchNPUProfilerWrapper._create_trace_handler(profiler_config, "trace_name")
+            on_trace_ready(MagicMock())
 
         mock_trace_handler.assert_called_once_with(
             "/path/to/traces",
             worker_name="trace_name",
         )
         mock_trace_handler_instance.assert_not_called()
+        mock_start_offline_analyse.assert_called_once_with(profiler_config)
 
     @patch("vllm_ascend.profiler.torch_npu_profiler.multiprocessing.current_process")
     @patch("torch_npu.profiler.tensorboard_trace_handler")
@@ -158,6 +162,27 @@ class TestTorchNPUProfilerWrapper(TestBase):
         on_trace_ready(mock_profiler)
 
         mock_trace_handler_instance.assert_called_once_with(mock_profiler)
+
+    @patch("vllm_ascend.profiler.torch_npu_profiler.subprocess.Popen")
+    def test_start_offline_analyse_runs_in_new_process(self, mock_popen):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        mock_popen.return_value.pid = 1234
+
+        with tempfile.TemporaryDirectory() as trace_dir:
+            profiler_config = ProfilerConfig(
+                profiler="torch",
+                torch_profiler_dir=trace_dir,
+            )
+
+            TorchNPUProfilerWrapper._start_offline_analyse(profiler_config)
+
+        command = mock_popen.call_args.args[0]
+        kwargs = mock_popen.call_args.kwargs
+        self.assertIn("from torch_npu.profiler.profiler import analyse", command[2])
+        self.assertEqual(command[-1], trace_dir)
+        self.assertEqual(kwargs["stderr"], subprocess.STDOUT)
+        self.assertTrue(kwargs["start_new_session"])
 
     def test_create_profiler_disabled(self):
         from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
