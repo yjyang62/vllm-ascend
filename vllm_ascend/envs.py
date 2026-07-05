@@ -128,6 +128,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 0 (default): disabled.
     # 1: enable deferred DSA diagnostics.
     "VLLM_ASCEND_DSA_DEBUG_DEFERRED": lambda: bool(int(os.getenv("VLLM_ASCEND_DSA_DEBUG_DEFERRED", "0"))),
+    # Debug-only switch for race-condition bisect. Forces stream/device sync
+    # at key DSA stage boundaries (prefill/decode/o_proj) to check whether
+    # output corruption is timing-sensitive.
+    # 0 (default): disabled.
+    # 1: enable boundary synchronize in DSA forward.
+    "VLLM_ASCEND_DSA_DEBUG_SYNC_BOUNDARY": lambda: bool(int(os.getenv("VLLM_ASCEND_DSA_DEBUG_SYNC_BOUNDARY", "0"))),
 }
 
 # end-env-vars-definition
