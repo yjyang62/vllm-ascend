@@ -238,7 +238,8 @@ class TestTorchNPUProfilerWrapper(TestBase):
         kwargs = mock_popen.call_args.kwargs
         self.assertIn("from torch_npu.profiler.profiler import analyse", command[2])
         self.assertEqual(command[-1], trace_dir)
-        self.assertEqual(kwargs["stderr"], subprocess.STDOUT)
+        self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
         self.assertTrue(kwargs["start_new_session"])
 
     def test_create_profiler_disabled(self):
