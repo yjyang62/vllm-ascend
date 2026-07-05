@@ -1387,6 +1387,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if _is_non_quant_dsv4(vllm_config):
             logger.info("A5 DSA sparse attention metadata op: SparseFlashMla")
             return _sparse_flash_mla_metadata_from_dsa
+        logger.info("A5 DSA sparse attention metadata op: KvQuantSparseAttnSharedKv")
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
 
     @staticmethod
@@ -1400,6 +1401,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if _is_non_quant_dsv4(vllm_config):
             logger.info("A5 DSA sparse attention op: SparseFlashMla")
             return _sparse_flash_mla_from_dsa
+        logger.info("A5 DSA sparse attention op: KvQuantSparseAttnSharedKv")
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
 
     @staticmethod
