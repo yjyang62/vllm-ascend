@@ -7,12 +7,10 @@ import torch
 from vllm_ascend.device.device_op import (
     A5_DSA_SPARSE_FLASH_MLA_METADATA_OP,
     A5_DSA_SPARSE_FLASH_MLA_OP,
-    A5_DSA_SPARSE_FLASH_MLA_PATH,
     A5DeviceAdaptor,
     AscendDeviceType,
     BaseDeviceAdaptor,
 )
-import vllm_ascend.device.device_op as device_op_module
 
 
 def test_npu_flash_attention_uses_fusion_attention_for_fp32():
@@ -209,28 +207,6 @@ def test_a5_dsa_sparse_attention_uses_sparse_flash_mla_ops():
     assert "kv_quant_mode" not in attn_kwargs
     torch.testing.assert_close(attn_kwargs["seqused_ori_kv"], seq_lens)
     torch.testing.assert_close(attn_kwargs["seqused_cmp_kv"], torch.tensor([4, 4], dtype=torch.int32))
-
-
-def test_a5_dsa_sparse_attention_logs_sparse_flash_mla_path_once(caplog):
-    vllm_config = SimpleNamespace(quant_config=None)
-    device_op_module._A5_DSA_SPARSE_ATTN_PATH_LOGGED = False
-
-    with (
-        mock.patch("vllm_ascend.device.device_op.get_ascend_device_type", return_value=AscendDeviceType.A5),
-        mock.patch.object(
-            torch.ops.cann_ops_transformer, A5_DSA_SPARSE_FLASH_MLA_METADATA_OP, create=True
-        ),
-        mock.patch.object(torch.ops.cann_ops_transformer, A5_DSA_SPARSE_FLASH_MLA_OP, create=True),
-        caplog.at_level("INFO"),
-    ):
-        A5DeviceAdaptor.get_dsa_sparse_attn_metadata_op(vllm_config)
-        A5DeviceAdaptor.get_dsa_sparse_attn_op(vllm_config)
-
-    matching_logs = [record for record in caplog.records if A5_DSA_SPARSE_FLASH_MLA_PATH in record.message]
-    assert len(matching_logs) == 1
-    assert "metadata_op=sparse_flash_mla_metadata" in matching_logs[0].message
-    assert "attn_op=sparse_flash_mla" in matching_logs[0].message
-    assert "quant_config=None" in matching_logs[0].message
 
 
 def test_a5_quantized_dsa_sparse_attention_keeps_kv_quant_ops():

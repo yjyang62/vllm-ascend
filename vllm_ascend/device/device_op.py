@@ -40,11 +40,8 @@ DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 A5_DSA_SPARSE_FLASH_MLA_OP = "sparse_flash_mla"
 A5_DSA_SPARSE_FLASH_MLA_METADATA_OP = "sparse_flash_mla_metadata"
-A5_DSA_SPARSE_FLASH_MLA_PATH = "SparseFlashMla"
-A5_DSA_KV_QUANT_SPARSE_ATTN_PATH = "KvQuantSparseAttnSharedKv"
 logger = logging.getLogger(__name__)
 _A5_DSA_WARN_COUNTS: dict[str, int] = defaultdict(int)
-_A5_DSA_SPARSE_ATTN_PATH_LOGGED = False
 _SPARSE_FLASH_MLA_NAMESPACES = ("cann_ops_transformer", "_C_ascend")
 _SPARSE_FLASH_MLA_IMPORT_ATTEMPTED = False
 _SPARSE_FLASH_MLA_IMPORT_ERROR: Exception | None = None
@@ -86,39 +83,6 @@ def _is_non_quant_dsv4(vllm_config=None) -> bool:
         get_ascend_device_type() == AscendDeviceType.A5
         and vllm_config is not None
         and getattr(vllm_config, "quant_config", None) is None
-    )
-
-
-def _a5_dsa_sparse_attn_path_name(vllm_config=None) -> str | None:
-    if get_ascend_device_type() != AscendDeviceType.A5:
-        return None
-    if _is_non_quant_dsv4(vllm_config):
-        return A5_DSA_SPARSE_FLASH_MLA_PATH
-    return A5_DSA_KV_QUANT_SPARSE_ATTN_PATH
-
-
-def _log_a5_dsa_sparse_attn_path_once(vllm_config=None) -> None:
-    global _A5_DSA_SPARSE_ATTN_PATH_LOGGED
-    if _A5_DSA_SPARSE_ATTN_PATH_LOGGED:
-        return
-    path_name = _a5_dsa_sparse_attn_path_name(vllm_config)
-    if path_name is None:
-        return
-    _A5_DSA_SPARSE_ATTN_PATH_LOGGED = True
-    quant_config = None if vllm_config is None else getattr(vllm_config, "quant_config", None)
-    if path_name == A5_DSA_SPARSE_FLASH_MLA_PATH:
-        metadata_op_name = A5_DSA_SPARSE_FLASH_MLA_METADATA_OP
-        attn_op_name = A5_DSA_SPARSE_FLASH_MLA_OP
-    else:
-        metadata_op_name = "npu_kv_quant_sparse_attn_sharedkv_metadata"
-        attn_op_name = "npu_kv_quant_sparse_attn_sharedkv"
-    logger.info(
-        "A5 DSA sparse attention inference path: %s "
-        "(metadata_op=%s, attn_op=%s, quant_config=%s)",
-        path_name,
-        metadata_op_name,
-        attn_op_name,
-        type(quant_config).__name__ if quant_config is not None else "None",
     )
 
 
@@ -1420,7 +1384,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_op(vllm_config=None):
-        _log_a5_dsa_sparse_attn_path_once(vllm_config)
         if _is_non_quant_dsv4(vllm_config):
             return _sparse_flash_mla_metadata_from_dsa
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
@@ -1433,7 +1396,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def get_dsa_sparse_attn_op(vllm_config=None):
-        _log_a5_dsa_sparse_attn_path_once(vllm_config)
         if _is_non_quant_dsv4(vllm_config):
             return _sparse_flash_mla_from_dsa
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
