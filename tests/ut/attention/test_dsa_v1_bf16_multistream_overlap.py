@@ -41,12 +41,9 @@ def _make_impl(*, multistream_overlap_config: bool, use_kv_bf16: bool) -> Ascend
 
 
 def test_bf16_kv_forces_multistream_overlap_off():
-    """Regression: VLLM_ASCEND_DSV4_BF16_DEBUG=1 (which forces a device sync
-    after every layer via .item()) reliably "fixed" otherwise
-    garbled/truncated BF16 output, indicating the multistream_dsv4_dsa_overlap
-    optimization's aux-stream/main-stream synchronization does not (yet)
-    cover the BF16 KV scatter path correctly. Disable it automatically on
-    that path until verified, as a safe (perf-only) interim workaround."""
+    """Regression: multistream DSV4 overlap is not yet verified for BF16 KV
+    scatter, so disable it automatically on that path as a safe interim
+    workaround."""
     impl = _make_impl(multistream_overlap_config=True, use_kv_bf16=True)
     assert impl.multistream_dsv4_dsa_overlap is False
 
