@@ -16,11 +16,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import multiprocessing
+from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
 import torch_npu
 from vllm.config import ProfilerConfig
+from vllm.logger import logger
 from vllm.profiler.wrapper import WorkerProfiler
 
 import vllm_ascend.envs as envs_ascend
@@ -69,11 +72,27 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
             # The with_stack option in torch_npu.profiler introduces significant time overhead.
             with_modules=profiler_config.torch_profiler_with_stack,
             experimental_config=experimental_config,
-            on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
-                profiler_config.torch_profiler_dir,
-                worker_name=trace_name,
-            ),
+            on_trace_ready=TorchNPUProfilerWrapper._create_trace_handler(profiler_config, trace_name),
         )
+
+    @staticmethod
+    def _create_trace_handler(profiler_config: ProfilerConfig, trace_name: str) -> Callable[[Any], None]:
+        trace_handler = torch_npu.profiler.tensorboard_trace_handler(
+            profiler_config.torch_profiler_dir,
+            worker_name=trace_name,
+        )
+
+        def on_trace_ready(profiler: Any) -> None:
+            if multiprocessing.current_process().daemon:
+                logger.info(
+                    "Skipping torch_npu profiler trace parsing in daemon process. "
+                    "Run offline analyse(%r) after profiling data is dumped.",
+                    profiler_config.torch_profiler_dir,
+                )
+                return
+            trace_handler(profiler)
+
+        return on_trace_ready
 
     def _start(self) -> None:
         self.profiler.start()
