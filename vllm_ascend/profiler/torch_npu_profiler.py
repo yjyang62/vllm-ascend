@@ -64,18 +64,35 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
             gc_detect_threshold=None,
         )
 
-        return torch_npu.profiler.profile(
-            activities=[
+        profile_kwargs = {
+            "activities": [
                 torch_npu.profiler.ProfilerActivity.CPU,
                 torch_npu.profiler.ProfilerActivity.NPU,
             ],
-            with_stack=False,
-            profile_memory=profiler_config.torch_profiler_with_memory,
+            "with_stack": False,
+            "profile_memory": profiler_config.torch_profiler_with_memory,
             # NOTE: torch_npu.profiler.with_modules is equivalent to torch.profiler.with_stack.
             # The with_stack option in torch_npu.profiler introduces significant time overhead.
-            with_modules=profiler_config.torch_profiler_with_stack,
-            experimental_config=experimental_config,
-            on_trace_ready=TorchNPUProfilerWrapper._create_trace_handler(profiler_config, trace_name),
+            "with_modules": profiler_config.torch_profiler_with_stack,
+            "experimental_config": experimental_config,
+            "on_trace_ready": TorchNPUProfilerWrapper._create_trace_handler(profiler_config, trace_name),
+        }
+        schedule = TorchNPUProfilerWrapper._create_schedule(profiler_config)
+        if schedule is not None:
+            profile_kwargs["schedule"] = schedule
+        return torch_npu.profiler.profile(**profile_kwargs)
+
+    @staticmethod
+    def _create_schedule(profiler_config: ProfilerConfig) -> Any | None:
+        active_iterations = profiler_config.max_iterations
+        if active_iterations <= 0:
+            return None
+        return torch_npu.profiler.schedule(
+            wait=0,
+            warmup=0,
+            active=active_iterations,
+            repeat=1,
+            skip_first=0,
         )
 
     @staticmethod
@@ -138,4 +155,5 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
         self.profiler.stop()
 
     def _profiler_step(self) -> bool:
+        self.profiler.step()
         return True

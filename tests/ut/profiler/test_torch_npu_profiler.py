@@ -45,6 +45,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
     @patch("vllm_ascend.profiler.torch_npu_profiler.get_ascend_config")
     @patch("torch_npu.profiler._ExperimentalConfig")
     @patch("torch_npu.profiler.profile")
+    @patch("torch_npu.profiler.schedule")
     @patch("torch_npu.profiler.tensorboard_trace_handler")
     @patch("torch_npu.profiler.ExportType")
     @patch("torch_npu.profiler.ProfilerLevel")
@@ -57,6 +58,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
         mock_profiler_level,
         mock_export_type,
         mock_trace_handler,
+        mock_schedule,
         mock_profile,
         mock_experimental_config,
         mock_get_ascend_config,
@@ -116,9 +118,64 @@ class TestTorchNPUProfilerWrapper(TestBase):
         self.assertEqual(profile_kwargs["activities"], ["CPU", "NPU"])
         self.assertTrue(profile_kwargs["profile_memory"])
         self.assertEqual(profile_kwargs["with_modules"], True)
+        self.assertNotIn("schedule", profile_kwargs)
+        mock_schedule.assert_not_called()
         profile_kwargs["on_trace_ready"](MagicMock())
         mock_trace_handler_instance.assert_called_once()
         self.assertEqual(result, mock_profiler_instance)
+
+    @patch("vllm_ascend.profiler.torch_npu_profiler.envs_ascend")
+    @patch("vllm_ascend.profiler.torch_npu_profiler.get_ascend_config")
+    @patch("torch_npu.profiler._ExperimentalConfig")
+    @patch("torch_npu.profiler.profile")
+    @patch("torch_npu.profiler.schedule")
+    @patch("torch_npu.profiler.tensorboard_trace_handler")
+    @patch("torch_npu.profiler.ExportType")
+    @patch("torch_npu.profiler.ProfilerLevel")
+    @patch("torch_npu.profiler.AiCMetrics")
+    @patch("torch_npu.profiler.ProfilerActivity")
+    def test_create_profiler_uses_schedule_when_max_iterations_set(
+        self,
+        mock_profiler_activity,
+        mock_aic_metrics,
+        mock_profiler_level,
+        mock_export_type,
+        mock_trace_handler,
+        mock_schedule,
+        mock_profile,
+        mock_experimental_config,
+        mock_get_ascend_config,
+        mock_envs_ascend,
+    ):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        mock_envs_ascend.MSMONITOR_USE_DAEMON = 0
+        mock_get_ascend_config.side_effect = RuntimeError("Ascend config is not initialized")
+        mock_export_type.Text = "Text"
+        mock_profiler_level.Level1 = "Level1"
+        mock_aic_metrics.AiCoreNone = "AiCoreNone"
+        mock_profiler_activity.CPU = "CPU"
+        mock_profiler_activity.NPU = "NPU"
+        mock_trace_handler.return_value = MagicMock()
+        mock_schedule.return_value = "schedule"
+        mock_profile.return_value = MagicMock()
+
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/path/to/traces",
+            max_iterations=2,
+        )
+
+        TorchNPUProfilerWrapper._create_profiler(profiler_config, "trace_name")
+
+        mock_schedule.assert_called_once_with(
+            wait=0,
+            warmup=0,
+            active=2,
+            repeat=1,
+            skip_first=0,
+        )
+        self.assertEqual(mock_profile.call_args.kwargs["schedule"], "schedule")
 
     @patch("vllm_ascend.profiler.torch_npu_profiler.multiprocessing.current_process")
     @patch("torch_npu.profiler.tensorboard_trace_handler")
@@ -298,11 +355,13 @@ class TestTorchNPUProfilerWrapper(TestBase):
             profiler="torch",
             torch_profiler_dir="/path/to/traces",
         )
+        mock_profiler = MagicMock()
 
-        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=MagicMock()):
+        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=mock_profiler):
             wrapper = TorchNPUProfilerWrapper(profiler_config, "trace_name")
 
         self.assertTrue(wrapper._profiler_step())
+        mock_profiler.step.assert_called_once()
 
     def test_step_calls_underlying_start_after_delay_iterations(self):
         """Work matches vLLM WorkerProfiler: first N worker steps defer _start."""
