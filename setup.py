@@ -77,10 +77,22 @@ def get_chip_type() -> str:
         npu_info_lines = subprocess.check_output(["npu-smi", "info", "-l"]).decode().strip().split("\n")
         npu_id = int(get_value_from_lines(npu_info_lines, "NPU ID"))
 
-        # Stage 1: query board info without -c flag
-        board_info_lines = (
-            subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id)]).decode().strip().split("\n")
-        )
+        # Stage 1: query board info without -c flag (Ascend950)
+        try:
+            board_info_lines = (
+                subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id)])
+                .decode()
+                .strip()
+                .split("\n")
+            )
+        except subprocess.CalledProcessError as e:
+            logging.warning(
+                "npu-smi board query without -c failed for NPU %s: %s. "
+                "Falling back to query with -c 0.",
+                npu_id,
+                e,
+            )
+            board_info_lines = []
 
         # Check if Chip Name exists (Ascend950 includes it directly)
         chip_name = get_value_from_lines(board_info_lines, "Chip Name")
@@ -121,7 +133,12 @@ def get_chip_type() -> str:
         else:
             raise ValueError(f"Unable to recognize chip name: {chip_name}, please manually set env SOC_VERSION")
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Get chip info failed: {e}")
+        logging.warning(
+            "Get chip info failed via npu-smi: %s. "
+            "If npu-smi is unavailable or the driver is not ready, set SOC_VERSION manually.",
+            e,
+        )
+        return ""
     except FileNotFoundError:
         logging.warning(
             "npu-smi command not found, if this is an npu envir, please check if npu driver is installed correctly."
