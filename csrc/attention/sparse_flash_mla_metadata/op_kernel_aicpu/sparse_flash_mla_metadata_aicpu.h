@@ -353,7 +353,7 @@ private:
     bool isSplitG_ = false;
     bool isSparseOriKv_ = false;
     bool isSparseCmpKv_ = false;
-    
+
 private:
     enum class ParamId : uint32_t {
     // input

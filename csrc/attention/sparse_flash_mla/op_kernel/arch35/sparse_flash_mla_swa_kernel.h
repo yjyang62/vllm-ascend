@@ -17,8 +17,8 @@
 #define SPARSE_FLASH_MLA_SWA_KERNEL_H
 #include "sparse_flash_mla_common_arch35.h"
 #include "sparse_flash_mla_kvcache.h"
-#include "sparse_flash_mla_scfa_block_cube.h"
-#include "sparse_flash_mla_scfa_block_vector.h"
+#include "sparse_flash_mla_csa_block_cube.h"
+#include "sparse_flash_mla_csa_block_vector.h"
 #include "kernel_operator.h"
 #include "../sparse_flash_mla_metadata.h"
 
@@ -102,7 +102,7 @@ private:
 
     // mm2左矩阵P
     BufferManager<BufferType::L1> l1BufferManager;
-    BuffersPolicyDB<BufferType::L1, SyncType::CROSS_CORE_SYNC_BACKWARD> l1PBuffers;
+    BuffersPolicyDB<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD> l1PBuffers;
     BuffersPolicy3buff<BufferType::L1, SyncType::INNER_CORE_SYNC> l1RightBuffers;
     /* GM信息 */
     GlobalTensor<uint32_t> metadataGm;
@@ -227,13 +227,14 @@ __aicore__ inline void SparseFlashMlaSwaKernel<CubeBlockType, VecBlockType>::Par
     constInfo.sparseBlockSize = 1;
     constInfo.actualSeqLenSize = constInfo.bSize + 1;
     constInfo.actualSeqLenKVSize = constInfo.bSize;
+    constInfo.oriKeyStride0 = sparseFlashMLABaseParams.oriKeyStride0;
     if constexpr (KV_LAYOUT_T == SMLA_LAYOUT::TND) {
         this->constInfo.isActualLenDimsOriKVNull = 0U;
     } else {
         this->constInfo.isActualLenDimsOriKVNull = (seqUsedOriKV == nullptr);
     }
 
-    if constexpr (IS_PA) {
+    if constexpr (KV_LAYOUT_T == SMLA_LAYOUT::PA_BBND) {
         constInfo.oriBlockSize = sparseFlashMLABaseParams.oriBlockSize;
         constInfo.cmpBlockSize = sparseFlashMLABaseParams.cmpBlockSize;
         constInfo.oriMaxBlockNumPerBatch = sparseFlashMLABaseParams.oriMaxBlockNumPerBatch;
@@ -279,7 +280,14 @@ __aicore__ inline void SparseFlashMlaSwaKernel<CubeBlockType, VecBlockType>::Par
         }
         int64_t s1Size = GetSeqLen(bIdx, hasActualSeqQlen, hasCuSeqlensQ,
                 actualSeqQlenGm, cuSeqlensQGm, constInfo.s1Size);
-        if (s1Size > s2Size || (LAYOUT_T == SMLA_LAYOUT::TND && hasActualSeqQlen)) {
+        int64_t expectQs;
+        if constexpr (LAYOUT_T == SMLA_LAYOUT::TND) {
+            expectQs = GetSeqLen(bIdx, false, hasCuSeqlensQ,
+                actualSeqQlenGm, cuSeqlensQGm, constInfo.s1Size);
+        } else {
+            expectQs = constInfo.s1Size;
+        }
+        if (s1Size > s2Size || s1Size < expectQs) {
             constInfo.needInit = 1;
             break;
         }
@@ -312,9 +320,9 @@ __aicore__ inline void SparseFlashMlaSwaKernel<CubeBlockType, VecBlockType>::Ini
     l1BufferManager.Init(pipe, 524288); // 512 * 1024
     // 保存p结果的L1内存必须放在第一个L1 policy上，保证和vec申请的地址相同
     l1PBuffers.Init(l1BufferManager, mm2LeftSize);
-    l1PBuffers.Get().SetCrossCoreID(INVALID_CROSS_CORE_EVENT_ID, crossCoreSyncBufId);
+    l1PBuffers.Get().SetCrossCoreID(crossCoreSyncBufId, INVALID_CROSS_CORE_EVENT_ID);
     crossCoreSyncBufId++;
-    l1PBuffers.Get().SetCrossCoreID(INVALID_CROSS_CORE_EVENT_ID, crossCoreSyncBufId);
+    l1PBuffers.Get().SetCrossCoreID(crossCoreSyncBufId, INVALID_CROSS_CORE_EVENT_ID);
     crossCoreSyncBufId++;
     if ASCEND_IS_AIC {
         l1RightBuffers.Init(l1BufferManager, mm1RightSize);
@@ -338,7 +346,7 @@ __aicore__ inline void SparseFlashMlaSwaKernel<CubeBlockType, VecBlockType>::Ini
         bmm1Buffers.Get().SetCrossCore();
     }
 }
- 
+
 template <typename CubeBlockType, typename VecBlockType>
 __aicore__ inline void SparseFlashMlaSwaKernel<CubeBlockType, VecBlockType>::InitLocalBuffer()
 {

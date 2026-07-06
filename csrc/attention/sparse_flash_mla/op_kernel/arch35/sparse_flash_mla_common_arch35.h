@@ -55,11 +55,11 @@ __aicore__ constexpr uint64_t Align64Func(uint64_t data)
 
 #define TEMPLATE_INTF \
     template <typename Q_T, typename KV_T, typename T, typename OUTPUT_T, \
-    bool IS_FD, bool IS_PA, SMLA_LAYOUT LAYOUT_T, \
+    bool IS_FD, SMLA_LAYOUT LAYOUT_T, \
     SMLA_LAYOUT KV_LAYOUT_T, SMLATemplateMode TEMPLATE_MODE, bool IS_SPLIT_G>
 
 #define TEMPLATE_INTF_ARGS \
-    Q_T, KV_T, T, OUTPUT_T, IS_FD, IS_PA, LAYOUT_T, KV_LAYOUT_T, TEMPLATE_MODE, IS_SPLIT_G
+    Q_T, KV_T, T, OUTPUT_T, IS_FD, LAYOUT_T, KV_LAYOUT_T, TEMPLATE_MODE, IS_SPLIT_G
 
 #define CUBE_BLOCK_TRAITS_TYPE_FIELDS(X) \
     X(Q_T) \
@@ -69,10 +69,9 @@ __aicore__ constexpr uint64_t Align64Func(uint64_t data)
 
 #define CUBE_BLOCK_TRAITS_CONST_FIELDS(X) \
     X(IS_FD, bool, false) \
-    X(IS_PA, bool, true) \
     X(LAYOUT_T, SMLA_LAYOUT, SMLA_LAYOUT::BSND) \
     X(KV_LAYOUT_T, SMLA_LAYOUT, SMLA_LAYOUT::PA_BBND) \
-    X(TEMPLATE_MODE, SMLATemplateMode, SMLATemplateMode::SCFA_TEMPLATE_MODE) \
+    X(TEMPLATE_MODE, SMLATemplateMode, SMLATemplateMode::CSA_TEMPLATE_MODE) \
     X(IS_SPLIT_G, bool, false) \
 
 

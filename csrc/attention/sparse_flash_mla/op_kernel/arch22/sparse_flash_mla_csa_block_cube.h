@@ -6,14 +6,14 @@
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
- */
+ */
 
 /*!
- * \file sparse_flash_mla_scfa_block_cube.h
+ * \file sparse_flash_mla_csa_block_cube.h
  * \brief use 7 buffer for matmul l1, better pipeline
  */
-#ifndef SPARSE_FLASH_MLA_SCFA_BLOCK_CUBE_H
-#define SPARSE_FLASH_MLA_SCFA_BLOCK_CUBE_H
+#ifndef SPARSE_FLASH_MLA_CSA_BLOCK_CUBE_H
+#define SPARSE_FLASH_MLA_CSA_BLOCK_CUBE_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
@@ -414,7 +414,8 @@ __aicore__ inline void SMLACubeBlock<SMLAT>::ComputeMm1(const RunInfo &info, con
                         static_cast<uint64_t>(constInfo.kvSeqSize) * seqStride : constInfo.oriKvStride0;
 
                     uint32_t curS2 = info.s2Idx * constInfo.s2BaseSize + info.s2StartPoint;
-                    uint64_t offset = (uint64_t)info.bIdx * batchStride + (uint64_t)curS2 * seqStride + (uint64_t)info.n2Idx * headStride + kL1 * D_SPLIT_SIZE;
+                    uint64_t offset = (uint64_t)info.bIdx * batchStride + (uint64_t)curS2 * seqStride +
+                        (uint64_t)info.n2Idx * headStride + kL1 * D_SPLIT_SIZE;
                     DataCopy(bL1Tensor, oriKvGm[offset], nd2nzPara);
                 } else if constexpr (KV_LAYOUT_T == SMLA_LAYOUT::TND) {
                     uint32_t curS2Offset = info.s2Idx * constInfo.s2BaseSize + info.s2StartPoint;
@@ -441,9 +442,9 @@ __aicore__ inline void SMLACubeBlock<SMLAT>::ComputeMm1(const RunInfo &info, con
                         nd2nzPara.srcNdMatrixStride = 0;
                         nd2nzPara.dstNzMatrixStride = 0;
                         DataCopy(bL1Tensor,
-                                    oriKvGm[info.tensorBOffset + curS2Offset * constInfo.headDim + (constInfo.headDim >> 1) +
-                                        nL1 * N_SPLIT_SIZE * constInfo.headDim],
-                                    nd2nzPara);
+                                    oriKvGm[info.tensorBOffset + curS2Offset * constInfo.headDim +
+                                        (constInfo.headDim >> 1) + nL1 * N_SPLIT_SIZE *
+                                        constInfo.headDim], nd2nzPara);
                     }
                 }
             } else {
@@ -676,7 +677,9 @@ __aicore__ inline void SMLACubeBlock<SMLAT>::ComputeMm2(const RunInfo &info, con
                             static_cast<uint64_t>(constInfo.kvSeqSize) * seqStride : constInfo.oriKvStride0;
 
                         uint32_t curS2 = info.s2Idx * constInfo.s2BaseSize + info.s2StartPoint;
-                        uint64_t offset = (uint64_t)info.bIdx * batchStride + (uint64_t)curS2 * seqStride + (uint64_t)info.n2Idx * headStride + nL1 * N_SPLIT_SIZE;
+                        uint64_t offset = (uint64_t)info.bIdx * batchStride +
+                            (uint64_t)curS2 * seqStride +
+                            (uint64_t)info.n2Idx * headStride + nL1 * N_SPLIT_SIZE;
                         subvTensor = bL1Tensor[(kL1 - kOffset) * 128 * N_SPLIT_SIZE];
                         DataCopy(subvTensor, oriKvGm[offset], nd2nzPara);
                     } else if constexpr (KV_LAYOUT_T == SMLA_LAYOUT::TND) {
@@ -691,7 +694,8 @@ __aicore__ inline void SMLACubeBlock<SMLAT>::ComputeMm2(const RunInfo &info, con
                         nd2nzPara.srcNdMatrixStride = 0;
                         nd2nzPara.dstNzMatrixStride = 0;
                         DataCopy(bL1Tensor[(kL1 - kOffset) * 128 * N_SPLIT_SIZE],
-                                oriKvGm[info.tensorBOffset + curS2Offset * constInfo.headDim + kL1 * 128 * constInfo.headDim +
+                                oriKvGm[info.tensorBOffset + curS2Offset * constInfo.headDim +
+                                kL1 * 128 * constInfo.headDim +
                                 nL1 * N_SPLIT_SIZE], nd2nzPara);
                     }
                 } else {
@@ -852,4 +856,4 @@ __aicore__ inline void SMLACubeBlock<SMLAT>::ComputeMm2(const RunInfo &info, con
     qpL1BufIter += mL1Loops;
 }
 } // namespace SMLAKernel
-#endif // SPARSE_FLASH_MLA_SCFA_BLOCK_CUBE_H
+#endif // SPARSE_FLASH_MLA_CSA_BLOCK_CUBE_H
