@@ -163,6 +163,60 @@ def test_a5_bf16_compressed_path_derives_cmp_kv_lengths():
     assert int(meta_kwargs["max_seqlen_cmp_kv"]) == int((seqused // 4).max())
 
 
+def test_a5_bf16_metadata_pads_local_tp_heads_to_operator_contract():
+    mock_torch = mock.MagicMock()
+    ops = mock_torch.ops._C_ascend
+    with mock.patch("vllm_ascend.device.device_op.torch", mock_torch):
+        _bf16_sparse_flash_mla_metadata(num_heads_q=16, seqused_kv="S", max_seqlen_kv=130, cmp_ratio=1)
+
+    ops.npu_sparse_flash_mla_metadata.assert_called_once_with(
+        num_heads_q=64,
+        seqused_ori_kv="S",
+        max_seqlen_ori_kv=130,
+        cmp_ratio=1,
+    )
+
+
+def test_a5_bf16_metadata_keeps_tensor_max_seqlen_cmp_kv():
+    seqused = torch.tensor([10, 64, 130], dtype=torch.int32)
+    max_cmp = torch.tensor(32, dtype=torch.int32)
+    mock_torch = mock.MagicMock()
+    ops = mock_torch.ops._C_ascend
+    with mock.patch("vllm_ascend.device.device_op.torch", mock_torch):
+        _bf16_sparse_flash_mla_metadata(
+            num_heads_q=64,
+            seqused_kv=seqused,
+            max_seqlen_kv=130,
+            max_seqlen_cmp_kv=max_cmp,
+            cmp_ratio=4,
+        )
+
+    meta_kwargs = ops.npu_sparse_flash_mla_metadata.call_args.kwargs
+    assert meta_kwargs["max_seqlen_cmp_kv"] is max_cmp
+
+
+def test_a5_bf16_sparse_flash_mla_pads_and_crops_local_tp_heads():
+    q = torch.ones(2, 16, 4)
+    sinks = torch.ones(16)
+
+    def fake_sparse_flash_mla(q, **kwargs):
+        assert q.shape == (2, 64, 4)
+        assert kwargs["sinks"].shape == (64,)
+        out = torch.arange(2 * 64 * 4, dtype=torch.float32).reshape(2, 64, 4)
+        return out, torch.empty(0)
+
+    with mock.patch(
+        "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_sparse_flash_mla",
+        side_effect=fake_sparse_flash_mla,
+        create=True,
+    ):
+        out, lse = _bf16_sparse_flash_mla(q, sinks=sinks, seqused_kv=torch.tensor([2]), cmp_ratio=1, layout_q="TND")
+
+    assert out.shape == (2, 16, 4)
+    torch.testing.assert_close(out, torch.arange(2 * 64 * 4, dtype=torch.float32).reshape(2, 64, 4)[:, :16])
+    assert lse.numel() == 0
+
+
 def test_a5_bf16_swa_only_does_not_add_cmp_kv_lengths():
     # SWA-only uses cmp_ratio=1; no compressed-KV params added.
     seqused = torch.tensor([8, 16], dtype=torch.int32)
