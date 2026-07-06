@@ -6,14 +6,14 @@
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
- */
+ */
 
 /*!
- * \file sparse_flash_mla_scfa_block_vector.h
+ * \file sparse_flash_mla_csa_block_vector.h
  * \brief
  */
-#ifndef SPARSE_FLASH_MLA_SCFA_BLOCK_VECTOR_H
-#define SPARSE_FLASH_MLA_SCFA_BLOCK_VECTOR_H
+#ifndef SPARSE_FLASH_MLA_CSA_BLOCK_VECTOR_H
+#define SPARSE_FLASH_MLA_CSA_BLOCK_VECTOR_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
@@ -52,7 +52,8 @@ public:
     __aicore__ inline void InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTensor<KV_T> vec1ResGm,
                                                 GlobalTensor<int32_t> actualSeqLengthsQGm,
                                                 GlobalTensor<int32_t> actualSeqLengthsKVGm,
-                                                GlobalTensor<int32_t> topKGm, GlobalTensor<T> sinksGm, GlobalTensor<T> softmaxLseGm);
+                                                GlobalTensor<int32_t> topKGm, GlobalTensor<T> sinksGm,
+                                                GlobalTensor<T> softmaxLseGm);
     __aicore__ inline void InitVec2GlobalTensor(GlobalTensor<T> accumOutGm, GlobalTensor<UPDATE_T> vec2ResGm,
                                                 GlobalTensor<MM2_OUT_T> mm2ResGm, GlobalTensor<OUT_T> attentionOutGm);
     __aicore__ inline void AllocEventID();
@@ -415,9 +416,10 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::ProcessLse(const RunInfo &info, c
 
 template <typename SMLAT>
 __aicore__ inline void
-SMLAVectorBlock<SMLAT>::SoftmaxFlashV2Compute(const RunInfo &info, const MSplitInfo &mSplitInfo, LocalTensor<T> &mmResUb,
-                                            LocalTensor<uint8_t> &softmaxTmpUb, uint32_t startRow,
-                                            uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount)
+SMLAVectorBlock<SMLAT>::SoftmaxFlashV2Compute(const RunInfo &info, const MSplitInfo &mSplitInfo,
+                                            LocalTensor<T> &mmResUb, LocalTensor<uint8_t> &softmaxTmpUb,
+                                            uint32_t startRow, uint32_t dealRowCount,
+                                            uint32_t columnCount, uint32_t actualColumnCount)
 {
     LocalTensor<T> inSumTensor;
     LocalTensor<T> inMaxTensor;
@@ -545,7 +547,8 @@ __aicore__ inline int64_t SMLAVectorBlock<SMLAT>::GetKeyGmOffset(int64_t realS2I
         int64_t blkTableOffset = realS2Idx % constInfo.paCmpBlockSize;
         realKeyGmOffset = cmpBlockTableGm_.GetValue(runInfo.bIdx * constInfo.cmpMaxBlockNumPerBatch + blkTableIdx) *
                           static_cast<int64_t>(constInfo.cmpKvStride0) +
-                          blkTableOffset * static_cast<int64_t>(constInfo.kvHeadNum) * static_cast<int64_t>(constInfo.headDim);
+                          blkTableOffset * static_cast<int64_t>(constInfo.kvHeadNum) *
+                          static_cast<int64_t>(constInfo.headDim);
 
     } else if constexpr (KV_LAYOUT_T == SMLA_LAYOUT::BSND) {
         int64_t batchStride = (constInfo.cmpKvStride0 == 0) ?
@@ -1054,7 +1057,8 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::RowDivs(LocalTensor<float> dstUb,
 }
 
 template <typename SMLAT>
-__aicore__ inline void SMLAVectorBlock<SMLAT>::RowMuls(LocalTensor<T> dstUb, LocalTensor<T> src0Ub, LocalTensor<T> src1Ub,
+__aicore__ inline void SMLAVectorBlock<SMLAT>::RowMuls(LocalTensor<T> dstUb,
+                                                     LocalTensor<T> src0Ub, LocalTensor<T> src1Ub,
                                                      uint32_t dealRowCount, uint32_t columnCount,
                                                      uint32_t actualColumnCount)
 {
@@ -1135,4 +1139,4 @@ __aicore__ inline void SMLAVectorBlock<SMLAT>::RowMuls(LocalTensor<T> dstUb, Loc
     }
 }
 } // namespace SMLAKernel
-#endif // SPARSE_FLASH_MLA_SCFA_BLOCK_VECTOR_H
+#endif // SPARSE_FLASH_MLA_CSA_BLOCK_VECTOR_H

@@ -208,6 +208,9 @@ struct RunInfo {
     uint8_t subBlockIdx; \
     bool hasOriTopkLength; \
     bool hasCmpTopkLength; \
+    /* nonContiguous */ \
+    int64_t oriKeyStride0; \
+    int64_t cmpKeyStride0; \
 
 #define INFER_CONST_INFO \
     /* 推理 */ \

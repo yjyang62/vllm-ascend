@@ -163,6 +163,55 @@ def test_a5_bf16_compressed_path_derives_cmp_kv_lengths():
     assert int(meta_kwargs["max_seqlen_cmp_kv"]) == int((seqused // 4).max())
 
 
+def test_a5_bf16_metadata_preserves_local_tp_heads():
+    mock_torch = mock.MagicMock()
+    ops = mock_torch.ops._C_ascend
+    with mock.patch("vllm_ascend.device.device_op.torch", mock_torch):
+        _bf16_sparse_flash_mla_metadata(num_heads_q=16, seqused_kv="S", max_seqlen_kv=130, cmp_ratio=1)
+
+    ops.npu_sparse_flash_mla_metadata.assert_called_once_with(
+        num_heads_q=16,
+        seqused_ori_kv="S",
+        max_seqlen_ori_kv=130,
+        cmp_ratio=1,
+    )
+
+
+def test_a5_bf16_metadata_keeps_tensor_max_seqlen_cmp_kv():
+    seqused = torch.tensor([10, 64, 130], dtype=torch.int32)
+    max_cmp = torch.tensor(32, dtype=torch.int32)
+    mock_torch = mock.MagicMock()
+    ops = mock_torch.ops._C_ascend
+    with mock.patch("vllm_ascend.device.device_op.torch", mock_torch):
+        _bf16_sparse_flash_mla_metadata(
+            num_heads_q=64,
+            seqused_kv=seqused,
+            max_seqlen_kv=130,
+            max_seqlen_cmp_kv=max_cmp,
+            cmp_ratio=4,
+        )
+
+    meta_kwargs = ops.npu_sparse_flash_mla_metadata.call_args.kwargs
+    assert meta_kwargs["max_seqlen_cmp_kv"] is max_cmp
+
+
+def test_a5_bf16_sparse_flash_mla_preserves_local_tp_heads():
+    q = torch.ones(2, 16, 4)
+    sinks = torch.ones(16)
+    seqused = torch.tensor([2], dtype=torch.int32)
+
+    mock_torch = mock.MagicMock()
+    ops = mock_torch.ops._C_ascend
+    with mock.patch("vllm_ascend.device.device_op.torch", mock_torch):
+        _bf16_sparse_flash_mla(q, sinks=sinks, seqused_kv=seqused, cmp_ratio=1, layout_q="TND")
+
+    ops.npu_sparse_flash_mla.assert_called_once()
+    call_args, call_kwargs = ops.npu_sparse_flash_mla.call_args
+    assert call_args[0] is q
+    assert call_kwargs["sinks"] is sinks
+    assert call_kwargs["seqused_ori_kv"] is seqused
+
+
 def test_a5_bf16_swa_only_does_not_add_cmp_kv_lengths():
     # SWA-only uses cmp_ratio=1; no compressed-KV params added.
     seqused = torch.tensor([8, 16], dtype=torch.int32)

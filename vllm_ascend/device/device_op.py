@@ -823,6 +823,10 @@ def _bf16_add_cmp_kv_lengths(kwargs):
         kwargs["cmp_residual_kv"] = seqused_ori % cmp_ratio
 
 
+def _missing_max_seqlen_cmp_kv(value: Any) -> bool:
+    return value is None or (isinstance(value, int) and value == 0)
+
+
 def _bf16_sparse_flash_mla_metadata(**kwargs):
     """Adapt the FP8 ``kv_quant_sparse_attn_sharedkv_metadata`` call convention
     to the BF16 ``npu_sparse_flash_mla_metadata`` signature.
@@ -839,7 +843,7 @@ def _bf16_sparse_flash_mla_metadata(**kwargs):
     if "max_seqlen_kv" in kwargs:
         kwargs["max_seqlen_ori_kv"] = kwargs.pop("max_seqlen_kv")
     _bf16_add_cmp_kv_lengths(kwargs)
-    if kwargs.get("seqused_cmp_kv") is not None and not kwargs.get("max_seqlen_cmp_kv"):
+    if kwargs.get("seqused_cmp_kv") is not None and _missing_max_seqlen_cmp_kv(kwargs.get("max_seqlen_cmp_kv")):
         kwargs["max_seqlen_cmp_kv"] = kwargs["seqused_cmp_kv"].max()
     return torch.ops._C_ascend.npu_sparse_flash_mla_metadata(**kwargs)
 
