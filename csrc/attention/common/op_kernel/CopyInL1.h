@@ -39,6 +39,7 @@ struct PAShape{
     uint32_t copyRowNumAlign;
     uint32_t pageStride = 0;
     uint32_t n2Stride = 0;
+    int64_t blockStride0 = 0;
 };
 
 struct Position{
@@ -332,7 +333,7 @@ __aicore__ inline void GmCopyInToL1PA(LocalTensor<L1Type>& l1Tensor, GlobalTenso
             copyRowCnt = shape.copyRowNum - copyFinishRowCnt; // 一个block未拷满
         }
         uint64_t offset = (shape.pageStride > 0) ? (idInBlockTable * shape.pageStride) :
-            (idInBlockTable * shape.blockSize * shape.headNum * shape.headDim);
+            (idInBlockTable * shape.blockSize * shape.headNum * (shape.headDim + shape.blockStride0));
         if (kvLayout == KVLAYOUT::NZ) {
             if (shape.n2Stride > 0) {
                 offset += static_cast<uint64_t>(startPos.n2Idx * shape.n2Stride) +
