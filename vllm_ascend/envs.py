@@ -117,6 +117,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 1: use the BF16 path that stores ori_kv/cmp_kv as BF16 (PA_BBND layout)
     #     and runs `npu_sparse_flash_mla`. Only takes effect on A5.
     "VLLM_ASCEND_DSV4_KV_BF16": lambda: bool(int(os.getenv("VLLM_ASCEND_DSV4_KV_BF16", "0"))),
+    # Whether to print one-line diagnostic statistics for A5 BF16
+    # `npu_sparse_flash_mla` inference outputs. This is a non-sensitive debug
+    # switch for diagnosing small-head TP precision issues.
+    # 0 (default): disabled.
+    # 1: enabled; logs per query-head count/status (finite/NaN/Inf counts and
+    #    finite abs max).
+    "VLLM_ASCEND_LOG_SPARSE_FLASH_MLA_OUTPUT": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_LOG_SPARSE_FLASH_MLA_OUTPUT", "0"))
+    ),
 }
 
 # end-env-vars-definition
