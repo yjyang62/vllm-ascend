@@ -20,6 +20,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.mxfp_compat import (
@@ -32,6 +33,8 @@ from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, dsv4_use_kv_bf16, get_ascend_device_type
+
+_SPARSE_FLASH_MLA_LOGGED_STATES: set[tuple[int, str]] = set()
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -827,6 +830,54 @@ def _missing_max_seqlen_cmp_kv(value: Any) -> bool:
     return value is None or (isinstance(value, int) and value == 0)
 
 
+def _sparse_flash_mla_q_heads(q: torch.Tensor, layout_q: str) -> int | None:
+    if layout_q == "TND" and q.dim() == 3:
+        return q.shape[1]
+    if layout_q == "BSND" and q.dim() == 4:
+        return q.shape[2]
+    return None
+
+
+def _log_sparse_flash_mla_output(q: Any, output: Any, layout_q: str) -> None:
+    if not isinstance(q, torch.Tensor) or not isinstance(output, torch.Tensor):
+        return
+    num_heads = _sparse_flash_mla_q_heads(q, layout_q)
+    if num_heads is None:
+        return
+
+    out = output.detach().float()
+    finite_mask = torch.isfinite(out)
+    total = out.numel()
+    finite = int(finite_mask.sum().item())
+    nan_count = int(torch.isnan(out).sum().item())
+    posinf_count = int(torch.isposinf(out).sum().item())
+    neginf_count = int(torch.isneginf(out).sum().item())
+    if finite > 0:
+        finite_values = out[finite_mask]
+        abs_max = float(finite_values.abs().max().item())
+    else:
+        abs_max = float("inf")
+
+    status = "bad" if finite != total or abs_max > 1.0e6 else "ok"
+    log_key = (num_heads, status)
+    if log_key in _SPARSE_FLASH_MLA_LOGGED_STATES:
+        return
+    _SPARSE_FLASH_MLA_LOGGED_STATES.add(log_key)
+    logger.warning(
+        "sparse_flash_mla BF16 output check: N1=%s shape=%s status=%s "
+        "finite=%s/%s nan=%s +inf=%s -inf=%s finite_abs_max=%.4e",
+        num_heads,
+        tuple(output.shape),
+        status,
+        finite,
+        total,
+        nan_count,
+        posinf_count,
+        neginf_count,
+        abs_max,
+    )
+
+
 def _bf16_sparse_flash_mla_metadata(**kwargs):
     """Adapt the FP8 ``kv_quant_sparse_attn_sharedkv_metadata`` call convention
     to the BF16 ``npu_sparse_flash_mla_metadata`` signature.
@@ -860,7 +911,11 @@ def _bf16_sparse_flash_mla(*args, **kwargs):
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     _bf16_add_cmp_kv_lengths(kwargs)
-    return torch.ops._C_ascend.npu_sparse_flash_mla(*args, **kwargs)
+    result = torch.ops._C_ascend.npu_sparse_flash_mla(*args, **kwargs)
+    output = result[0] if isinstance(result, tuple) else result
+    layout_q = kwargs.get("layout_q", "BSND")
+    _log_sparse_flash_mla_output(args[0] if args else None, output, layout_q)
+    return result
 
 
 def _bf16_scatter_kv_cache(cache, x, slot_mapping):
