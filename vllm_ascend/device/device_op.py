@@ -33,6 +33,8 @@ from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, dsv4_use_kv_bf16, get_ascend_device_type
 
+SPARSE_FLASH_MLA_STABLE_Q_HEADS = 64
+
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
@@ -823,6 +825,55 @@ def _bf16_add_cmp_kv_lengths(kwargs):
         kwargs["cmp_residual_kv"] = seqused_ori % cmp_ratio
 
 
+def _bf16_q_head_axis(q: torch.Tensor, layout_q: str) -> int:
+    if layout_q == "TND":
+        expected_dim = 3
+        head_axis = 1
+    elif layout_q == "BSND":
+        expected_dim = 4
+        head_axis = 2
+    else:
+        raise ValueError(f"Unsupported sparse_flash_mla layout_q={layout_q!r}.")
+    if q.dim() != expected_dim:
+        raise ValueError(f"sparse_flash_mla q with layout {layout_q} must be {expected_dim}D, got {tuple(q.shape)}.")
+    return head_axis
+
+
+def _bf16_pad_q_heads_for_sparse_flash_mla(q: torch.Tensor, kwargs: dict[str, Any]) -> tuple[torch.Tensor, int]:
+    """Run A5 BF16 sparse_flash_mla on the stable 64-head query shape.
+
+    The A5 op advertises smaller N1 values, but TP-local N1<64 has shown
+    runtime failures/unstable output while N1=64 is stable. DSV4 heads are
+    independent here, so padded lanes are discarded after the op.
+    """
+    layout_q = kwargs.get("layout_q", "BSND")
+    head_axis = _bf16_q_head_axis(q, layout_q)
+    local_heads = q.shape[head_axis]
+    if local_heads == SPARSE_FLASH_MLA_STABLE_Q_HEADS:
+        return q, local_heads
+    if local_heads <= 0 or local_heads > SPARSE_FLASH_MLA_STABLE_Q_HEADS:
+        raise ValueError(
+            f"sparse_flash_mla requires 1..{SPARSE_FLASH_MLA_STABLE_Q_HEADS} q heads before padding, "
+            f"got {local_heads}."
+        )
+
+    pad_shape = list(q.shape)
+    pad_shape[head_axis] = SPARSE_FLASH_MLA_STABLE_Q_HEADS - local_heads
+    q = torch.cat((q, q.new_zeros(pad_shape)), dim=head_axis)
+
+    sinks = kwargs.get("sinks")
+    if isinstance(sinks, torch.Tensor) and sinks.dim() == 1 and sinks.shape[0] == local_heads:
+        kwargs["sinks"] = torch.cat((sinks, sinks.new_zeros(SPARSE_FLASH_MLA_STABLE_Q_HEADS - local_heads)), dim=0)
+    return q, local_heads
+
+
+def _bf16_crop_sparse_flash_mla_output(out: Any, local_heads: int, layout_q: str) -> Any:
+    if local_heads == SPARSE_FLASH_MLA_STABLE_Q_HEADS or not isinstance(out, torch.Tensor):
+        return out
+    head_axis = _bf16_q_head_axis(out, layout_q)
+    return out.narrow(head_axis, 0, local_heads)
+
+
 def _missing_max_seqlen_cmp_kv(value: Any) -> bool:
     return value is None or (isinstance(value, int) and value == 0)
 
@@ -843,6 +894,8 @@ def _bf16_sparse_flash_mla_metadata(**kwargs):
     if "max_seqlen_kv" in kwargs:
         kwargs["max_seqlen_ori_kv"] = kwargs.pop("max_seqlen_kv")
     _bf16_add_cmp_kv_lengths(kwargs)
+    if 0 < kwargs.get("num_heads_q", 0) < SPARSE_FLASH_MLA_STABLE_Q_HEADS:
+        kwargs["num_heads_q"] = SPARSE_FLASH_MLA_STABLE_Q_HEADS
     if kwargs.get("seqused_cmp_kv") is not None and _missing_max_seqlen_cmp_kv(kwargs.get("max_seqlen_cmp_kv")):
         kwargs["max_seqlen_cmp_kv"] = kwargs["seqused_cmp_kv"].max()
     return torch.ops._C_ascend.npu_sparse_flash_mla_metadata(**kwargs)
@@ -860,7 +913,17 @@ def _bf16_sparse_flash_mla(*args, **kwargs):
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     _bf16_add_cmp_kv_lengths(kwargs)
-    return torch.ops._C_ascend.npu_sparse_flash_mla(*args, **kwargs)
+    if not args:
+        raise ValueError("sparse_flash_mla q tensor must be passed positionally.")
+    q = args[0]
+    if not isinstance(q, torch.Tensor):
+        return torch.ops._C_ascend.npu_sparse_flash_mla(*args, **kwargs)
+    q, local_heads = _bf16_pad_q_heads_for_sparse_flash_mla(q, kwargs)
+    result = torch.ops._C_ascend.npu_sparse_flash_mla(q, *args[1:], **kwargs)
+    if isinstance(result, tuple):
+        output = _bf16_crop_sparse_flash_mla_output(result[0], local_heads, kwargs.get("layout_q", "BSND"))
+        return (output, *result[1:])
+    return _bf16_crop_sparse_flash_mla_output(result, local_heads, kwargs.get("layout_q", "BSND"))
 
 
 def _bf16_scatter_kv_cache(cache, x, slot_mapping):
