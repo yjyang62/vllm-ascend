@@ -106,6 +106,8 @@ BLOCK_SIZE = 64  # PageAttention block size, multiple of 16, <= 1024
 WINDOW = 128  # sliding window size; ori_win_left == WINDOW - 1 == 127
 DTYPE = torch.bfloat16
 DEVICE = "npu"
+CSA_CMP_RATIO = 4
+CSA_TOPK = int(os.getenv("SMLA_CSA_TOPK", "32"))
 # The operator requires a `sinks` tensor (it errors with "sinks must be
 # provided" on None). To run a "no effective sink" correctness pass we feed a
 # large-negative sink so exp(sink - m) underflows to ~0 on both the op and the
@@ -137,6 +139,18 @@ def _build_paged_kv(seq_len, head_dim, dtype, seed):
         kv_cache[blk, off, 0] = kv_dense[s].to(dtype)
     block_table = torch.arange(num_blocks, dtype=torch.int32).view(1, num_blocks)
     return kv_cache.to(DEVICE), block_table.to(DEVICE), kv_dense
+
+
+def _build_paged_kv_from_dense(kv_dense, head_dim, dtype):
+    """Build PA_BBND KV cache from a CPU fp32 [S, D] tensor."""
+    seq_len = kv_dense.shape[0]
+    num_blocks = math.ceil(seq_len / BLOCK_SIZE)
+    kv_cache = torch.zeros(num_blocks, BLOCK_SIZE, NUM_KV_HEADS, head_dim, dtype=dtype)
+    for s in range(seq_len):
+        blk, off = s // BLOCK_SIZE, s % BLOCK_SIZE
+        kv_cache[blk, off, 0] = kv_dense[s].to(dtype)
+    block_table = torch.arange(num_blocks, dtype=torch.int32).view(1, num_blocks)
+    return kv_cache.to(DEVICE), block_table.to(DEVICE)
 
 
 def _golden_shared_kv_attention(q, kv, sinks, scale):
@@ -202,6 +216,49 @@ def _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv):
     )
 
 
+def _build_csa_metadata(
+    t_len,
+    seq_len,
+    cmp_len,
+    cu_seqlens_q,
+    seqused_ori_kv,
+    seqused_cmp_kv,
+    cmp_residual_kv,
+    topk,
+):
+    """Build metadata for scenario 2 (ori_kv + compressed KV with sparse indices)."""
+    return torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
+        NUM_Q_HEADS,
+        NUM_KV_HEADS,
+        HEAD_DIM,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_ori_kv=None,
+        cu_seqlens_cmp_kv=None,
+        seqused_q=None,
+        seqused_ori_kv=seqused_ori_kv,
+        seqused_cmp_kv=seqused_cmp_kv,
+        cmp_residual_kv=cmp_residual_kv,
+        ori_topk_length=None,
+        cmp_topk_length=None,
+        batch_size=1,
+        max_seqlen_q=t_len,
+        max_seqlen_ori_kv=seq_len,
+        max_seqlen_cmp_kv=cmp_len,
+        ori_topk=0,
+        cmp_topk=topk,
+        cmp_ratio=CSA_CMP_RATIO,
+        ori_mask_mode=4,
+        cmp_mask_mode=3,
+        ori_win_left=WINDOW - 1,
+        ori_win_right=0,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        has_ori_kv=True,
+        has_cmp_kv=True,
+        device=DEVICE,
+    )
+
+
 def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, scale, metadata):
     """Invoke npu_sparse_flash_mla for scenario 1 (SWA-only)."""
     return _unwrap(
@@ -216,6 +273,44 @@ def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, 
             softmax_scale=scale,
             cmp_ratio=1,
             ori_mask_mode=4,
+            ori_win_left=WINDOW - 1,
+            ori_win_right=0,
+            layout_q="TND",
+            layout_kv="PA_BBND",
+        )
+    )
+
+
+def _call_csa(
+    q,
+    ori_kv,
+    cmp_kv,
+    ori_block_table,
+    cmp_block_table,
+    cmp_sparse_indices,
+    seqused_ori_kv,
+    cu_seqlens_q,
+    sinks,
+    scale,
+    metadata,
+):
+    """Invoke npu_sparse_flash_mla for scenario 2 (ori_kv + compressed sparse KV)."""
+    return _unwrap(
+        torch.ops._C_ascend.npu_sparse_flash_mla(
+            q,
+            ori_kv=ori_kv,
+            cmp_kv=cmp_kv,
+            cmp_sparse_indices=cmp_sparse_indices,
+            ori_block_table=ori_block_table,
+            cmp_block_table=cmp_block_table,
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_ori_kv=seqused_ori_kv,
+            sinks=sinks,
+            metadata=metadata,
+            softmax_scale=scale,
+            cmp_ratio=CSA_CMP_RATIO,
+            ori_mask_mode=4,
+            cmp_mask_mode=3,
             ori_win_left=WINDOW - 1,
             ori_win_right=0,
             layout_q="TND",
@@ -285,6 +380,64 @@ def run_scenario_one(seq_len, sink_value=None):
     return ok
 
 
+def run_scenario_two(seq_len):
+    """Scenario 2 (ori_kv + compressed sparse KV): smoke only.
+
+    This is intentionally not a numerical golden. It isolates whether the A5
+    BF16 SparseFlashMla CSA path accepts the same TP-local N1 as the SWA path.
+    """
+    print(f"\n=== scenario 2 (CSA compressed), seq_len={seq_len}, topk={CSA_TOPK} ===")
+    torch.manual_seed(SEED)
+    t_len = seq_len
+    cmp_len = seq_len // CSA_CMP_RATIO
+    topk = min(CSA_TOPK, cmp_len)
+
+    q = (torch.randn(t_len, NUM_Q_HEADS, HEAD_DIM, dtype=torch.float32) * 0.1).to(DTYPE).to(DEVICE)
+    ori_kv, ori_block_table, _ = _build_paged_kv(seq_len, HEAD_DIM, DTYPE, SEED + 1)
+    cmp_dense = torch.randn(cmp_len, HEAD_DIM, dtype=torch.float32) * 0.1
+    cmp_kv, cmp_block_table = _build_paged_kv_from_dense(cmp_dense, HEAD_DIM, DTYPE)
+    cmp_sparse_indices = torch.arange(topk, dtype=torch.int32).view(1, 1, topk).expand(t_len, NUM_KV_HEADS, topk)
+    cmp_sparse_indices = cmp_sparse_indices.to(DEVICE)
+
+    cu_seqlens_q = torch.tensor([0, t_len], dtype=torch.int32).to(DEVICE)
+    seqused_ori_kv = torch.tensor([seq_len], dtype=torch.int32).to(DEVICE)
+    seqused_cmp_kv = torch.tensor([cmp_len], dtype=torch.int32).to(DEVICE)
+    cmp_residual_kv = torch.tensor([seq_len % CSA_CMP_RATIO], dtype=torch.int32).to(DEVICE)
+    sinks = torch.full((NUM_Q_HEADS,), SINK_DISABLED, dtype=torch.float32).to(DEVICE)
+    scale = 1.0 / math.sqrt(HEAD_DIM)
+
+    metadata = _build_csa_metadata(
+        t_len,
+        seq_len,
+        cmp_len,
+        cu_seqlens_q,
+        seqused_ori_kv,
+        seqused_cmp_kv,
+        cmp_residual_kv,
+        topk,
+    )
+    out = _call_csa(
+        q,
+        ori_kv,
+        cmp_kv,
+        ori_block_table,
+        cmp_block_table,
+        cmp_sparse_indices,
+        seqused_ori_kv,
+        cu_seqlens_q,
+        sinks,
+        scale,
+        metadata,
+    )
+    out_cpu = out.cpu().float()
+    finite = torch.isfinite(out_cpu).all().item()
+    print(f"output shape={tuple(out.shape)} dtype={out.dtype}")
+    print(f"all finite : {finite}")
+    assert out.shape == (t_len, NUM_Q_HEADS, HEAD_DIM), f"output shape mismatch: {tuple(out.shape)}"
+    assert finite, "CSA output contains NaN/Inf"
+    return True
+
+
 def main():
     if not hasattr(torch.ops._C_ascend, "npu_sparse_flash_mla"):
         raise RuntimeError(
@@ -331,14 +484,19 @@ def main():
     for sink_value in (0.0, 2.0):
         sink_ok.append(run_scenario_one(sink_seq, sink_value=sink_value))
 
+    print("\n##### PASS 4: compressed CSA smoke (block-aligned seq_len=128) #####")
+    csa_ok = run_scenario_two(2 * BLOCK_SIZE)
+
     print("\n=== SUMMARY ===")
     print(f"core (no-sink) match @ block-aligned {aligned_lens} : {core_ok}")
     print(f"partial-block (no-sink) match @ seq_len 8/32        : {partial_ok}")
     print(f"sink match @ seq_len={sink_seq} for sink 0.0/2.0          : {sink_ok}")
+    print(f"CSA compressed smoke @ seq_len={2 * BLOCK_SIZE}             : {csa_ok}")
     print(
         "Interpretation: PASS 1 all True => operator core math is correct. "
         "PASS 2 is expected to be False (zero-padded tail of a partial block is "
-        "counted as keys). If PASS 3 is False, the op's sink convention differs "
+        "counted as keys). PASS 4 isolates the compressed/CSA path used by DSV4 "
+        "c4 attention. If PASS 3 is False, the op's sink convention differs "
         "from the golden (e.g. sink not added to the denominator); share these "
         "numbers to refine the sink formula."
     )
