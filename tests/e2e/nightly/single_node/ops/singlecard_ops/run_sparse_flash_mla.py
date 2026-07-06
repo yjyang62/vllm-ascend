@@ -122,6 +122,16 @@ def _unwrap(out):
     return out
 
 
+def _finite_summary(tensor):
+    finite_mask = torch.isfinite(tensor)
+    finite_count = int(finite_mask.sum().item())
+    total_count = tensor.numel()
+    if finite_count == 0:
+        return finite_count, total_count, None, None
+    finite_values = tensor[finite_mask]
+    return finite_count, total_count, finite_values.min().item(), finite_values.max().item()
+
+
 def _build_paged_kv(seq_len, head_dim, dtype, seed):
     """Build a single-batch PA_BBND KV cache + block_table.
 
@@ -353,9 +363,16 @@ def run_scenario_one(seq_len, sink_value=None):
     print(f"output shape={tuple(out.shape)} dtype={out.dtype}")
     finite = torch.isfinite(out_cpu).all().item()
     print(f"all finite : {finite}")
+    if not finite:
+        finite_count, total_count, finite_min, finite_max = _finite_summary(out_cpu)
+        print(
+            "finite summary: "
+            f"{finite_count}/{total_count}, finite_min={finite_min}, finite_max={finite_max}"
+        )
     assert out.shape[0] == t_len, f"token dim mismatch: {tuple(out.shape)}"
     assert out.shape[1] == NUM_Q_HEADS, f"head dim mismatch: {tuple(out.shape)}"
-    assert finite, "output contains NaN/Inf"
+    if not finite:
+        return False
 
     # --- golden compare (only when output head_dim == query head_dim) ---
     if out_cpu.shape[-1] != HEAD_DIM:
@@ -433,9 +450,14 @@ def run_scenario_two(seq_len):
     finite = torch.isfinite(out_cpu).all().item()
     print(f"output shape={tuple(out.shape)} dtype={out.dtype}")
     print(f"all finite : {finite}")
+    if not finite:
+        finite_count, total_count, finite_min, finite_max = _finite_summary(out_cpu)
+        print(
+            "finite summary: "
+            f"{finite_count}/{total_count}, finite_min={finite_min}, finite_max={finite_max}"
+        )
     assert out.shape == (t_len, NUM_Q_HEADS, HEAD_DIM), f"output shape mismatch: {tuple(out.shape)}"
-    assert finite, "CSA output contains NaN/Inf"
-    return True
+    return bool(finite)
 
 
 def main():
