@@ -519,7 +519,7 @@ __aicore__ inline void CSABlockVec<TEMPLATE_ARGS>::ProcessVec1(
             // s1切1,vec0: 0 ~ halfMRealSize - 1, vec1: gSize - halfMRealSize ~ gSize
             int64_t sinksOffset = 0;
             if constexpr (!IS_SPLIT_G) {
-                sinksOffset = GetBlockIdx() % 2 == 0 ? 0 : runInfo.firstHalfMRealSize;
+                sinksOffset = GetBlockIdx() % 2 == 0 ? 0 : runInfo.firstHalfMRealSize % constInfo.gSize;
             } else {
                 switch (constInfo.aivIdx % 4) {
                     case 0:
@@ -780,6 +780,10 @@ __aicore__ inline void CSABlockVec<TEMPLATE_ARGS>::InitSinksBuffer(ConstInfo &co
     dataCopyParams.dstStride = 0U;
     DataCopyPadExtParams<T> padParams;
     DataCopyPad(sinksUb, this->sinksGm, dataCopyParams, padParams);
+    for (uint32_t offset = constInfo.gSize; offset < s1BaseSize; offset += constInfo.gSize) {
+        DataCopy(sinksUb[offset], sinksUb, constInfo.gSize);
+    }
+    PipeBarrier<PIPE_V>();
     TEventID mte2ToV = GetTPipePtr()->AllocEventID<HardEvent::MTE2_V>();
     SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV);
     WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV);
