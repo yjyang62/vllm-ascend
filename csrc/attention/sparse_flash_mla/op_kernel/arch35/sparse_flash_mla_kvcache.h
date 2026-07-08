@@ -175,7 +175,7 @@ __aicore__ inline void ComputeSouterParam(RunParamStr& runParam, const ConstInfo
     runParam.firstHalfS1RealSize = runParam.halfS1RealSize;
     if (constInfo.subBlockIdx == 1) {
         runParam.halfS1RealSize = runParam.s1RealSize - runParam.halfS1RealSize;
-        runParam.sOuterOffset = cubeSOuterOffset + runParam.halfMRealSize / constInfo.gSize;
+        runParam.sOuterOffset = cubeSOuterOffset + runParam.firstHalfMRealSize / constInfo.gSize;
     } else {
         runParam.sOuterOffset = cubeSOuterOffset;
     }
@@ -201,7 +201,7 @@ __aicore__ inline void LoopSOuterOffsetInit(RunParamStr& runParam, const ConstIn
                 runParam.goIdx * constInfo.dSizeV;
         }
         if (constInfo.subBlockIdx == 1) {
-            runParam.attentionOutOffset += runParam.halfMRealSize * constInfo.dSizeV;
+            runParam.attentionOutOffset += (runParam.firstHalfMRealSize % constInfo.gSize) * constInfo.dSizeV;
         }
         if (constInfo.returnSoftmaxLse) {
             if constexpr (LAYOUT_T == SMLA_LAYOUT::TND) {
@@ -219,7 +219,7 @@ __aicore__ inline void LoopSOuterOffsetInit(RunParamStr& runParam, const ConstIn
                 runParam.softmaxLseOffset += 64; // splitG时，需要偏移64
             }
             if (constInfo.subBlockIdx == 1) {
-                runParam.softmaxLseOffset += runParam.firstHalfMRealSize;
+                runParam.softmaxLseOffset += runParam.firstHalfMRealSize % constInfo.gSize;
             }
         }
     }
