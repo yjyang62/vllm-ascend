@@ -4,9 +4,50 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+class TestNPUModelRunnerDummyAttnMetadata(unittest.TestCase):
+    def _build_runner(self, *, use_compress: bool) -> NPUModelRunner:
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.use_compress = use_compress
+        return runner
+
+    def test_dsa_compress_builds_metadata_for_full_decode_only_idle_dummy(self):
+        runner = self._build_runner(use_compress=True)
+
+        self.assertTrue(
+            runner._should_build_dummy_attn_metadata(
+                force_attention=False,
+                is_profile=False,
+                cudagraph_runtime_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+            )
+        )
+
+    def test_non_dsa_skips_metadata_for_full_decode_only_idle_dummy(self):
+        runner = self._build_runner(use_compress=False)
+
+        self.assertFalse(
+            runner._should_build_dummy_attn_metadata(
+                force_attention=False,
+                is_profile=False,
+                cudagraph_runtime_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+            )
+        )
+
+    def test_dsa_compress_skips_metadata_during_profile(self):
+        runner = self._build_runner(use_compress=True)
+
+        self.assertFalse(
+            runner._should_build_dummy_attn_metadata(
+                force_attention=False,
+                is_profile=True,
+                cudagraph_runtime_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+            )
+        )
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):

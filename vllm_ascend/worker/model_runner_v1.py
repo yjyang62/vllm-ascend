@@ -3259,7 +3259,14 @@ class NPUModelRunner(GPUModelRunner):
         """
         # If force_attention is True, we always capture attention, Otherwise,
         # it only happens for cudagraph_runtime_mode=FULL.
-        return force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL
+        if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            return True
+        # DSA/compress models must always build fresh metadata for idle
+        # execute_dummy_batch() runs. Without this, FULL_DECODE_ONLY (and
+        # enforce-eager where ACL graphs are disabled) skip metadata
+        # construction, so stale block-table / slot-mapping from the previous
+        # real request can be fed to DSA kernels on the next dummy forward.
+        return self.use_compress and not is_profile
 
     @torch.inference_mode()
     def _dummy_run(
@@ -4900,6 +4907,25 @@ class NPUModelRunner(GPUModelRunner):
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=(self.compilation_config.static_forward_context),
         )
+
+    def shutdown(self) -> None:
+        """Best-effort cleanup that tolerates an already-aborted NPU device."""
+        try:
+            from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+
+            ACLGraphWrapper.clear_all_graphs()
+        except Exception:
+            logger.exception("NPUModelRunner shutdown: failed to clear ACL graphs")
+
+        try:
+            super().shutdown()
+        except RuntimeError as exc:
+            logger.warning(
+                "NPUModelRunner shutdown: upstream cleanup failed after device error: %s",
+                exc,
+            )
+        except Exception:
+            logger.exception("NPUModelRunner shutdown: unexpected upstream cleanup failure")
 
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
