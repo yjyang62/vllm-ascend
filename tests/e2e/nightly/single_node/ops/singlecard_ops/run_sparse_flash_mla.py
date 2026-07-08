@@ -39,6 +39,12 @@ Operator interface (torch binding, see csrc/torch_binding.cpp)::
         topk_value_mode=1, return_softmax_lse=False,
     ) -> (out, softmax_lse)
 
+    For cmp_ratio != 1 with cmp_mask_mode=3 (CSA compressed path), both the
+    metadata op and the main op require ``seqused_cmp_kv`` and
+    ``cmp_residual_kv`` tensors (see ``_bf16_add_cmp_kv_lengths`` in
+    ``device_op.py``). vLLM serve routes through that wrapper; this script must
+    pass them explicitly when calling ``torch.ops._C_ascend`` directly.
+
     npu_sparse_flash_mla_metadata(
         num_heads_q, num_heads_kv, head_dim,
         cu_seqlens_q=None, cu_seqlens_ori_kv=None, cu_seqlens_cmp_kv=None,
@@ -299,6 +305,8 @@ def _call_csa(
     cmp_block_table,
     cmp_sparse_indices,
     seqused_ori_kv,
+    seqused_cmp_kv,
+    cmp_residual_kv,
     cu_seqlens_q,
     sinks,
     scale,
@@ -315,6 +323,8 @@ def _call_csa(
             cmp_block_table=cmp_block_table,
             cu_seqlens_q=cu_seqlens_q,
             seqused_ori_kv=seqused_ori_kv,
+            seqused_cmp_kv=seqused_cmp_kv,
+            cmp_residual_kv=cmp_residual_kv,
             sinks=sinks,
             metadata=metadata,
             softmax_scale=scale,
@@ -441,6 +451,8 @@ def run_scenario_two(seq_len):
         cmp_block_table,
         cmp_sparse_indices,
         seqused_ori_kv,
+        seqused_cmp_kv,
+        cmp_residual_kv,
         cu_seqlens_q,
         sinks,
         scale,
