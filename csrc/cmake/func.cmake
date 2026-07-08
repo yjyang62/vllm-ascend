@@ -400,11 +400,7 @@ function(add_ops_src_copy)
         set(BELONG_MC2_OPS TRUE)
     endif()
 
-    if(NOT BUILD_OPS_RTY_KERNEL AND BELONG_MC2_OPS)
-        file(GLOB SRC_FILES ${SRC_COPY_SRC}/* ${SRC_COPY_SRC}/op_kernel/*)
-    else()
-        file(GLOB SRC_FILES ${SRC_COPY_SRC}/*)
-    endif()
+    file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS ${SRC_COPY_SRC}/*)
     list(FILTER SRC_FILES EXCLUDE REGEX "op_host")
 
     get_filename_component(PARENT_PTH "${SRC_COPY_SRC}" DIRECTORY)
@@ -418,20 +414,13 @@ function(add_ops_src_copy)
 
     if (NOT TARGET ${DOING_TARGET_NAME})
         set(_BUILD_FLAG ${SRC_COPY_DST}/${DOING_TARGET_NAME}.done)
-        if (NOT BUILD_OPS_RTY_KERNEL AND BELONG_MC2_OPS)
-            add_custom_command(OUTPUT ${_BUILD_FLAG}
-                    COMMAND mkdir -p ${SRC_COPY_DST}
-                    COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
-                    COMMAND rm -rf ${SRC_COPY_DST}/op_kernel/
-                    COMMAND touch ${_BUILD_FLAG}
-            )
-        else()
-            add_custom_command(OUTPUT ${_BUILD_FLAG}
-                    COMMAND mkdir -p ${SRC_COPY_DST}
-                    COMMAND cp -rf ${SRC_FILES} ${SRC_COPY_DST}
-                    COMMAND touch ${_BUILD_FLAG}
-            )
-        endif()
+        add_custom_command(OUTPUT ${_BUILD_FLAG}
+                COMMAND ${CMAKE_COMMAND} -E make_directory ${SRC_COPY_DST}
+                COMMAND ${CMAKE_COMMAND} -E copy_directory ${SRC_COPY_SRC} ${SRC_COPY_DST}
+                COMMAND ${CMAKE_COMMAND} -E touch ${_BUILD_FLAG}
+                DEPENDS ${SRC_FILES}
+                VERBATIM
+        )
 
         add_custom_target(${DOING_TARGET_NAME}
                 DEPENDS ${_BUILD_FLAG}
@@ -515,14 +504,20 @@ function(add_bin_compile_target)
             if (DEFINED ${op_file}_depends)
                 foreach(depend_info ${${op_file}_depends})
                     get_filename_component(_depend_op_name "${depend_info}" NAME)
-                    set(_depend_op_target ${_depend_op_name}_${BINARY_COMPUTE_UNIT}_src_copy)
+                    if("${_depend_op_name}" STREQUAL "common")
+                        set(_depend_dst_dir ${OP_SRC_OUT_DIR}/common)
+                        set(_depend_op_target ${OP_TARGET_NAME}_common_src_copy)
+                    else()
+                        set(_depend_dst_dir ${SRC_OUT_DIR}/${_depend_op_name})
+                        set(_depend_op_target ${_depend_op_name}_${BINARY_COMPUTE_UNIT}_src_copy)
+                    endif()
                     add_ops_src_copy(
                             TARGET_NAME
                             ${_depend_op_target}
                             SRC
                             ${CMAKE_SOURCE_DIR}/${depend_info}
                             DST
-                            ${SRC_OUT_DIR}/${_depend_op_name}
+                            ${_depend_dst_dir}
                             COMPUTE_UNIT
                             ${BINARY_COMPUTE_UNIT}
                             BE_RELIED
