@@ -1043,10 +1043,18 @@ void SMLAInfoParser::GenerateInfo(SMLATilingInfo &smlaInfo)
     smlaInfo.actualLenDimsCmpKV = actualLenDimsCmpKV_;
     smlaInfo.cmpResidualKVSize = cmpResidualKVSize_;
 
+    // oriKeyStride0/cmpKeyStride0 feed the A5 kernel's stride-based PageAttention
+    // KV addressing (blockStride0 = oriKeyStride0 / (blockSize * n2) - dSize).
+    // GetDynamicInputStride only returns strides for dynamic inputs; ori_kv/cmp_kv
+    // are plain optional inputs here, so oriKeyStridesVec_ is empty on this build.
+    // Falling back to 0 would make the kernel compute blockStride0 = -dSize and
+    // read KV from the wrong GM offsets (all-zero / uninitialized attention out).
+    // Default to the contiguous per-PA-block stride (oriKvStride0/cmpKvStride0),
+    // which GetOptionalInputStride0 already resolves via the storage shape.
     smlaInfo.oriKeyStride0 = !oriKeyStridesVec_.empty() ?
-        static_cast<uint32_t>(oriKeyStridesVec_[0]) : 0;
+        static_cast<uint32_t>(oriKeyStridesVec_[0]) : static_cast<uint32_t>(smlaInfo.oriKvStride0);
     smlaInfo.cmpKeyStride0 = !cmpKeyStridesVec_.empty() ?
-        static_cast<uint32_t>(cmpKeyStridesVec_[0]) : 0;
+        static_cast<uint32_t>(cmpKeyStridesVec_[0]) : static_cast<uint32_t>(smlaInfo.cmpKvStride0);
 }
 
 ge::graphStatus SMLAInfoParser::Parse(SMLATilingInfo &smlaInfo)
