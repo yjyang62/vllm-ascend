@@ -1,4 +1,6 @@
+import atexit
 import math
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
@@ -10,10 +12,12 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -28,6 +32,7 @@ from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
+    dsv4_use_kv_bf16,
     get_ascend_device_type,
     get_potential_max_tokens,
     npu_stream_switch,
@@ -57,6 +62,108 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     if _DSV4_DSA_OVERLAP_STREAM is None:
         _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
     return _DSV4_DSA_OVERLAP_STREAM
+
+
+def _dsv4_bf16_debug_log_output_stats(
+    stage: str,
+    layer_name: str,
+    compress_ratio: int,
+    output: torch.Tensor,
+) -> None:
+    """Log tensor statistics under VLLM_ASCEND_DSV4_BF16_DEBUG=1, to help
+    pinpoint the first decoder layer (and pipeline stage -- raw sparse
+    attention output vs. after o_proj) where the DSv4 BF16 KV
+    (sparse_flash_mla) path's output goes bad (NaN/Inf, exploding
+    magnitude, or collapses to all-zero) without needing NPU-side
+    profiling tools. Temporary diagnostic aid -- remove once the root
+    cause of the remaining garbled-output issue is found."""
+    out_f32 = output.detach().float()
+    has_nan = bool(torch.isnan(out_f32).any().item())
+    has_inf = bool(torch.isinf(out_f32).any().item())
+    finite = out_f32[torch.isfinite(out_f32)]
+    stats = (
+        f"mean={finite.mean().item():.4g} std={finite.std().item():.4g} abs_max={finite.abs().max().item():.4g}"
+        if finite.numel() > 0
+        else "all NaN/Inf"
+    )
+    logger.info(
+        "[DSV4_BF16_DEBUG] stage=%s layer=%s compress_ratio=%s shape=%s has_nan=%s has_inf=%s %s",
+        stage,
+        layer_name,
+        compress_ratio,
+        tuple(output.shape),
+        has_nan,
+        has_inf,
+        stats,
+    )
+
+
+_DSV4_BF16_DEBUG_DEFERRED_ACCUM: dict[str, tuple[str, int, torch.Tensor, torch.Tensor]] = {}
+_DSV4_BF16_DEBUG_DEFERRED_SEEN: set[str] = set()
+
+
+def _dsv4_bf16_debug_layer_sort_key(key: str) -> tuple[int, str]:
+    match = re.search(r"\.layers\.(\d+)\.", key)
+    return (int(match.group(1)), key) if match else (10**9, key)
+
+
+def _dsv4_bf16_debug_accumulate_output_stats(
+    stage: str,
+    layer_name: str,
+    compress_ratio: int,
+    output: torch.Tensor,
+) -> None:
+    """Non-masking variant of _dsv4_bf16_debug_log_output_stats, enabled by
+    VLLM_ASCEND_DSV4_BF16_DEBUG_DEFERRED=1 instead of
+    VLLM_ASCEND_DSV4_BF16_DEBUG=1.
+
+    _dsv4_bf16_debug_log_output_stats calls .item() immediately at every
+    checkpoint, forcing a device sync mid-layer -- and per-layer syncs like
+    that are exactly what has been observed to make the underlying garbled/
+    prematurely-truncated output disappear. So the masking (non-deferred)
+    debug flag can only ever report "everything looks fine": it cannot show
+    where the real corruption happens, because turning it on changes (fixes)
+    the very race it is meant to observe.
+
+    This variant keeps every checkpoint's result on-device (no .item() calls
+    at accumulation time) and only reads results back once a full step's
+    worth of layers has been recorded (detected via a repeated (stage,layer)
+    key, meaning a new step/token has started, so the previous step's work is
+    necessarily already complete by ordinary execution order) -- it should
+    therefore not perturb the race's timing the way the immediate-.item()
+    variant does, and should surface the actual first bad layer/stage.
+    """
+    key = f"{stage}:{layer_name}"
+    if key in _DSV4_BF16_DEBUG_DEFERRED_SEEN:
+        _dsv4_bf16_debug_flush_deferred()
+    _DSV4_BF16_DEBUG_DEFERRED_SEEN.add(key)
+    out = output.detach()
+    bad = torch.logical_or(torch.isnan(out).any(), torch.isinf(out).any())
+    abs_max = out.float().abs().amax()
+    _DSV4_BF16_DEBUG_DEFERRED_ACCUM[key] = (stage, compress_ratio, bad, abs_max)
+
+
+def _dsv4_bf16_debug_flush_deferred() -> None:
+    for key in sorted(_DSV4_BF16_DEBUG_DEFERRED_ACCUM, key=_dsv4_bf16_debug_layer_sort_key):
+        stage, compress_ratio, bad, abs_max = _DSV4_BF16_DEBUG_DEFERRED_ACCUM[key]
+        # The only .item() calls in this whole deferred path happen here, once
+        # per accumulated step, after that step's work is already done.
+        logger.info(
+            "[DSV4_BF16_DEBUG_DEFERRED] %s compress_ratio=%s bad=%s abs_max=%.4g",
+            key,
+            compress_ratio,
+            bool(bad.item()),
+            abs_max.item(),
+        )
+    _DSV4_BF16_DEBUG_DEFERRED_ACCUM.clear()
+    _DSV4_BF16_DEBUG_DEFERRED_SEEN.clear()
+
+
+# The last step's accumulated diagnostics only flush once a *new* step starts
+# and repeats a (stage, layer) key; if the process is stopped right after the
+# request that showed bad output, that last step would otherwise never be
+# printed. Flush whatever is pending on interpreter exit too.
+atexit.register(_dsv4_bf16_debug_flush_deferred)
 
 
 # mypy: disable-error-code="has-type"
@@ -112,13 +219,30 @@ def hadamard_scale(out: torch.Tensor, x_shape: tuple[int, ...], dim: int, scale:
     return out[..., :dim].reshape(*x_shape)
 
 
+def _has_weight_scale(linear) -> bool:
+    return getattr(linear, "weight_scale", None) is not None
+
+
+def _dsa_o_proj_weight_for_batch_matmul(weight: torch.Tensor, n_local_groups: int) -> torch.Tensor:
+    if weight.dim() == 3:
+        return weight
+    if weight.dim() != 2:
+        raise ValueError(f"DSA wo_a weight must be 2D or 3D, got shape {tuple(weight.shape)}.")
+    return weight.view(n_local_groups, -1, weight.shape[-1])
+
+
+def _dsa_o_proj_matmul(o_proj_input: torch.Tensor, weight: torch.Tensor, n_local_groups: int) -> torch.Tensor:
+    grouped_weight = _dsa_o_proj_weight_for_batch_matmul(weight, n_local_groups)
+    return torch.matmul(o_proj_input.transpose(0, 1), grouped_weight.transpose(-1, -2)).transpose(0, 1)
+
+
 def _is_w8a8_dynamic(linear) -> bool:
-    """True iff ``linear`` is wired up with ``AscendW8A8DynamicLinearMethod``."""
+    """True iff ``linear`` can run the W8A8 dynamic matmul fast path."""
     qm = getattr(linear, "quant_method", None)
     if qm is None or isinstance(qm, AscendUnquantizedLinearMethod):
         return False
     inner = getattr(qm, "quant_method", None)
-    return isinstance(inner, AscendW8A8DynamicLinearMethod)
+    return isinstance(inner, AscendW8A8DynamicLinearMethod) and _has_weight_scale(linear)
 
 
 def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
@@ -387,9 +511,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_ascend_device_type() in {AscendDeviceType.A5} and not dsv4_use_kv_bf16():
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
+            # A2/A3, and A5 BF16 path, use a 2D [block_idx, offset] slot_mapping.
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
@@ -752,12 +877,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     max_seqlen_q=seq_lens_q.max(),
                     max_seqlen_kv=self.seq_lens[reqs_start:].max(),
                     batch_size=len(self.seq_lens[reqs_start:]),
-                    cmp_ratio=1,
+                    cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(),
                     ori_mask_mode=4,  # 4:sliding window
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=False,
                 )
@@ -785,7 +910,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -811,7 +936,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -981,13 +1106,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
                     batch_size=len(self.seq_lens[: self.num_decodes]),  # cached
-                    cmp_ratio=1,
+                    cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(),
                     ori_mask_mode=4,
                     cmp_mask_mode=3,
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=False,
                 )
@@ -1015,7 +1140,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -1041,7 +1166,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -1201,12 +1326,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seqlen_q=seq_lens_q.max(),
             max_seqlen_kv=seq_lens.max(),
             batch_size=len(seq_lens),
-            cmp_ratio=1,
+            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(),
             ori_mask_mode=4,
             ori_win_left=self.model_config.hf_config.sliding_window - 1,
             ori_win_right=0,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv=DeviceOperator.get_dsa_kv_layout(),
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -1282,13 +1407,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
             batch_size=len(seq_lens[:num_decodes]),
-            cmp_ratio=1,
+            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(),
             ori_mask_mode=4,
             cmp_mask_mode=3,
             ori_win_left=self.model_config.hf_config.sliding_window - 1,
             ori_win_right=0,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv=DeviceOperator.get_dsa_kv_layout(),
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -1411,6 +1536,36 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+        if self.multistream_dsv4_dsa_overlap and dsv4_use_kv_bf16():
+            # _mla_prolog_multistream overlaps the SWA KV write (and, for
+            # compress_ratio==4, the indexer topk selection) on an auxiliary
+            # NPU stream while q-side work continues on the main stream, then
+            # synchronizes with main_stream.wait_stream(aux_stream) before the
+            # attention op reads that same KV cache on the main stream. This
+            # was designed and validated against the FP8 DSA path, whose KV
+            # write is a single fused NPU custom op
+            # (kv_compress_epilog/npu_scatter_nd_update_v2). The BF16 path's
+            # write (_bf16_scatter_kv_cache, used via dsa_kv_compress_scatter)
+            # is instead plain PyTorch advanced indexing
+            # (cache[block_indices, block_offsets] = x) executed inside that
+            # same aux-stream block, and running with VLLM_ASCEND_DSV4_BF16_DEBUG=1
+            # (which forces a device sync via .item() after every layer) reliably
+            # "fixes" otherwise garbled/truncated BF16 output -- a strong signal
+            # that this overlap's cross-stream synchronization does not fully
+            # cover that write on this path yet. Disable the overlap
+            # automatically for BF16 KV until the synchronization is verified
+            # correct on real A5 hardware; this only costs some overlap
+            # performance, not correctness.
+            logger.warning(
+                "Disabling multistream_dsv4_dsa_overlap for DeepSeek-V4 BF16 KV "
+                "(VLLM_ASCEND_DSV4_KV_BF16=1) on Ascend A5: this optimization's "
+                "aux-stream/main-stream synchronization has not been verified for "
+                "the BF16 KV scatter path and has been observed to produce "
+                "garbled/truncated output when enabled. Pass "
+                "--additional-config '{\"multistream_dsv4_dsa_overlap\": false}' "
+                "explicitly to silence this warning."
+            )
+            self.multistream_dsv4_dsa_overlap = False
         self.vllm_config = get_current_vllm_config()
 
         # indexer param
@@ -1553,7 +1708,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
         # + quantized batch matmul). Preserve it as-is: it predates and is
         # orthogonal to the OTP / olora_tp paths below, so it must win first.
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_ascend_device_type() in {AscendDeviceType.A5} and _has_weight_scale(self.wo_a):
             o = o_proj_input
             o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
             o = torch_npu.npu_transpose_quant_batchmatmul(
@@ -1700,6 +1855,12 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kv_cache,
                 attn_metadata,
             )  # type: ignore[arg-type]
+            if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG:
+                _dsv4_bf16_debug_log_output_stats("raw_attn_prefill", layer_name, self.compress_ratio, output_prefill)
+            if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG_DEFERRED:
+                _dsv4_bf16_debug_accumulate_output_stats(
+                    "raw_attn_prefill", layer_name, self.compress_ratio, output_prefill
+                )
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
             cos = attn_metadata[0].prefill.cos[layer_name]
             sin = attn_metadata[0].prefill.sin[layer_name]
@@ -1707,6 +1868,12 @@ class AscendDSAImpl(DSAAttentionImpl):
         if has_decode:
             assert attn_metadata[0].decode is not None
             output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
+            if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG:
+                _dsv4_bf16_debug_log_output_stats("raw_attn_decode", layer_name, self.compress_ratio, output_decode)
+            if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG_DEFERRED:
+                _dsv4_bf16_debug_accumulate_output_stats(
+                    "raw_attn_decode", layer_name, self.compress_ratio, output_decode
+                )
             o_proj_input[:decode_tokens] = output_decode
             cos = attn_metadata[0].decode.cos[layer_name]
             sin = attn_metadata[0].decode.sin[layer_name]
@@ -1724,6 +1891,11 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         # o
         self._forward_o_proj(o_proj_input, output)
+
+        if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG:
+            _dsv4_bf16_debug_log_output_stats("final_o_proj", layer_name, self.compress_ratio, output)
+        if dsv4_use_kv_bf16() and envs_ascend.VLLM_ASCEND_DSV4_BF16_DEBUG_DEFERRED:
+            _dsv4_bf16_debug_accumulate_output_stats("final_o_proj", layer_name, self.compress_ratio, output)
 
         return output_padded
 
@@ -1946,12 +2118,12 @@ class AscendDSAImpl(DSAAttentionImpl):
                 sinks=self.attn_sink,
                 metadata=common_prefill_metadata.sas_metadata,
                 softmax_scale=self.softmax_scale,
-                cmp_ratio=max(self.compress_ratio, 1),
+                cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(),
                 ori_mask_mode=4,
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_kv_layout(),
                 **extra_attn_kwargs,
             )[0]
 
@@ -2096,7 +2268,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     ori_win_left=self.window_size - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     **extra_attn_kwargs,
                 )[0]
             else:
@@ -2120,7 +2292,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     ori_win_left=self.window_size - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(),
                     **extra_attn_kwargs,
                 )[0]
         return attn_output
@@ -2378,12 +2550,12 @@ class AscendDSAImpl(DSAAttentionImpl):
                 sinks=self.attn_sink,
                 metadata=swa_decode_metadata.sas_metadata,
                 softmax_scale=self.softmax_scale,
-                cmp_ratio=max(self.compress_ratio, 1),
+                cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(),
                 ori_mask_mode=4,
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_kv_layout(),
                 **extra_attn_kwargs,
             )[0]
         elif self.compress_ratio == 4:
@@ -2405,7 +2577,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_kv_layout(),
                 **extra_attn_kwargs,
             )[0]
         else:
@@ -2426,7 +2598,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_kv_layout(),
                 **extra_attn_kwargs,
             )[0]
         return attn_output
