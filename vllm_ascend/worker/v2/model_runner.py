@@ -18,6 +18,7 @@
 #
 
 from contextlib import contextmanager
+from typing import Any
 
 import numpy as np
 import torch
@@ -51,7 +52,6 @@ from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode import init_speculator
-from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
@@ -84,9 +84,11 @@ class NPUModelRunner(GPUModelRunner):
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle.speculator
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
-        self.speculator: AscendEagleSpeculator | None = None
+        self.speculator: Any | None = None
         if self.speculative_config is not None:
             self.speculator = init_speculator(self.vllm_config, self.device)
+            if self.speculative_config.method == "extract_hidden_states":
+                self.use_aux_hidden_state_outputs = True
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.

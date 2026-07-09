@@ -28,6 +28,7 @@ from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vll
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -242,6 +243,8 @@ def _get_attention_kv_cache_dims(layer_name: str, kv_cache_spec: AttentionSpec) 
         attn_layers = get_layers_from_vllm_config(get_current_vllm_config(), AttentionLayerBase, [layer_name])
         attn_layer = attn_layers[layer_name]
         if not isinstance(attn_layer, MLAAttention):
+            if isinstance(attn_layer, CacheOnlyAttentionLayer):
+                return kv_cache_spec.head_size, kv_cache_spec.head_size
             raise TypeError(f"Expected AscendMLAAttention layer for {layer_name}, got {type(attn_layer).__name__}.")
         return attn_layer.kv_lora_rank, attn_layer.qk_rope_head_dim
 
