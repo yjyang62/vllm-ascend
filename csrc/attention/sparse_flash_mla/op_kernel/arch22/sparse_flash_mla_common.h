@@ -27,8 +27,8 @@ constexpr SoftmaxConfig SMLA_SOFTMAX_FLASHV2_CFG_WITHOUT_BRC = {false, 0, 0, Sof
 
 enum class SMLA_RUN_MODE {
     SWA_MODE = 0,
-    SCFA_MODE = 1,
-    CFA_MODE = 2,
+    CSA_MODE = 1,
+    HCA_MODE = 2,
 };
 
 enum class SMLA_LAYOUT {

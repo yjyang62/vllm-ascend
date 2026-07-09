@@ -240,7 +240,7 @@ __aicore__ inline void SparseFlashMlaSwa<SMLAT>::InitTilingData()
     constInfo.templateMode = TEMPLATE_MODE;
 
     // cmp
-    if constexpr (TEMPLATE_MODE == CFA_TEMPLATE) {
+    if constexpr (TEMPLATE_MODE == HCA_TEMPLATE) {
         constInfo.cmpRatio = tilingData->cmpParams.cmpRatio;
         constInfo.cmpMaskMode = tilingData->cmpParams.cmpMaskMode;
         constInfo.cmpKvStride0 = tilingData->cmpParams.cmpKvStride0;
@@ -279,7 +279,7 @@ SparseFlashMlaSwa<SMLAT>::InitActualSeqLen(__gm__ uint8_t *actualSeqLengthsQ, __
     if (constInfo.actualLenDimsKV != 0) {
         actualSeqLengthsKVGm.SetGlobalBuffer((__gm__ int32_t *)actualSeqLengthsKV, constInfo.actualLenDimsKV);
     }
-    if constexpr (TEMPLATE_MODE == CFA_TEMPLATE) {
+    if constexpr (TEMPLATE_MODE == HCA_TEMPLATE) {
         if (constInfo.actualLenDimsCmpKV != 0) {
             actualSeqLengthsCmpKVGm.SetGlobalBuffer(
                 (__gm__ int32_t *)actualSeqLengthsCmpKV, constInfo.actualLenDimsCmpKV);
@@ -405,7 +405,7 @@ template <typename SMLAT>
 __aicore__ inline int32_t SparseFlashMlaSwa<SMLAT>::GetActualSeqLenCmpKV(uint32_t bIdx, int32_t actualOriS2Size)
 {
     (void)actualOriS2Size;
-    if constexpr (TEMPLATE_MODE != CFA_TEMPLATE) {
+    if constexpr (TEMPLATE_MODE != HCA_TEMPLATE) {
         return 0;
     }
     if constexpr (KV_LAYOUT_T == SMLA_LAYOUT::TND) {
@@ -434,7 +434,7 @@ __aicore__ inline int32_t SparseFlashMlaSwa<SMLAT>::GetCmpMaskS2Size(uint32_t bI
                                                                      int32_t actualCmpS2Size)
 {
     (void)actualOriS2Size;
-    if constexpr (TEMPLATE_MODE != CFA_TEMPLATE) {
+    if constexpr (TEMPLATE_MODE != HCA_TEMPLATE) {
         return actualOriS2Size;
     }
     int32_t residual = 0;
@@ -455,7 +455,7 @@ __aicore__ inline void SparseFlashMlaSwa<SMLAT>::GetSparseActualSeqLen()
     }
 
     // 对于cmp部分还有top k, tempLoopInfo.actS2Size只针对cmp
-    if constexpr (TEMPLATE_MODE == CFA_TEMPLATE) {
+    if constexpr (TEMPLATE_MODE == HCA_TEMPLATE) {
         int32_t thresHold = (tempLoopInfo.cmpMaskRight + tempLoopInfo.s1EndIdx + 1) / constInfo.cmpRatio;
         tempLoopInfo.actCmpS2Size = Min(tempLoopInfo.actCmpS2Size, Max(thresHold, 0));
     }
@@ -514,7 +514,7 @@ __aicore__ inline void SparseFlashMlaSwa<SMLAT>::Init(
     // init global buffer
     queryGm.SetGlobalBuffer((__gm__ Q_T *)query);
     oriKvGm.SetGlobalBuffer((__gm__ KV_T *)oriKV);
-    if constexpr (TEMPLATE_MODE == CFA_TEMPLATE) {
+    if constexpr (TEMPLATE_MODE == HCA_TEMPLATE) {
         cmpKvGm.SetGlobalBuffer((__gm__ KV_T *)cmpKV);
         if (constInfo.cmpResidualKVSize != 0) {
             cmpResidualKVGm.SetGlobalBuffer((__gm__ int32_t *)cmpResidualKV, constInfo.cmpResidualKVSize);
@@ -538,7 +538,7 @@ __aicore__ inline void SparseFlashMlaSwa<SMLAT>::Init(
 
     if constexpr (PAGE_ATTENTION) {
         oriBlockTableGm.SetGlobalBuffer((__gm__ int32_t *)oriBlockTable);
-        if constexpr (TEMPLATE_MODE == CFA_TEMPLATE) {
+        if constexpr (TEMPLATE_MODE == HCA_TEMPLATE) {
             cmpBlockTableGm.SetGlobalBuffer((__gm__ int32_t *)cmpBlockTable);
         }
     }
@@ -669,14 +669,14 @@ __aicore__ inline void SparseFlashMlaSwa<SMLAT>::CalcParams(uint32_t loop, uint3
         info.actualSingleProcessSInnerSize = info.actualSingleProcessSInnerOriSize;
         info.s2StartPoint = tempLoopInfo.oriMaskLeft;
         info.cmpS2IdLimit = 0;
-    } else { // CFA_TEMPLATE场景
+    } else { // HCA_TEMPLATE场景
         if (s2LoopIdx < tempLoopInfo.oriLoopTimes) {
             // S2首次循环只能在ori_kv
             info.isOriOnly = true;
             info.isOriCmpMix = false;
             info.relativeS2Idx = 0;
             uint64_t s2Offset = info.s2Idx * constInfo.s2BaseSize;
-            if (s2LoopIdx + 1 == tempLoopInfo.oriLoopTimes) { // CFA场景可能处理oriLen / cmpRatio等于0的场景
+            if (s2LoopIdx + 1 == tempLoopInfo.oriLoopTimes) { // HCA场景可能处理oriLen / cmpRatio等于0的场景
                 info.actualSingleProcessSInnerOriSize = \
                     (tempLoopInfo.oriMaskRight - tempLoopInfo.oriMaskLeft + 1) - s2Offset;
             } else {
@@ -819,7 +819,7 @@ __aicore__ inline void SparseFlashMlaSwa<SMLAT>::ProcessBalance()
         gS1LoopEnd = isS1S2ZeroAndLastBatch ? gS1LoopEnd + 1 : gS1LoopEnd;
         for (uint32_t gS1LoopIdx = constInfo.gS1Start; gS1LoopIdx < gS1LoopEnd; gS1LoopIdx++) {
             tempLoopInfo.actOriS2Size = GetActualSeqLenKV(tempLoopInfo.bIdx);
-            if constexpr (TEMPLATE_MODE == CFA_TEMPLATE) {
+            if constexpr (TEMPLATE_MODE == HCA_TEMPLATE) {
                 tempLoopInfo.actCmpS2Size =
                     GetActualSeqLenCmpKV(tempLoopInfo.bIdx, tempLoopInfo.actOriS2Size);
             }
@@ -834,7 +834,7 @@ __aicore__ inline void SparseFlashMlaSwa<SMLAT>::ProcessBalance()
                                         static_cast<int32_t>(tempLoopInfo.s1EndIdx) + constInfo.oriWinRight;
             tempLoopInfo.oriMaskLeft = Max(tempLoopInfo.actOriS2Size - tempLoopInfo.actS1Size +
                                            static_cast<int32_t>(tempLoopInfo.s1StartIdx) - constInfo.oriWinLeft, 0);
-            if constexpr (TEMPLATE_MODE == CFA_TEMPLATE) {
+            if constexpr (TEMPLATE_MODE == HCA_TEMPLATE) {
                 int32_t cmpMaskS2Size = GetCmpMaskS2Size(
                     tempLoopInfo.bIdx, tempLoopInfo.actOriS2Size, tempLoopInfo.actCmpS2Size);
                 tempLoopInfo.cmpMaskRight = cmpMaskS2Size - tempLoopInfo.actS1Size;
@@ -851,7 +851,7 @@ __aicore__ inline void SparseFlashMlaSwa<SMLAT>::ProcessBalance()
                 tempLoopInfo.oriCmpMixLoopTimes = 0;
                 tempLoopInfo.cmpLoopTimes = 0;
                 tempLoopInfo.s2LoopTimes = tempLoopInfo.oriLoopTimes;
-            } else { // CFA_TEMPLATE
+            } else { // HCA_TEMPLATE
                 uint32_t oriLen = tempLoopInfo.oriMaskRight - tempLoopInfo.oriMaskLeft + 1;
                 if (tempLoopInfo.actCmpS2Size == 0) { // ori/cmp_ratio长度等于0的场景
                     tempLoopInfo.oriLoopTimes = (oriLen + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize;

@@ -114,7 +114,7 @@ __aicore__ inline void ComputeParamBatch(RunParamStr& runParam, const ConstInfo 
 
 TEMPLATE_INTF
 __aicore__ inline void ComputeS1LoopInfo(RunParamStr& runParam, const ConstInfo &constInfo, bool lastBN,
-    int64_t nextGs1Idx, int64_t gS1StartIdx)
+    int64_t nextGs1Idx, int64_t gS1StartIdx, int64_t s2EndIdx = 0)
 {
     runParam.qSNumInOneBlock = 1;
     runParam.gs1LoopStartIdx = gS1StartIdx;
@@ -127,9 +127,9 @@ __aicore__ inline void ComputeS1LoopInfo(RunParamStr& runParam, const ConstInfo 
     }
 
     int32_t gs1LoopEndIdx = 0;
-    if constexpr (TEMPLATE_MODE == SMLATemplateMode::SCFA_TEMPLATE_MODE) {
-        gs1LoopEndIdx = runParam.actualS1Size; // 对于SCFA, 不切G轴, 每次拷贝一行的topk，只算一行的qs
-    } else { // SWA/CFA
+    if constexpr (TEMPLATE_MODE == SMLATemplateMode::CSA_TEMPLATE_MODE) {
+        gs1LoopEndIdx = runParam.actualS1Size; // 对于CSA, 不切G轴, 每次拷贝一行的topk，只算一行的qs
+    } else { // SWA/HCA
         // 不需要取topk, 每次计算gSize行, 循环qs次
         gs1LoopEndIdx = (runParam.actualS1Size + runParam.qSNumInOneBlock - 1) / runParam.qSNumInOneBlock;
     }
@@ -137,7 +137,8 @@ __aicore__ inline void ComputeS1LoopInfo(RunParamStr& runParam, const ConstInfo 
     if (!lastBN) {
         runParam.gs1LoopEndIdx = gs1LoopEndIdx;
     } else { // 最后一个bn, 从数组下一个元素取值
-        runParam.gs1LoopEndIdx = nextGs1Idx == 0 ? gs1LoopEndIdx : nextGs1Idx;
+        uint32_t actualNextGs1Idx = s2EndIdx == 0 ? nextGs1Idx : nextGs1Idx + 1;
+        runParam.gs1LoopEndIdx = (nextGs1Idx == 0 && s2EndIdx == 0) ? gs1LoopEndIdx : actualNextGs1Idx;
     }
 
     if (runParam.gs1LoopStartIdx > runParam.gs1LoopEndIdx) {
@@ -216,7 +217,7 @@ __aicore__ inline void LoopSOuterOffsetInit(RunParamStr& runParam, const ConstIn
             }
             uint32_t aicIdx = constInfo.aivIdx >> 1U;
             if (IS_SPLIT_G && aicIdx % 2U != 0) {
-                runParam.softmaxLseOffset += 64; // splitG时，需要偏移64
+                runParam.softmaxLseOffset += constInfo.gSize >> 1U;
             }
             if (constInfo.subBlockIdx == 1) {
                 runParam.softmaxLseOffset += runParam.firstHalfMRealSize;
@@ -272,6 +273,7 @@ __aicore__ inline bool ComputeS2LoopInfo(int64_t bnIndex, int64_t gS1Index, Glob
         runParam.oriKvLoopEndIdx = 0;
         runParam.cmpKvLoopEndIdx = 0;
         runParam.s2LoopEndIdx = 0;
+        runParam.s2CmpLineStartIdx = 0;
         return true;
     }
     uint32_t s2BaseSize = constInfo.s2BaseSize;
@@ -283,19 +285,21 @@ __aicore__ inline bool ComputeS2LoopInfo(int64_t bnIndex, int64_t gS1Index, Glob
     runParam.oriKvLoopEndIdx = (runParam.s2OriLineEndIdx - runParam.s2OriLineStartIdx + s2BaseSize - 1) / s2BaseSize;
 
     if constexpr (TEMPLATE_MODE != SMLATemplateMode::SWA_TEMPLATE_MODE) {
+        runParam.s2CmpLineStartIdx = 0;
         runParam.s2CmpLineEndIdx = ClipSInnerTokenCube<TEMPLATE_INTF_ARGS>(
             (runParam.cubeSOuterOffset + runParam.s1RealSize + runParam.nextTokensPerBatchCmp) / constInfo.cmpRatio,
             0, runParam.actualS2CmpSize);
-        if constexpr (TEMPLATE_MODE == SMLATemplateMode::CFA_TEMPLATE_MODE) {
+        if constexpr (TEMPLATE_MODE == SMLATemplateMode::HCA_TEMPLATE_MODE) {
             runParam.s2CmpLineEndIdx = Min(runParam.s2CmpLineEndIdx, runParam.actualS2CmpSize);
             runParam.cmpKvLoopEndIdx = (runParam.s2CmpLineEndIdx + s2BaseSize - 1) / s2BaseSize;
-        } else { // SCFA_TEMPLATE_MODE
+        } else { // CSA_TEMPLATE_MODE
             runParam.s2CmpLineEndIdx = Min(runParam.s2CmpLineEndIdx, constInfo.cmpSparseBlockCount);
             runParam.s2CmpLineEndIdx = Min(runParam.s2CmpLineEndIdx, runParam.actualS2CmpSize);
             runParam.cmpKvLoopEndIdx = (runParam.s2CmpLineEndIdx + s2BaseSize - 1) / s2BaseSize;
         }
     } else {
         runParam.cmpKvLoopEndIdx = 0;
+        runParam.s2CmpLineStartIdx = 0;
         runParam.s2CmpLineEndIdx = 0;
     }
     runParam.oriKvLoopEndIdx = (runParam.s2OriLineEndIdx - runParam.s2OriLineStartIdx + s2BaseSize - 1) / s2BaseSize;
