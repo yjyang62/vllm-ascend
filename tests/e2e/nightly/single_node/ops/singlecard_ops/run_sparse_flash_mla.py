@@ -6,10 +6,10 @@ operators compiled into vLLM-Ascend's custom op package::
 
     python tests/e2e/nightly/single_node/ops/singlecard_ops/run_sparse_flash_mla.py
 
-To test different TP-local query head counts, override ``SMLA_NUM_Q_HEADS``.
-For DeepSeek-V4, TP1 uses 64 and TP4 uses 16::
+To test different TP-local query head counts, use ``--num-q-heads`` or
+``SMLA_NUM_Q_HEADS``. For DeepSeek-V4, TP1 uses 64 and TP4 uses 16::
 
-    SMLA_NUM_Q_HEADS=64 python tests/e2e/nightly/single_node/ops/singlecard_ops/run_sparse_flash_mla.py
+    python tests/e2e/nightly/single_node/ops/singlecard_ops/run_sparse_flash_mla.py --num-q-heads 16
     SMLA_NUM_Q_HEADS=16 python tests/e2e/nightly/single_node/ops/singlecard_ops/run_sparse_flash_mla.py
 
 The operators are reached through vLLM-Ascend's custom op namespace (they are
@@ -58,6 +58,7 @@ comparison against a shared-KV causal-attention golden with an attention sink,
 using seq_len <= window so the sliding window reduces to plain causal.
 """
 
+import argparse
 import os
 import sys
 
@@ -112,6 +113,12 @@ DEVICE = "npu"
 # large-negative sink so exp(sink - m) underflows to ~0 on both the op and the
 # golden, leaving plain causal softmax.
 SINK_DISABLED = -1.0e4
+
+
+def _resolve_num_q_heads(cli_value: int | None = None) -> int:
+    if cli_value is not None:
+        return cli_value
+    return int(os.getenv("SMLA_NUM_Q_HEADS", "64"))
 
 
 def _unwrap(out):
@@ -287,6 +294,18 @@ def run_scenario_one(seq_len, sink_value=None):
 
 
 def main():
+    global NUM_Q_HEADS
+
+    parser = argparse.ArgumentParser(description="BF16 SparseFlashMla standalone smoke / golden check")
+    parser.add_argument(
+        "--num-q-heads",
+        type=int,
+        default=None,
+        help="TP-local query head count (N1). Overrides SMLA_NUM_Q_HEADS. DSV4: 64/TP.",
+    )
+    args = parser.parse_args()
+    NUM_Q_HEADS = _resolve_num_q_heads(args.num_q_heads)
+
     if not hasattr(torch.ops._C_ascend, "npu_sparse_flash_mla"):
         raise RuntimeError(
             "torch.ops._C_ascend.npu_sparse_flash_mla is not registered. Build the "
