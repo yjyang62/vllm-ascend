@@ -77,7 +77,7 @@ sparse_flash_mla(__gm__ uint8_t *query, __gm__ uint8_t *oriKV, __gm__ uint8_t *c
 
     TPipe tPipe;
     __gm__ uint8_t *user = GetUserWorkspace(workspace);
-    
+
 #if (__CCE_AICORE__ == 310)
     if constexpr (ORIG_DTYPE_Q == DT_FLOAT16 && ORIG_DTYPE_ORI_KV == DT_FLOAT16 && ORIG_DTYPE_ATTN_OUT == DT_FLOAT16) {
         if constexpr (TEMPLATE_MODE == CSA_TEMPLATE) {

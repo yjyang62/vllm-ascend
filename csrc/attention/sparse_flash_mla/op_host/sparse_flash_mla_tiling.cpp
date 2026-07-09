@@ -665,7 +665,7 @@ ge::graphStatus SMLAInfoParser::CheckContiguous() const
         cmpKeyNonContiguous = static_cast<uint64_t>(cmpKeyStridesVec_[checkStartIdx]) !=
             cmpExpectedStrides[checkStartIdx];
     }
-    
+
     OP_CHECK_IF(oriKeyNonContiguous,
         OP_LOGE(opName_, "oriKey only support non-continuous keying on the 0-axis."),
         return ge::GRAPH_FAILED);

@@ -874,7 +874,7 @@ __aicore__ inline void SparseFlashMlaSwa<SMLAT>::ProcessBalance()
                 tempLoopInfo.s2LoopTimes = tempLoopInfo.oriLoopTimes + tempLoopInfo.oriCmpMixLoopTimes + \
                     tempLoopInfo.cmpLoopTimes;
             }
-            
+
             tempLoopInfo.tndIsS2SplitCore = false; // 当前不支持核间切S2
             tempLoopInfo.tndCoreStartKVSplitPos = 0;
             uint32_t extraLoop = isEnd ? PRELOAD_NUM : 0;

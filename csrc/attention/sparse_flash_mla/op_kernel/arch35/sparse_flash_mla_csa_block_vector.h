@@ -703,7 +703,7 @@ __aicore__ inline void CSABlockVec<TEMPLATE_ARGS>::ProcessVec2(
             LastDivNew<T, Q_T, OUTPUT_T, dTemplateAlign64, false>(
                 vec2ResUb, vec2ResUb, sumUb, runInfo.vec2MRealSize, dTemplateAlign64, 1.0);
         }
-        
+
         if (runInfo.isS2Split) {
             AttentionCommon::S2SplitFdStagingLayout stagingLayout = {constInfo.gSize,
                 dTemplateAlign64, GetStagingSlotNum(), AttentionCommon::FD_BROADCAST_ELEMS_PER_ROW,

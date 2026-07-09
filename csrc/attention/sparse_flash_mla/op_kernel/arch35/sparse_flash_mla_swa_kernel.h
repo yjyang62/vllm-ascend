@@ -365,7 +365,7 @@ __aicore__ inline void SparseFlashMlaSwaKernel<CubeBlockType, VecBlockType>::Ini
     }
     s2SplitStagingBase = workspace + fdStagingOffset;
 }
- 
+
 template <typename CubeBlockType, typename VecBlockType>
 __aicore__ inline void SparseFlashMlaSwaKernel<CubeBlockType, VecBlockType>::InitLocalBuffer()
 {
