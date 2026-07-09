@@ -157,7 +157,10 @@ def test_a5_dsa_bf16_selectors_and_block_offset_scatter(monkeypatch):
     assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_kwargs(torch.device("cpu")) == {"device": "cpu"}
     assert A5DeviceAdaptor.get_dsa_sparse_attn_base_kwargs() == {}
     assert A5DeviceAdaptor.get_dsa_kv_layout() == "PA_BBND"
-    assert A5DeviceAdaptor.get_dsa_compressor_slot_mapping_format() == device_op.DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+    assert (
+        A5DeviceAdaptor.get_dsa_compressor_slot_mapping_format()
+        == device_op.DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+    )
 
     flat_slot_mapping = torch.tensor([1, 6], dtype=torch.int64)
     formatted = A5DeviceAdaptor.format_dsa_slot_mapping(flat_slot_mapping, block_size=4)
