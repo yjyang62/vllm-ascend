@@ -23,6 +23,7 @@ import torch_npu
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend import envs
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     QUANT_DTYPES,
@@ -835,6 +836,8 @@ def _sparse_flash_mla_q_heads(q: torch.Tensor, layout_q: str) -> int | None:
 
 
 def _log_sparse_flash_mla_output(q: Any, output: Any, layout_q: str) -> None:
+    if not envs.VLLM_ASCEND_DSV4_SPARSE_MLA_OUTPUT_CHECK:
+        return
     if not isinstance(q, torch.Tensor) or not isinstance(output, torch.Tensor):
         return
     num_heads = _sparse_flash_mla_q_heads(q, layout_q)

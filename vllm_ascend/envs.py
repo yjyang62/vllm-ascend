@@ -117,6 +117,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # 1: use the BF16 path that stores ori_kv/cmp_kv as BF16 (PA_BBND layout)
     #     and runs `npu_sparse_flash_mla`. Only takes effect on A5.
     "VLLM_ASCEND_DSV4_KV_BF16": lambda: bool(int(os.getenv("VLLM_ASCEND_DSV4_KV_BF16", "0"))),
+    # Toggle the DSV4 BF16 `npu_sparse_flash_mla` output sanity-check log
+    # (device_op.py) that reports finite/NaN/Inf counts and abs-max per N1.
+    # 1 (default): emit the deduplicated WARNING diagnostic.
+    # 0: disable the check and its logging entirely (no extra device sync).
+    "VLLM_ASCEND_DSV4_SPARSE_MLA_OUTPUT_CHECK": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DSV4_SPARSE_MLA_OUTPUT_CHECK", "1"))
+    ),
 }
 
 # end-env-vars-definition
