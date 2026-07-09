@@ -6,6 +6,12 @@ operators compiled into vLLM-Ascend's custom op package::
 
     python tests/e2e/nightly/single_node/ops/singlecard_ops/run_sparse_flash_mla.py
 
+To test different TP-local query head counts, override ``SMLA_NUM_Q_HEADS``.
+For DeepSeek-V4, TP1 uses 64 and TP4 uses 16::
+
+    SMLA_NUM_Q_HEADS=64 python tests/e2e/nightly/single_node/ops/singlecard_ops/run_sparse_flash_mla.py
+    SMLA_NUM_Q_HEADS=16 python tests/e2e/nightly/single_node/ops/singlecard_ops/run_sparse_flash_mla.py
+
 The operators are reached through vLLM-Ascend's custom op namespace (they are
 built from ``csrc/attention/sparse_flash_mla`` + ``sparse_flash_mla_metadata``
 via ``build_aclnn.sh``), so no external ``cann_ops_transformer`` import is
@@ -89,7 +95,7 @@ import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401,E402
 # CONFIG -- adjust to match the deployed operator / model dims.
 # ---------------------------------------------------------------------------
 SEED = 42
-NUM_Q_HEADS = 64  # SparseFlashMla TND constraint: N1 == 64
+NUM_Q_HEADS = int(os.getenv("SMLA_NUM_Q_HEADS", "64"))
 NUM_KV_HEADS = 1  # KV_N == 1
 # DSV4 MLA head_dim == 512 and already INCLUDES rope:
 #   head_dim (512) = nope_head_dim (448) + rope_head_dim (64).
