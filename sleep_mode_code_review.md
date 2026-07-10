@@ -16,10 +16,10 @@ Level 2 使用契约前，不建议将该功能作为可安全重复调用的生
 - 基线提交：`ad04efb9`
 - 用户指南：`docs/source/user_guide/feature_guide/sleep_mode.md`
 - Python 实现：
-  - `vllm_ascend/worker/worker.py`
-  - `vllm_ascend/device_allocator/camem.py`
-  - `vllm_ascend/device_allocator/sleep_mem_optimized.py`
-  - `vllm_ascend/patch/worker/patch_distributed.py`
+    - `vllm_ascend/worker/worker.py`
+    - `vllm_ascend/device_allocator/camem.py`
+    - `vllm_ascend/device_allocator/sleep_mem_optimized.py`
+    - `vllm_ascend/patch/worker/patch_distributed.py`
 - 原生实现：`csrc/camem_allocator.cpp`
 - 示例和测试：`examples/`、`tests/ut/`、`tests/e2e/`
 
