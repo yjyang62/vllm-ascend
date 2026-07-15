@@ -30,7 +30,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_mc2_tokens_capacity
 from vllm_ascend.distributed.utils import fc3_all_gather_and_maybe_unpad_impl
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
@@ -208,15 +208,55 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         if not (self.enable_shared_expert_dp or self.replace_allreduce):
             if self.tp_size > 1:
                 assert padded_hidden_states_shape is not None
-                # Cannot reuse `split_hidden_states` from prepare phase as it
-                # may share memory with original hidden_states. Since shared
-                # experts may use the original tensor, reusing it would cause
-                # in-place modification during all_gather, corrupting the data.
-                gathered_hidden_states = torch.empty(
-                    padded_hidden_states_shape, device=hidden_states.device, dtype=hidden_states.dtype
+                padded_num_tokens = padded_hidden_states_shape[0]
+                if padded_num_tokens % self.tp_size != 0:
+                    raise ValueError(
+                        f"MoE all_gather requires {padded_num_tokens=} to be divisible by {self.tp_size=}."
+                    )
+
+                # Allocate dedicated output buffers during the profile run and
+                # reuse them for ACL graph capture/replay. Allocating the gather
+                # output on every call can desynchronize the captured HCCL
+                # operator. The input is already produced inside ACL graph and
+                # therefore has a stable address; copying it into another
+                # buffer adds an unnecessary NPU copy operation.
+                capacity = get_mc2_tokens_capacity() or 0
+                aligned_capacity = ((capacity + self.tp_size - 1) // self.tp_size) * self.tp_size
+                if padded_num_tokens <= aligned_capacity:
+                    hidden_shape = hidden_states.shape[1:]
+                    buffer_key = (hidden_states.device, hidden_states.dtype, tuple(hidden_shape), aligned_capacity)
+                    if not hasattr(self, "_moe_ag_out_buffers"):
+                        self._moe_ag_out_buffers = {}
+                    gather_output_buffer = self._moe_ag_out_buffers.get(buffer_key)
+                    if gather_output_buffer is None:
+                        gather_output_buffer = torch.empty(
+                            (aligned_capacity, *hidden_shape),
+                            device=hidden_states.device,
+                            dtype=hidden_states.dtype,
+                        )
+                        self._moe_ag_out_buffers[buffer_key] = gather_output_buffer
+
+                    local_num_tokens = padded_num_tokens // self.tp_size
+                    if hidden_states.shape[0] != local_num_tokens:
+                        raise ValueError(
+                            f"MoE all_gather expected {local_num_tokens} local tokens, got {hidden_states.shape[0]}."
+                        )
+                    gathered_hidden_states = gather_output_buffer[:padded_num_tokens]
+                else:
+                    # Prefill can exceed the maximal graph/decode token count.
+                    # It runs outside ACL graph, so a right-sized temporary
+                    # buffer avoids reserving max-prefill storage in every MoE
+                    # layer.
+                    gathered_hidden_states = torch.empty(
+                        padded_hidden_states_shape,
+                        device=hidden_states.device,
+                        dtype=hidden_states.dtype,
+                    )
+                dist.all_gather_into_tensor(
+                    gathered_hidden_states,
+                    hidden_states,
+                    group=self.moe_config.tp_group.device_group,
                 )
-                split_hidden_states = torch.tensor_split(gathered_hidden_states, self.tp_size, dim=0)
-                dist.all_gather(list(split_hidden_states), hidden_states, self.moe_config.tp_group.device_group)
                 hidden_states = gathered_hidden_states
 
             if self.num_tokens < hidden_states.shape[0]:

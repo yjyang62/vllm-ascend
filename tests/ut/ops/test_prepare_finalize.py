@@ -73,8 +73,10 @@ class TestPrepareAndFinalize(unittest.TestCase):
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("torch.distributed.all_gather")
-    def test_mc2_tp_split_allgather(self, mock_all_gather, mock_get_forward_context, mock_tp_rank, mock_tp_size):
+    @patch("torch.distributed.all_gather_into_tensor")
+    def test_mc2_tp_split_allgather(
+        self, mock_all_gather_into_tensor, mock_get_forward_context, mock_tp_rank, mock_tp_size
+    ):
         mock_context = MagicMock()
         mock_context.mc2_mask = torch.tensor([1, 0, 1, 0])
         mock_context.padded_num_tokens = 4
@@ -95,19 +97,24 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.assertEqual(padded_hidden_states_shape, torch.Size([4, 8]))
 
         # Mock all_gather behavior
-        def mock_all_gather_func(tensor_list, tensor, group=None):
-            tensor_list[0] = tensor
-            tensor_list[1] = tensor.clone()
+        def mock_all_gather_func(output_tensor, input_tensor, group=None):
+            output_tensor.copy_(torch.cat([input_tensor, input_tensor]))
 
-        mock_all_gather.side_effect = mock_all_gather_func
+        mock_all_gather_into_tensor.side_effect = mock_all_gather_func
 
-        layer.split_hidden_states = [torch.zeros_like(h_out), torch.zeros_like(h_out)]
-        final_result = layer.finalize(
-            h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape
-        )
+        with patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_mc2_tokens_capacity", return_value=4):
+            final_result = layer.finalize(
+                h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape
+            )
+            gather_output_buffer = next(iter(layer._moe_ag_out_buffers.values()))
+            gather_output_ptr = gather_output_buffer.data_ptr()
+            layer.finalize(h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape)
 
         # Should concat back to original size
         self.assertEqual(final_result.shape[0], 4)
+        gather_output_buffer = next(iter(layer._moe_ag_out_buffers.values()))
+        self.assertEqual(gather_output_buffer.data_ptr(), gather_output_ptr)
+        self.assertEqual(mock_all_gather_into_tensor.call_count, 2)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
@@ -129,8 +136,8 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
-    @patch("torch.distributed.all_gather")
-    def test_all2all_tp_split_allgather(self, mock_all_gather, mock_tp_rank, mock_tp_size):
+    @patch("torch.distributed.all_gather_into_tensor")
+    def test_all2all_tp_split_allgather(self, mock_all_gather_into_tensor, mock_tp_rank, mock_tp_size):
         layer = PrepareAndFinalizeWithAll2All(self.moe_config)
         hidden_states = torch.randn(2, 8)
         router_logits = torch.randn(2, 2)
@@ -146,19 +153,43 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.assertEqual(padded_hidden_states_shape, torch.Size([2, 8]))
 
         # Mock all_gather
-        def mock_all_gather_func(tensor_list, tensor, group=None):
-            tensor_list[0] = tensor
-            tensor_list[1] = tensor.clone()
+        def mock_all_gather_func(output_tensor, input_tensor, group=None):
+            output_tensor.copy_(torch.cat([input_tensor, input_tensor]))
 
-        mock_all_gather.side_effect = mock_all_gather_func
+        mock_all_gather_into_tensor.side_effect = mock_all_gather_func
 
-        layer.split_hidden_states = [torch.zeros_like(h_out), torch.zeros_like(h_out)]
-        final_result = layer.finalize(
-            h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape
-        )
+        with patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_mc2_tokens_capacity", return_value=2):
+            final_result = layer.finalize(
+                h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape
+            )
 
         # Should concat back
         self.assertEqual(final_result.shape[0], 2)
+
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=2)
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
+    @patch("torch.distributed.all_gather_into_tensor")
+    def test_all2all_prefill_uses_temporary_gather_buffer(
+        self, mock_all_gather_into_tensor, mock_tp_rank, mock_tp_size
+    ):
+        layer = PrepareAndFinalizeWithAll2All(self.moe_config)
+        hidden_states = torch.randn(4, 8)
+        router_logits = torch.randn(4, 2)
+        prepare_output = layer.prepare(hidden_states, router_logits)
+
+        def mock_all_gather_func(output_tensor, input_tensor, group=None):
+            output_tensor.copy_(torch.cat([input_tensor, input_tensor]))
+
+        mock_all_gather_into_tensor.side_effect = mock_all_gather_func
+        with patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_mc2_tokens_capacity", return_value=2):
+            final_result = layer.finalize(
+                prepare_output.hidden_states,
+                reduce_results=False,
+                padded_hidden_states_shape=prepare_output.padded_hidden_states_shape,
+            )
+
+        self.assertEqual(final_result.shape, hidden_states.shape)
+        self.assertFalse(hasattr(layer, "_moe_ag_out_buffers"))
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
