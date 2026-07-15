@@ -106,15 +106,13 @@ class TestPrepareAndFinalize(unittest.TestCase):
             final_result = layer.finalize(
                 h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape
             )
-            gather_input_buffer, gather_output_buffer = next(iter(layer._moe_ag_buffers.values()))
-            gather_input_ptr = gather_input_buffer.data_ptr()
+            gather_output_buffer = next(iter(layer._moe_ag_out_buffers.values()))
             gather_output_ptr = gather_output_buffer.data_ptr()
             layer.finalize(h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape)
 
         # Should concat back to original size
         self.assertEqual(final_result.shape[0], 4)
-        gather_input_buffer, gather_output_buffer = next(iter(layer._moe_ag_buffers.values()))
-        self.assertEqual(gather_input_buffer.data_ptr(), gather_input_ptr)
+        gather_output_buffer = next(iter(layer._moe_ag_out_buffers.values()))
         self.assertEqual(gather_output_buffer.data_ptr(), gather_output_ptr)
         self.assertEqual(mock_all_gather_into_tensor.call_count, 2)
 
@@ -191,7 +189,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
             )
 
         self.assertEqual(final_result.shape, hidden_states.shape)
-        self.assertFalse(hasattr(layer, "_moe_ag_buffers"))
+        self.assertFalse(hasattr(layer, "_moe_ag_out_buffers"))
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")

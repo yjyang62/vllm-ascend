@@ -214,49 +214,39 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
                         f"MoE all_gather requires {padded_num_tokens=} to be divisible by {self.tp_size=}."
                     )
 
-                # Allocate dedicated buffers during the profile run and reuse
-                # them for ACL graph capture/replay. Collectives require stable
-                # input and output addresses; allocating the gather output on
-                # every call can desynchronize the captured HCCL operator.
-                # These buffers must not alias the prepare input because shared
-                # experts can still be reading it when routed experts finalize.
+                # Allocate dedicated output buffers during the profile run and
+                # reuse them for ACL graph capture/replay. Allocating the gather
+                # output on every call can desynchronize the captured HCCL
+                # operator. The input is already produced inside ACL graph and
+                # therefore has a stable address; copying it into another
+                # buffer adds an unnecessary NPU copy operation.
                 capacity = get_mc2_tokens_capacity() or 0
                 aligned_capacity = ((capacity + self.tp_size - 1) // self.tp_size) * self.tp_size
                 if padded_num_tokens <= aligned_capacity:
-                    local_capacity = aligned_capacity // self.tp_size
                     hidden_shape = hidden_states.shape[1:]
                     buffer_key = (hidden_states.device, hidden_states.dtype, tuple(hidden_shape), aligned_capacity)
-                    if not hasattr(self, "_moe_ag_buffers"):
-                        self._moe_ag_buffers = {}
-                    gather_buffers = self._moe_ag_buffers.get(buffer_key)
-                    if gather_buffers is None:
-                        gather_input_buffer = torch.empty(
-                            (local_capacity, *hidden_shape),
-                            device=hidden_states.device,
-                            dtype=hidden_states.dtype,
-                        )
+                    if not hasattr(self, "_moe_ag_out_buffers"):
+                        self._moe_ag_out_buffers = {}
+                    gather_output_buffer = self._moe_ag_out_buffers.get(buffer_key)
+                    if gather_output_buffer is None:
                         gather_output_buffer = torch.empty(
                             (aligned_capacity, *hidden_shape),
                             device=hidden_states.device,
                             dtype=hidden_states.dtype,
                         )
-                        gather_buffers = (gather_input_buffer, gather_output_buffer)
-                        self._moe_ag_buffers[buffer_key] = gather_buffers
+                        self._moe_ag_out_buffers[buffer_key] = gather_output_buffer
 
                     local_num_tokens = padded_num_tokens // self.tp_size
                     if hidden_states.shape[0] != local_num_tokens:
                         raise ValueError(
                             f"MoE all_gather expected {local_num_tokens} local tokens, got {hidden_states.shape[0]}."
                         )
-                    gather_input = gather_buffers[0][:local_num_tokens]
-                    gathered_hidden_states = gather_buffers[1][:padded_num_tokens]
-                    gather_input.copy_(hidden_states)
+                    gathered_hidden_states = gather_output_buffer[:padded_num_tokens]
                 else:
                     # Prefill can exceed the maximal graph/decode token count.
                     # It runs outside ACL graph, so a right-sized temporary
                     # buffer avoids reserving max-prefill storage in every MoE
                     # layer.
-                    gather_input = hidden_states
                     gathered_hidden_states = torch.empty(
                         padded_hidden_states_shape,
                         device=hidden_states.device,
@@ -264,7 +254,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
                     )
                 dist.all_gather_into_tensor(
                     gathered_hidden_states,
-                    gather_input,
+                    hidden_states,
                     group=self.moe_config.tp_group.device_group,
                 )
                 hidden_states = gathered_hidden_states
