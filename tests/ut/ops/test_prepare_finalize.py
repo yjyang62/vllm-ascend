@@ -102,18 +102,20 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         mock_all_gather_into_tensor.side_effect = mock_all_gather_func
 
-        with patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_potential_max_tokens", return_value=4):
+        with patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_mc2_tokens_capacity", return_value=4):
             final_result = layer.finalize(
                 h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape
             )
-            gather_input_ptr = layer._moe_ag_in_buf.data_ptr()
-            gather_output_ptr = layer._moe_ag_out_buf.data_ptr()
+            gather_input_buffer, gather_output_buffer = next(iter(layer._moe_ag_buffers.values()))
+            gather_input_ptr = gather_input_buffer.data_ptr()
+            gather_output_ptr = gather_output_buffer.data_ptr()
             layer.finalize(h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape)
 
         # Should concat back to original size
         self.assertEqual(final_result.shape[0], 4)
-        self.assertEqual(layer._moe_ag_in_buf.data_ptr(), gather_input_ptr)
-        self.assertEqual(layer._moe_ag_out_buf.data_ptr(), gather_output_ptr)
+        gather_input_buffer, gather_output_buffer = next(iter(layer._moe_ag_buffers.values()))
+        self.assertEqual(gather_input_buffer.data_ptr(), gather_input_ptr)
+        self.assertEqual(gather_output_buffer.data_ptr(), gather_output_ptr)
         self.assertEqual(mock_all_gather_into_tensor.call_count, 2)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
@@ -158,7 +160,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         mock_all_gather_into_tensor.side_effect = mock_all_gather_func
 
-        with patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_potential_max_tokens", return_value=2):
+        with patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_mc2_tokens_capacity", return_value=2):
             final_result = layer.finalize(
                 h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape
             )
@@ -181,7 +183,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
             output_tensor.copy_(torch.cat([input_tensor, input_tensor]))
 
         mock_all_gather_into_tensor.side_effect = mock_all_gather_func
-        with patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_potential_max_tokens", return_value=2):
+        with patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_mc2_tokens_capacity", return_value=2):
             final_result = layer.finalize(
                 prepare_output.hidden_states,
                 reduce_results=False,
@@ -189,7 +191,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
             )
 
         self.assertEqual(final_result.shape, hidden_states.shape)
-        self.assertFalse(hasattr(layer, "_moe_ag_in_buf"))
+        self.assertFalse(hasattr(layer, "_moe_ag_buffers"))
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")

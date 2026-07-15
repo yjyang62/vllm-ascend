@@ -30,11 +30,11 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_mc2_tokens_capacity
 from vllm_ascend.distributed.utils import fc3_all_gather_and_maybe_unpad_impl
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import enable_sp, enable_sp_by_pass, get_potential_max_tokens, npu_stream_switch
+from vllm_ascend.utils import enable_sp, enable_sp_by_pass, npu_stream_switch
 
 
 class PrepareAndFinalize(ABC):
@@ -220,30 +220,36 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
                 # every call can desynchronize the captured HCCL operator.
                 # These buffers must not alias the prepare input because shared
                 # experts can still be reading it when routed experts finalize.
-                capacity = get_potential_max_tokens()
+                capacity = get_mc2_tokens_capacity() or 0
                 aligned_capacity = ((capacity + self.tp_size - 1) // self.tp_size) * self.tp_size
                 if padded_num_tokens <= aligned_capacity:
                     local_capacity = aligned_capacity // self.tp_size
-                    if not hasattr(self, "_moe_ag_in_buf"):
-                        hidden_shape = hidden_states.shape[1:]
-                        self._moe_ag_in_buf = torch.empty(
+                    hidden_shape = hidden_states.shape[1:]
+                    buffer_key = (hidden_states.device, hidden_states.dtype, tuple(hidden_shape), aligned_capacity)
+                    if not hasattr(self, "_moe_ag_buffers"):
+                        self._moe_ag_buffers = {}
+                    gather_buffers = self._moe_ag_buffers.get(buffer_key)
+                    if gather_buffers is None:
+                        gather_input_buffer = torch.empty(
                             (local_capacity, *hidden_shape),
                             device=hidden_states.device,
                             dtype=hidden_states.dtype,
                         )
-                        self._moe_ag_out_buf = torch.empty(
+                        gather_output_buffer = torch.empty(
                             (aligned_capacity, *hidden_shape),
                             device=hidden_states.device,
                             dtype=hidden_states.dtype,
                         )
+                        gather_buffers = (gather_input_buffer, gather_output_buffer)
+                        self._moe_ag_buffers[buffer_key] = gather_buffers
 
                     local_num_tokens = padded_num_tokens // self.tp_size
                     if hidden_states.shape[0] != local_num_tokens:
                         raise ValueError(
                             f"MoE all_gather expected {local_num_tokens} local tokens, got {hidden_states.shape[0]}."
                         )
-                    gather_input = self._moe_ag_in_buf[:local_num_tokens]
-                    gathered_hidden_states = self._moe_ag_out_buf[:padded_num_tokens]
+                    gather_input = gather_buffers[0][:local_num_tokens]
+                    gathered_hidden_states = gather_buffers[1][:padded_num_tokens]
                     gather_input.copy_(hidden_states)
                 else:
                     # Prefill can exceed the maximal graph/decode token count.
