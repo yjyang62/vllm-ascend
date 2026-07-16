@@ -417,3 +417,49 @@ Before merging, verify:
 - [vLLM Hardware Plugin RFC](https://github.com/vllm-project/vllm/issues/11162)
 - [Documentation](https://docs.vllm.ai/projects/ascend/en/latest/)
 - [Contributors Guide](https://docs.vllm.ai/projects/ascend/en/latest/community/contributors.html)
+
+---
+
+## Cursor Cloud specific instructions
+
+The Cloud VM is **x86_64 CPU-only with no Ascend NPU and no CANN toolkit** (`npu-smi`
+is absent). This means real inference (`vllm serve`, offline inference scripts) and the
+`tests/e2e/**` suite **cannot run here** — they require NPU hardware. Development in this
+environment is limited to linting, type-checking, and the **CPU tier of the unit tests**
+(`tests/ut/`), which mock `torch_npu`/`acl`/`mooncake`/`triton.runtime` via
+`tests/ut/conftest.py` when `npu-smi` is missing.
+
+### Environment layout (created by the startup update script)
+
+- Python deps live in a virtualenv at `/workspace/.venv`. **Activate it first:**
+  `source /workspace/.venv/bin/activate`.
+- Upstream vLLM is installed **editable** from `~/vllm-empty` (git tag `v0.22.1`, built with
+  `VLLM_TARGET_DEVICE=empty`); vllm-ascend is installed editable with
+  `COMPILE_CUSTOM_KERNELS=0`. Key pins: `torch==2.10.0+cpu`, `vllm==0.22.1+empty`.
+- CPU wheels come from the PyTorch CPU index plus the Ascend mirror
+  (`https://repo.huaweicloud.com/ascend/repos/pypi`) with uv `unsafe-best-match`.
+- `uc-manager` (from `requirements-dev.txt`) is intentionally **not installed** — its build
+  needs the CANN toolchain, which is unavailable on CPU. Features that import `ucm`
+  (KV pool / UCM sparse connector) are therefore unavailable here.
+
+### Running unit tests (CPU tier)
+
+From `/workspace` with the venv active:
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -q tests/ut/ops/test_prepare_finalize.py
+```
+
+- `TORCH_DEVICE_BACKEND_AUTOLOAD=0` is **required**: `torch-npu` is installed but has no CANN
+  runtime, so without it `import torch` may try to autoload the NPU backend and crash.
+- Only run the CPU tier: exclude the NPU-only subdirs `a2/`, `a2_2/`, `a3_2/`, `a3_4/`, `310p/`
+  (use `--ignore=` for each). ~1320 CPU unit tests pass.
+- Tests that patch real `torch_npu` ops absent from the CPU mock will fail on CPU-only and need
+  an NPU (e.g. `tests/ut/device/test_device_op.py` patches `torch_npu.npu_scatter_nd_update_`).
+
+### Lint / type-check
+
+- Type check: `PYTHONPATH="$PYTHONPATH:$HOME/vllm-empty" mypy --follow-imports skip --check-untyped-defs vllm_ascend`
+  (vLLM sources must be importable). Passes clean.
+- Ruff: `pre-commit run ruff-check --all-files` (ruff is pinned inside the pre-commit env, not a
+  standalone install). Full lint is `bash format.sh ci` as documented in "Quick Start for Contributors".
