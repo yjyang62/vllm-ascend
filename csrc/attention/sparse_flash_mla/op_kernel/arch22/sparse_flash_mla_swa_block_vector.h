@@ -390,12 +390,16 @@ __aicore__ inline void SWAVectorBlock<SMLAT>::ElewiseCompute(const RunInfo &info
         int32_t noMaskCmpSize = info.cmpMaskRight + s1StartIdx + 1;
         int32_t actNoMaskCmpSize = 0;
         int32_t right = 0;
+        // relativeS2Idx is the cmp tile index relative to the current batch.
+        // s2Idx may include the global task index.
+        int64_t cmpTileStart = static_cast<int64_t>(info.relativeS2Idx) * constInfo.s2BaseSize +
+            static_cast<int64_t>(info.s2StartPoint);
         for (uint32_t i = s1StartIdx; i <= s1EndIdx; i++) {
             actNoMaskCmpSize = noMaskCmpSize / constInfo.cmpRatio;
             if (actNoMaskCmpSize <= 0) {
                 right = 0;
             } else {
-                right = actNoMaskCmpSize - info.s2StartPoint;
+                right = actNoMaskCmpSize - cmpTileStart;
             }
             dealTempSize = constInfo.gSize - gStartIdx;
             if (i == s1EndIdx) {

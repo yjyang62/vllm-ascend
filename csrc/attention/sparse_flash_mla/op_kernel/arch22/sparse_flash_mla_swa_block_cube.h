@@ -165,7 +165,7 @@ __aicore__ inline void SWACubeBlock<SMLAT>::InitMm1GlobalTensor(GlobalTensor<Q_T
     // mm1
     this->queryGm = queryGm;
     this->oriKvGm = oriKvGm;
-    if constexpr (TEMPLATE_MODE == CFA_TEMPLATE) {
+    if constexpr (TEMPLATE_MODE == HCA_TEMPLATE) {
         this->cmpKvGm = cmpKvGm;
     }
     this->mm1ResGm = mm1ResGm;
@@ -189,7 +189,7 @@ SWACubeBlock<SMLAT>::InitPageAttentionInfo(GlobalTensor<KV_T> oriKvGm, // const 
 {
     this->oriKvGm = oriKvGm;
     this->oriBlockTableGm = oriBlockTableGm;
-    if constexpr (TEMPLATE_MODE == CFA_TEMPLATE) {
+    if constexpr (TEMPLATE_MODE == HCA_TEMPLATE) {
         this->cmpBlockTableGm = cmpBlockTableGm;
     }
 }
@@ -416,8 +416,8 @@ __aicore__ inline void SWACubeBlock<SMLAT>::ComputeMm1(const RunInfo &info, cons
                     uint64_t batchStride = (constInfo.oriKvStride0 == 0) ?
                         static_cast<uint64_t>(constInfo.kvSeqSize) * seqStride : constInfo.oriKvStride0;
 
-                    uint64_t curS2 = (uint64_t)info.s2Idx * constInfo.s2BaseSize + info.s2StartPoint;
-                    uint64_t offset = (uint64_t)info.bIdx * batchStride + (uint64_t)curS2 * seqStride + \
+                    uint64_t curS2 = info.s2StartPoint + nL1 * N_SPLIT_SIZE;
+                    uint64_t offset = (uint64_t)info.bIdx * batchStride + (uint64_t)curS2 * seqStride +
                         (uint64_t)info.n2Idx * headStride + kL1 * D_SPLIT_SIZE;
                     DataCopy(bL1Tensor, oriKvGm[offset], nd2nzPara);
                 } else if constexpr (KV_LAYOUT_T == SMLA_LAYOUT::TND) {
@@ -449,8 +449,7 @@ __aicore__ inline void SWACubeBlock<SMLAT>::ComputeMm1(const RunInfo &info, cons
 
                     if (oriSizeCur > 0) {
                         uint32_t copyFinishRowCnt = 0;
-                        uint64_t curS2Offset = static_cast<uint64_t>(info.s2Idx) * constInfo.s2BaseSize + \
-                            info.s2StartPoint + nL1 * N_SPLIT_SIZE;
+                        uint64_t curS2Offset = info.s2StartPoint + nL1 * N_SPLIT_SIZE;
                         while (copyFinishRowCnt < oriSizeCur) {
                             // 由于ori_left的存在， 即使第一块搬运也可能并非是pa_block的零点位
                             copyRowCnt = constInfo.paOriBlockSize - curS2Offset % constInfo.paOriBlockSize;
@@ -531,8 +530,7 @@ __aicore__ inline void SWACubeBlock<SMLAT>::ComputeMm1(const RunInfo &info, cons
                         nd2nzPara.nValue = oriSizeCur;
                         uint64_t batchStride = (constInfo.oriKvStride0 == 0) ?
                             static_cast<uint64_t>(constInfo.kvSeqSize) * seqStride : constInfo.oriKvStride0;
-                        uint64_t curS2 = (uint64_t)info.s2Idx * constInfo.s2BaseSize + info.s2StartPoint + \
-                            nL1 * N_SPLIT_SIZE;
+                        uint64_t curS2 = info.s2StartPoint + nL1 * N_SPLIT_SIZE;
                         uint64_t offset = (uint64_t)info.bIdx * batchStride + (uint64_t)curS2 * seqStride + \
                             (uint64_t)info.n2Idx * headStride + kL1 * D_SPLIT_SIZE;
                         DataCopy(bL1Tensor, oriKvGm[offset], nd2nzPara);
@@ -562,8 +560,7 @@ __aicore__ inline void SWACubeBlock<SMLAT>::ComputeMm1(const RunInfo &info, cons
 
                     if (oriSizeCur > 0) {
                         nd2nzPara.nValue = oriSizeCur;
-                        uint64_t curS2Offset = static_cast<uint64_t>(info.s2Idx) * constInfo.s2BaseSize + \
-                            info.s2StartPoint + nL1 * N_SPLIT_SIZE;
+                        uint64_t curS2Offset = info.s2StartPoint + nL1 * N_SPLIT_SIZE;
                         DataCopy(bL1Tensor,
                             oriKvGm[info.tensorBOffset + curS2Offset * constInfo.headDim + kL1 * D_SPLIT_SIZE],
                             nd2nzPara);
@@ -849,9 +846,8 @@ __aicore__ inline void SWACubeBlock<SMLAT>::ComputeMm2(const RunInfo &info, cons
                         uint64_t batchStride = (constInfo.oriKvStride0 == 0) ?
                             static_cast<uint64_t>(constInfo.kvSeqSize) * seqStride : constInfo.oriKvStride0;
 
-                        uint64_t curS2 = (uint64_t)info.s2Idx * constInfo.s2BaseSize + info.s2StartPoint + \
-                            kL1 * K_L0_SPLIT_SIZE;
-                        uint64_t offset = (uint64_t)info.bIdx * batchStride + (uint64_t)curS2 * seqStride + \
+                        uint64_t curS2 = info.s2StartPoint + kL1 * K_L0_SPLIT_SIZE;
+                        uint64_t offset = (uint64_t)info.bIdx * batchStride + (uint64_t)curS2 * seqStride +
                             (uint64_t)info.n2Idx * headStride + nL1 * N_SPLIT_SIZE;
                         DataCopy(subvTensor, oriKvGm[offset], nd2nzPara);
                     } else if constexpr (KV_LAYOUT_T == SMLA_LAYOUT::TND) {
@@ -881,8 +877,7 @@ __aicore__ inline void SWACubeBlock<SMLAT>::ComputeMm2(const RunInfo &info, cons
                     if constexpr (KV_LAYOUT_T == SMLA_LAYOUT::PA_BBND) {
                         if (oriSizeCur > 0) {
                             copyFinishRowCnt = 0;
-                            uint64_t curS2Offset = static_cast<uint64_t>(info.s2Idx) * constInfo.s2BaseSize + \
-                                info.s2StartPoint + kL1 * K_L0_SPLIT_SIZE;
+                            uint64_t curS2Offset = info.s2StartPoint + kL1 * K_L0_SPLIT_SIZE;
                             while (copyFinishRowCnt < oriSizeCur) {
                                 copyRowCnt = constInfo.paOriBlockSize - curS2Offset % constInfo.paOriBlockSize;
                                 if (copyFinishRowCnt + copyRowCnt > oriSizeCur) {
@@ -967,8 +962,7 @@ __aicore__ inline void SWACubeBlock<SMLAT>::ComputeMm2(const RunInfo &info, cons
                             nd2nzPara.nValue = oriSizeCur;
                             uint64_t batchStride = (constInfo.oriKvStride0 == 0) ?
                                 static_cast<uint64_t>(constInfo.kvSeqSize) * seqStride : constInfo.oriKvStride0;
-                            uint64_t curS2 = (uint64_t)info.s2Idx * constInfo.s2BaseSize + info.s2StartPoint +
-                                kL1 * K_L0_SPLIT_SIZE;
+                            uint64_t curS2 = info.s2StartPoint + kL1 * K_L0_SPLIT_SIZE;
                             uint64_t offset = (uint64_t)info.bIdx * batchStride + (uint64_t)curS2 * seqStride +
                                 (uint64_t)info.n2Idx * headStride + nL1 * N_SPLIT_SIZE;
                             DataCopy(subvTensor, oriKvGm[offset], nd2nzPara);
@@ -1001,8 +995,7 @@ __aicore__ inline void SWACubeBlock<SMLAT>::ComputeMm2(const RunInfo &info, cons
 
                         if (oriSizeCur > 0) {
                             nd2nzPara.nValue = oriSizeCur;
-                            uint64_t curS2Offset = static_cast<uint64_t>(info.s2Idx) * constInfo.s2BaseSize + \
-                                info.s2StartPoint + kL1 * K_L0_SPLIT_SIZE;
+                            uint64_t curS2Offset = info.s2StartPoint + kL1 * K_L0_SPLIT_SIZE;
                             DataCopy(bL1Tensor[(kL1 - kOffset) * K_L0_SPLIT_SIZE * N_SPLIT_SIZE],
                                 oriKvGm[info.tensorBOffset + curS2Offset * constInfo.headDim + nL1 * N_SPLIT_SIZE],
                                 nd2nzPara);

@@ -6,15 +6,15 @@
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
- */
+ */
 
 /*!
- * \file sparse_flash_mla_scfa_kernel.h
+ * \file sparse_flash_mla_csa_kernel.h
  * \brief
  */
 
-#ifndef SPARSE_FLASH_MLA_SCFA_KERNEL_H
-#define SPARSE_FLASH_MLA_SCFA_KERNEL_H
+#ifndef SPARSE_FLASH_MLA_CSA_KERNEL_H
+#define SPARSE_FLASH_MLA_CSA_KERNEL_H
 
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
@@ -22,8 +22,8 @@
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
 #include "sparse_flash_mla_common.h"
-#include "sparse_flash_mla_scfa_block_cube.h"
-#include "sparse_flash_mla_scfa_block_vector.h"
+#include "sparse_flash_mla_csa_block_cube.h"
+#include "sparse_flash_mla_csa_block_vector.h"
 #include "sparse_flash_mla_metadata.h"
 
 namespace SMLAKernel {
@@ -70,7 +70,7 @@ struct TempLoopInfo {
 };
 
 template <typename SMLAT>
-class SparseFlashMlaScfa {
+class SparseFlashMlaCsa {
 public:
     // 中间计算数据类型为float，高精度模式
     using T = float;
@@ -82,7 +82,7 @@ public:
     using MM1_OUT_T = T;
     using MM2_OUT_T = T;
 
-    __aicore__ inline SparseFlashMlaScfa(){};
+    __aicore__ inline SparseFlashMlaCsa(){};
     __aicore__ inline void Init(__gm__ uint8_t *query, __gm__ uint8_t *oriKV, __gm__ uint8_t *cmpKV,
                                 __gm__ uint8_t *cmpSparseIndices, __gm__ uint8_t *oriBlockTable,
                                 __gm__ uint8_t *cmpBlockTable, __gm__ uint8_t *cuSeqlensQ,
@@ -193,7 +193,7 @@ private:
 };
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::InitTilingData()
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::InitTilingData()
 {
     // singleCoreParams
     // singleCoreTensorSize
@@ -245,7 +245,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::InitTilingData()
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::InitBuffers()
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::InitBuffers()
 {
     if ASCEND_IS_AIV {
         vectorBlock.InitBuffers(pipe);
@@ -255,7 +255,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::InitBuffers()
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::InitActualSeqLen(__gm__ uint8_t *actualSeqLengthsQ,
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::InitActualSeqLen(__gm__ uint8_t *actualSeqLengthsQ,
                                                                       __gm__ uint8_t *actualSeqLengthsKV)
 {
     if (constInfo.actualLenDimsKV != 0) {
@@ -268,7 +268,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::InitActualSeqLen(__gm__ uint8_
 
 template <typename SMLAT>
 __aicore__ inline void
-SparseFlashMlaScfa<SMLAT>::InitActualSeqLen(__gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengthsKV,
+SparseFlashMlaCsa<SMLAT>::InitActualSeqLen(__gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengthsKV,
                                                __gm__ uint8_t *actualSeqLengthsCmpKV)
 {
     if (constInfo.actualLenDimsKV != 0) {
@@ -284,7 +284,7 @@ SparseFlashMlaScfa<SMLAT>::InitActualSeqLen(__gm__ uint8_t *actualSeqLengthsQ, _
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::InitAllZeroOutput(uint32_t bIdx, uint32_t s1Idx, uint32_t n2Idx)
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::InitAllZeroOutput(uint32_t bIdx, uint32_t s1Idx, uint32_t n2Idx)
 {
     if (constInfo.outputLayout == SMLA_LAYOUT::TND) {
         if (tempLoopInfo.actS1Size == 0) {
@@ -318,7 +318,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::InitAllZeroOutput(uint32_t bId
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::InitOutputSingleCore()
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::InitOutputSingleCore()
 {
     uint32_t coreNum = GetBlockNum();
     if (coreNum != 0) {
@@ -334,7 +334,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::InitOutputSingleCore()
 }
 
 template <typename SMLAT>
-__aicore__ inline int32_t SparseFlashMlaScfa<SMLAT>::GetActualSeqLenQ(uint32_t bIdx)
+__aicore__ inline int32_t SparseFlashMlaCsa<SMLAT>::GetActualSeqLenQ(uint32_t bIdx)
 {
     if constexpr (LAYOUT_T == SMLA_LAYOUT::TND) {
         int32_t actualSeqQPrefixSum = actualSeqLengthsQGm.GetValue(bIdx);
@@ -352,7 +352,7 @@ __aicore__ inline int32_t SparseFlashMlaScfa<SMLAT>::GetActualSeqLenQ(uint32_t b
 }
 
 template <typename SMLAT>
-__aicore__ inline int32_t SparseFlashMlaScfa<SMLAT>::GetActualSeqLenKV(uint32_t bIdx)
+__aicore__ inline int32_t SparseFlashMlaCsa<SMLAT>::GetActualSeqLenKV(uint32_t bIdx)
 {
     if constexpr (KV_LAYOUT_T == SMLA_LAYOUT::PA_BBND) {
         tempLoopInfo.actualSeqKVPrefixSum = static_cast<uint64_t>(bIdx * constInfo.kvSeqSize);
@@ -375,7 +375,7 @@ __aicore__ inline int32_t SparseFlashMlaScfa<SMLAT>::GetActualSeqLenKV(uint32_t 
 }
 
 template <typename SMLAT>
-__aicore__ inline int32_t SparseFlashMlaScfa<SMLAT>::GetActualSeqLenCmpKV(uint32_t bIdx, int32_t actualOriS2Size)
+__aicore__ inline int32_t SparseFlashMlaCsa<SMLAT>::GetActualSeqLenCmpKV(uint32_t bIdx, int32_t actualOriS2Size)
 {
     (void)actualOriS2Size;
     if constexpr (KV_LAYOUT_T == SMLA_LAYOUT::TND) {
@@ -400,7 +400,7 @@ __aicore__ inline int32_t SparseFlashMlaScfa<SMLAT>::GetActualSeqLenCmpKV(uint32
 }
 
 template <typename SMLAT>
-__aicore__ inline int32_t SparseFlashMlaScfa<SMLAT>::GetCmpMaskS2Size(uint32_t bIdx, int32_t actualOriS2Size,
+__aicore__ inline int32_t SparseFlashMlaCsa<SMLAT>::GetCmpMaskS2Size(uint32_t bIdx, int32_t actualOriS2Size,
                                                                       int32_t actualCmpS2Size)
 {
     (void)actualOriS2Size;
@@ -412,7 +412,7 @@ __aicore__ inline int32_t SparseFlashMlaScfa<SMLAT>::GetCmpMaskS2Size(uint32_t b
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::GetSparseActualSeqLen()
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::GetSparseActualSeqLen()
 {
     // 行无效通过ori部分判断, ori部分如果有行无效那么ori和cmp都有
     if (static_cast<int32_t>(tempLoopInfo.s1EndIdx) < -(tempLoopInfo.actOriS2Size - tempLoopInfo.actS1Size)) {
@@ -428,7 +428,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::GetSparseActualSeqLen()
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::UpdateInnerLoopCond()
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::UpdateInnerLoopCond()
 {
     if ((tempLoopInfo.actCmpS2Size == 0 && tempLoopInfo.actOriS2Size == 0) || (tempLoopInfo.actS1Size == 0)) {
         tempLoopInfo.curActSeqLenIsZero = true;
@@ -441,7 +441,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::UpdateInnerLoopCond()
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::Init(
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::Init(
     __gm__ uint8_t *query, __gm__ uint8_t *oriKV, __gm__ uint8_t *cmpKV, __gm__ uint8_t *cmpSparseIndices,
     __gm__ uint8_t *oriBlockTable, __gm__ uint8_t *cmpBlockTable, __gm__ uint8_t *cuSeqlensQ,
     __gm__ uint8_t* cuSeqlensKV, __gm__ uint8_t *cuSeqlensCmpKV, __gm__ uint8_t *seqUsedQ,
@@ -554,7 +554,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::Init(
 
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::InitCalcParamsEach()
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::InitCalcParamsEach()
 {
     if (aiCoreIdx != 0) {
         constInfo.bN2Start = metadataGm.GetValue(GetAttrAbsIndex(aiCoreIdx, FA_BN2_START_INDEX, false));
@@ -567,7 +567,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::InitCalcParamsEach()
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::CalcParams(uint32_t loop, uint32_t cmpLoop, uint64_t s2Start,
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::CalcParams(uint32_t loop, uint32_t cmpLoop, uint64_t s2Start,
                                                                 uint32_t s2LoopIdx, RunInfo &info)
 {
     info.isValid = s2LoopIdx < tempLoopInfo.s2LoopTimes;
@@ -666,7 +666,8 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::CalcParams(uint32_t loop, uint
         }
     }
 
-    info.actualSingleProcessSInnerSizeAlign = SMLAAlign(info.actualSingleProcessSInnerSize, SMLAVectorBlock<SMLAT>::BYTE_BLOCK);
+    info.actualSingleProcessSInnerSizeAlign =
+        SMLAAlign(info.actualSingleProcessSInnerSize, SMLAVectorBlock<SMLAT>::BYTE_BLOCK);
     if (info.isOriOnly) {
         info.v0S2Start = 0;
         info.v0S2DealSize = 0;
@@ -674,7 +675,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::CalcParams(uint32_t loop, uint
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::ComputeMm1(const RunInfo &info)
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::ComputeMm1(const RunInfo &info)
 {
     uint32_t nBufferLoopTimes = CeilDiv(info.actMBaseSize, constInfo.nBufferMBaseSize);
     uint32_t nBufferTail = info.actMBaseSize - (nBufferLoopTimes - 1) * constInfo.nBufferMBaseSize;
@@ -693,7 +694,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::ComputeMm1(const RunInfo &info
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::ComputeMm2(const RunInfo &info)
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::ComputeMm2(const RunInfo &info)
 {
     uint32_t nBufferLoopTimes = (info.actMBaseSize + constInfo.nBufferMBaseSize - 1) / constInfo.nBufferMBaseSize;
     uint32_t nBufferTail = info.actMBaseSize - (nBufferLoopTimes - 1) * constInfo.nBufferMBaseSize;
@@ -717,7 +718,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::ComputeMm2(const RunInfo &info
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::Process()
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::Process()
 {
     uint32_t hasLoad = metadataGm.GetValue(GetAttrAbsIndex(aiCoreIdx, FA_CORE_ENABLE_INDEX, false));
     if (hasLoad == 0) {
@@ -738,14 +739,14 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::Process()
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::GetBN2Idx(uint32_t bN2Idx, uint32_t &bIdx, uint32_t &n2Idx)
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::GetBN2Idx(uint32_t bN2Idx, uint32_t &bIdx, uint32_t &n2Idx)
 {
     bIdx = bN2Idx / constInfo.kvHeadNum;
     n2Idx = bN2Idx % constInfo.kvHeadNum;
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::ProcessBalance()
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::ProcessBalance()
 {
     RunInfo extraInfo[SMLA_PRELOAD_TASK_CACHE_SIZE];
     uint32_t gloop = 0;
@@ -862,7 +863,7 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::ProcessBalance()
 }
 
 template <typename SMLAT>
-__aicore__ inline void SparseFlashMlaScfa<SMLAT>::PreloadPipeline(uint32_t loop, uint32_t cmpLoop, uint64_t s2Start,
+__aicore__ inline void SparseFlashMlaCsa<SMLAT>::PreloadPipeline(uint32_t loop, uint32_t cmpLoop, uint64_t s2Start,
                                                                      uint64_t s2LoopIdx,
                                                                      RunInfo extraInfo[SMLA_PRELOAD_TASK_CACHE_SIZE])
 {
@@ -946,4 +947,4 @@ __aicore__ inline void SparseFlashMlaScfa<SMLAT>::PreloadPipeline(uint32_t loop,
 }
 
 } // namespace SMLAKernel
-#endif // SPARSE_FLASH_MLA_SCFA_KERNEL_H
+#endif // SPARSE_FLASH_MLA_CSA_KERNEL_H
