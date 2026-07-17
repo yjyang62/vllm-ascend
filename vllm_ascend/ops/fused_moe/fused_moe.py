@@ -54,6 +54,7 @@ from vllm_ascend.utils import (
 
 W13_RUNTIME_WEIGHT = "w13_weight_runtime"
 W2_RUNTIME_WEIGHT = "w2_weight_runtime"
+SEPARATE_RUNTIME_WEIGHTS_MARKER = "_ascend_separate_runtime_weights"
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
@@ -67,6 +68,7 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
 
 def _install_runtime_weight(layer: torch.nn.Module, name: str, weight: torch.Tensor) -> torch.Tensor:
     """Install or refresh a runtime-only weight while preserving its address."""
+    setattr(layer, SEPARATE_RUNTIME_WEIGHTS_MARKER, True)
     current = getattr(layer, name, None)
     if (
         isinstance(current, torch.Tensor)
@@ -88,6 +90,7 @@ def _install_runtime_weight(layer: torch.nn.Module, name: str, weight: torch.Ten
 
 def _install_runtime_weight_list(layer: torch.nn.Module, name: str, weight: torch.Tensor) -> list[torch.Tensor]:
     """Install or refresh per-expert runtime weights used by dynamic EPLB."""
+    setattr(layer, SEPARATE_RUNTIME_WEIGHTS_MARKER, True)
     expert_weights = list(weight.unbind(dim=0))
     current = getattr(layer, name, None)
     if (
@@ -113,6 +116,8 @@ def update_runtime_weight_from_kernel(
     weight: torch.Tensor,
 ) -> bool:
     """Update a runtime-format MoE weight and its checkpoint Parameter."""
+    if not getattr(layer, SEPARATE_RUNTIME_WEIGHTS_MARKER, False):
+        return False
     runtime_name = {
         "w13_weight": W13_RUNTIME_WEIGHT,
         "w2_weight": W2_RUNTIME_WEIGHT,

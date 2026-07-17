@@ -183,6 +183,19 @@ def test_update_runtime_weight_from_kernel_syncs_checkpoint_parameter(use_expert
     torch.testing.assert_close(layer.w13_weight, runtime_weight.transpose(1, 2))
 
 
+def test_update_runtime_weight_from_kernel_skips_quantized_weight_lists():
+    layer = SimpleNamespace(
+        w13_weight_list=[torch.zeros(4, 3) for _ in range(2)],
+    )
+    runtime_weight = torch.randn(2, 4, 3)
+
+    with torch.no_grad():
+        updated = update_runtime_weight_from_kernel(layer, "w13_weight", runtime_weight)
+
+    assert not updated
+    torch.testing.assert_close(torch.stack(layer.w13_weight_list), torch.zeros_like(runtime_weight))
+
+
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])
 def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_comm_type):
     method = _build_unquantized_method()
