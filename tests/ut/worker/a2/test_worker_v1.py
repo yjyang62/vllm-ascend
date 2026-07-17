@@ -249,6 +249,61 @@ class TestNPUWorker(TestBase):
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
 
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_preserves_unquantized_moe_runtime_layout(
+        self,
+        mock_get_config,
+        mock_allocator_class,
+    ):
+        """Level-1 wake restores bytes without changing tensor metadata."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_extra_cleanup = False
+        mock_get_config.return_value = mock_config
+
+        model = torch.nn.Module()
+        model.experts = torch.nn.Module()
+        model.experts.w13_weight = torch.nn.Parameter(torch.randn(2, 4, 6))
+        model.experts.w2_weight = torch.nn.Parameter(torch.randn(2, 3, 4))
+
+        w13_weight = model.experts.w13_weight
+        w2_weight = model.experts.w2_weight
+        w13_before = w13_weight.detach().clone()
+        w2_before = w2_weight.detach().clone()
+        w13_metadata = (w13_weight.shape, w13_weight.stride())
+        w2_metadata = (w2_weight.shape, w2_weight.stride())
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.model_runner.model = model
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.quant_config = None
+            worker.vllm_config.model_config.hf_text_config.hidden_size = 4
+            worker._sleep_saved_buffers = {}
+            worker.sleep_wakeup_manager = MagicMock()
+
+            worker.wake_up(tags=["weights"])
+
+        mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(
+            tags=["weights"]
+        )
+        self.assertIs(model.experts.w13_weight, w13_weight)
+        self.assertIs(model.experts.w2_weight, w2_weight)
+        self.assertEqual(
+            (model.experts.w13_weight.shape, model.experts.w13_weight.stride()),
+            w13_metadata,
+        )
+        self.assertEqual(
+            (model.experts.w2_weight.shape, model.experts.w2_weight.stride()),
+            w2_metadata,
+        )
+        torch.testing.assert_close(model.experts.w13_weight, w13_before)
+        torch.testing.assert_close(model.experts.w2_weight, w2_before)
+
     @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")

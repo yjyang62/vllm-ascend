@@ -67,18 +67,13 @@ llm.wake_up(tags=["kv_cache"])
 
 With extra cleanup enabled, ACL graphs are recaptured only when `tags` is `None` or contains `"kv_cache"`. This avoids recapturing graphs before externally reloaded weights and KV-cache state are ready.
 
-### Expert weight layout restoration
+### Weight layout and reloading
 
-For dense models, `wake_up()` simply restores the model weights to NPU memory; the tensor layout is unchanged.
+Level 1 sleep copies allocator-managed weight bytes to CPU memory and restores the same bytes to the same virtual addresses during `wake_up()`. The allocator does not change tensor shape, stride, storage offset, or model-specific weight layout. Consequently, dense and MoE weights remain in the runtime layout produced by `process_weights_after_loading()` and can be used directly after wakeup.
 
-For **unquantized MoE models** (`quant_config is None`), the fused expert weights are stored in a transposed layout for NPU matmul efficiency. This layout is produced once at model load time by `process_weights_after_loading()`: after the weights are loaded, the method transposes the second and third dimensions (`transpose(1, 2)`) of `w13_weight` and `w2_weight` to convert the standard checkpoint layout into the format required by the `torch_npu.npu_grouped_matmul` operator.
+Level 2 sleep discards weight contents. In this case, `wake_up(tags=["weights"])` only remaps storage; callers must reload weights before inference. When reloading checkpoint-format weights, use the weight-update lifecycle (`start_weight_update`, one or more `update_weights` calls, and `finish_weight_update`) or the equivalent vLLM layerwise reload APIs. The initialization step prepares model-specific parameters for checkpoint loading, while finalization calls their post-loading processing to restore the runtime layout.
 
-After the sleep-mode allocator restores the original (untransposed) memory, `wake_up()` re-applies the same transpose to the affected expert weights when the `"weights"` tag is being restored:
-
-- `w13_weight` (gate/up projection): transposed back to the runtime layout when its second dimension matches `hidden_size`;
-- `w2_weight` (down projection): transposed back to the runtime layout when its third dimension matches `hidden_size`.
-
-This step is skipped entirely for dense models (which have no expert weights) and for quantized models (whose weights are handled by the quantization method).
+Do not infer a layout conversion from `wake_up()` itself: sleep-mode wakeup only restores allocator memory. This separation applies to unquantized MoE expert weights as well as dense and quantized weights.
 
 ## Prepare Model Weights
 
