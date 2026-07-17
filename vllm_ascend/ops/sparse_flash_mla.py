@@ -43,7 +43,7 @@ def _add_compressed_kv_lengths(kwargs: dict[str, Any]) -> None:
         kwargs["seqused_cmp_kv"] = seqused_ori_kv // cmp_ratio
     if kwargs.get("cmp_residual_kv") is None:
         kwargs["cmp_residual_kv"] = seqused_ori_kv % cmp_ratio
-    if not kwargs.get("max_seqlen_cmp_kv") and kwargs.get("max_seqlen_ori_kv") is not None:
+    if kwargs.get("max_seqlen_cmp_kv") is None and kwargs.get("max_seqlen_ori_kv") is not None:
         kwargs["max_seqlen_cmp_kv"] = kwargs["max_seqlen_ori_kv"] // cmp_ratio
 
 

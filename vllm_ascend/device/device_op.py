@@ -28,10 +28,10 @@ from vllm_ascend.device.mxfp_compat import (
     QUANT_DTYPES,
     SCALE_DTYPES,
 )
+from vllm_ascend.ops.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-from vllm_ascend.ops.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -922,9 +922,7 @@ class BaseDeviceAdaptor:
         return cmp_kv_tensor
 
     @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(
-        extra_kwargs, kv_cache_dtype: torch.dtype | None = None, **kwargs_to_add
-    ):
+    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, kv_cache_dtype: torch.dtype | None = None, **kwargs_to_add):
         """Non-A5: add extra kwargs for sparse attention. A5: no-op."""
         extra_kwargs.update(kwargs_to_add)
 
@@ -1661,9 +1659,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return None
 
     @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(
-        extra_kwargs, kv_cache_dtype: torch.dtype | None = None, **kwargs_to_add
-    ):
+    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, kv_cache_dtype: torch.dtype | None = None, **kwargs_to_add):
         if _uses_bf16_sparse_flash_mla(kv_cache_dtype):
             extra_kwargs.update(kwargs_to_add)
 
