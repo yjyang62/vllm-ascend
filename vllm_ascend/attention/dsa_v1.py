@@ -11,6 +11,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -379,6 +380,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.metadata_cls = metadata_cls if metadata_cls is not None else AscendDSAMetadata
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
+        self.kv_cache_dtype = kv_cache_spec.dtype
         self.device = device
         scheduler_config = vllm_config.scheduler_config
         # self.block_size = vllm_config.cache_config.block_size
@@ -387,7 +389,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_ascend_device_type() == AscendDeviceType.A5 and self.kv_cache_dtype != torch.bfloat16:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
@@ -604,7 +606,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-        self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
+        self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
+            slot_mapping, self.block_size, self.kv_cache_dtype
+        )
 
         self.graph_pad_size = common_attn_metadata.graph_pad_size
         block_table_size = self.get_block_table_size(common_attn_metadata, BUILD_METADATA_STEP_PREFILL)
@@ -735,8 +739,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_c4_cmp_seqlen_list = None
         cu_c128_cmp_seqlen_list = None
 
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.kv_cache_dtype)
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
+            self.seqused_q.device, self.kv_cache_dtype
+        )
         if self.compressor_ratio <= 1:
             if self.prefill_ratio_to_sas_metadata.get(layer_name) is None:
                 self.prefill_ratio_to_sas_metadata[layer_name] = metadata_op(
@@ -757,7 +763,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
                     has_ori_kv=True,
                     has_cmp_kv=False,
                 )
@@ -785,7 +791,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -811,7 +817,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -963,8 +969,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self._zero_i32,
             self.cu_seqlens_ori_kv,
         )
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.kv_cache_dtype)
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
+            self.seqused_q.device, self.kv_cache_dtype
+        )
         cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         if self.compressor_ratio <= 1:
             if self.decode_ratio_to_sas_metadata.get(layer_name) is None:
@@ -987,7 +995,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
                     has_ori_kv=True,
                     has_cmp_kv=False,
                 )
@@ -1015,7 +1023,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -1041,7 +1049,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ori_win_left=self.model_config.hf_config.sliding_window - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
                     has_ori_kv=True,
                     has_cmp_kv=True,
                 )
@@ -1118,7 +1126,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(  # type: ignore[index]
-            slot_mapping, self.block_size
+            slot_mapping, self.block_size, self.kv_cache_dtype
         )
 
         prefill_metadata = None
@@ -1186,8 +1194,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         prefill_slot_mapping = self.spec_slot_mapping[draft_index - 1][tokens_start:num_prefill_tokens]  # type: ignore[index]
         block_table = common_attn_metadata.block_table_tensor[: common_attn_metadata.num_reqs]
 
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.kv_cache_dtype)
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
+            self.seqused_q.device, self.kv_cache_dtype
+        )
         sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=n_local_heads,
@@ -1206,7 +1216,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=self.model_config.hf_config.sliding_window - 1,
             ori_win_right=0,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -1266,8 +1276,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = self.spec_slot_mapping[draft_index - 1][:num_decode_tokens_typed]  # type: ignore[index]
         block_table = common_attn_metadata.block_table_tensor
 
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.kv_cache_dtype)
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
+            self.seqused_q.device, self.kv_cache_dtype
+        )
 
         decode_sas_metadata = metadata_op(
             **metadata_kwargs,
@@ -1288,7 +1300,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=self.model_config.hf_config.sliding_window - 1,
             ori_win_right=0,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -1412,6 +1424,11 @@ class AscendDSAImpl(DSAAttentionImpl):
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
         self.vllm_config = get_current_vllm_config()
+        self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
+        )
+        if get_ascend_device_type() == AscendDeviceType.A5 and self.kv_cache_dtype == torch.bfloat16:
+            self.multistream_dsv4_dsa_overlap = False
 
         # indexer param
         if self.indexer is not None:
@@ -1514,7 +1531,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             metadata.start_pos,
             metadata.block_table,
             metadata.block_size,
-            DeviceOperator.get_dsa_compressor_slot_mapping_format(),
+            DeviceOperator.get_dsa_compressor_slot_mapping_format(self.kv_cache_dtype),
             self.compress_ratio,
             metadata.num_compressed_tokens,
             metadata.num_reqs_actual,
@@ -1932,9 +1949,13 @@ class AscendDSAImpl(DSAAttentionImpl):
             # swa exec kv
             DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_prefill_metadata.slot_mapping)
 
-        attn_op = DeviceOperator.get_dsa_sparse_attn_op()
-        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
-        DeviceOperator.add_dsa_sparse_attn_extra_kwargs(extra_attn_kwargs, cu_seqlens_ori_kv=actual_seq_lengths_query)
+        attn_op = DeviceOperator.get_dsa_sparse_attn_op(self.kv_cache_dtype)
+        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs(self.kv_cache_dtype)
+        DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
+            extra_attn_kwargs,
+            self.kv_cache_dtype,
+            cu_seqlens_ori_kv=actual_seq_lengths_query,
+        )
 
         if self.compress_ratio <= 1:
             return attn_op(
@@ -1951,7 +1972,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
                 **extra_attn_kwargs,
             )[0]
 
@@ -2076,7 +2097,9 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             if self.compress_ratio == 4:
                 DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
-                    extra_attn_kwargs, cu_seqlens_cmp_kv=common_prefill_metadata.cu_c4_cmp_seqlen_list
+                    extra_attn_kwargs,
+                    self.kv_cache_dtype,
+                    cu_seqlens_cmp_kv=common_prefill_metadata.cu_c4_cmp_seqlen_list,
                 )
                 attn_output = attn_op(
                     q,
@@ -2096,12 +2119,14 @@ class AscendDSAImpl(DSAAttentionImpl):
                     ori_win_left=self.window_size - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
                     **extra_attn_kwargs,
                 )[0]
             else:
                 DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
-                    extra_attn_kwargs, cu_seqlens_cmp_kv=common_prefill_metadata.cu_c128_cmp_seqlen_list
+                    extra_attn_kwargs,
+                    self.kv_cache_dtype,
+                    cu_seqlens_cmp_kv=common_prefill_metadata.cu_c128_cmp_seqlen_list,
                 )
                 attn_output = attn_op(
                     q,
@@ -2120,7 +2145,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     ori_win_left=self.window_size - 1,
                     ori_win_right=0,
                     layout_q="TND",
-                    layout_kv="PA_ND",
+                    layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
                     **extra_attn_kwargs,
                 )[0]
         return attn_output
@@ -2365,8 +2390,8 @@ class AscendDSAImpl(DSAAttentionImpl):
             if self.compress_ratio == 4 and self.use_index_cache:
                 self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
 
-        attn_op = DeviceOperator.get_dsa_sparse_attn_op()
-        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
+        attn_op = DeviceOperator.get_dsa_sparse_attn_op(self.kv_cache_dtype)
+        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs(self.kv_cache_dtype)
 
         if self.compress_ratio <= 1:
             attn_output = attn_op(
@@ -2383,7 +2408,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
                 **extra_attn_kwargs,
             )[0]
         elif self.compress_ratio == 4:
@@ -2405,7 +2430,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
                 **extra_attn_kwargs,
             )[0]
         else:
@@ -2426,7 +2451,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_kv_layout(self.kv_cache_dtype),
                 **extra_attn_kwargs,
             )[0]
         return attn_output
