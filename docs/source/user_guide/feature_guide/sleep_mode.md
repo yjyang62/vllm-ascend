@@ -17,6 +17,7 @@ The engine (v0/v1) supports two sleep levels to manage memory during idle period
     - Memory: Model weights are moved to CPU memory; KV cache is forgotten.
     - Use Case: Suitable when reusing the same model later.
     - Note: Ensure sufficient CPU memory is available to hold the model weights.
+    - Unquantized MoE models currently require the checkpoint reload workflow described in [Expert weight layout and checkpoint reload](#expert-weight-layout-and-checkpoint-reload).
 
 - Level 2 Sleep
     - Action: Discards both model weights and KV cache.
@@ -67,18 +68,25 @@ llm.wake_up(tags=["kv_cache"])
 
 With extra cleanup enabled, ACL graphs are recaptured only when `tags` is `None` or contains `"kv_cache"`. This avoids recapturing graphs before externally reloaded weights and KV-cache state are ready.
 
-### Expert weight layout restoration
+### Expert weight layout and checkpoint reload
 
-For dense models, `wake_up()` simply restores the model weights to NPU memory; the tensor layout is unchanged.
+The sleep-mode allocator operates on allocation bytes. For Level 1 sleep, it copies the allocator-managed weight bytes to CPU memory and restores the same bytes to the same virtual addresses. It does not change tensor shape, stride, storage offset, or model-specific weight layout. Therefore, the allocator itself restores the layout that was active before sleep; it does not restore a separate "original untransposed" tensor layout.
 
-For **unquantized MoE models** (`quant_config is None`), the fused expert weights are stored in a transposed layout for NPU matmul efficiency. This layout is produced once at model load time by `process_weights_after_loading()`: after the weights are loaded, the method transposes the second and third dimensions (`transpose(1, 2)`) of `w13_weight` and `w2_weight` to convert the standard checkpoint layout into the format required by the `torch_npu.npu_grouped_matmul` operator.
+For **unquantized MoE models** (`quant_config is None`), `process_weights_after_loading()` converts checkpoint-format expert weights to the NPU runtime layout by transposing the second and third dimensions of `w13_weight` and `w2_weight`. The current unquantized MoE wakeup path performs the inverse layout conversion when the `"weights"` tag is restored. This conversion prepares the parameters for loading checkpoint-format weights; it is not a consequence of the allocator restoring untransposed memory.
 
-After the sleep-mode allocator restores the original (untransposed) memory, `wake_up()` re-applies the same transpose to the affected expert weights when the `"weights"` tag is being restored:
+As a result, under the current behavior, unquantized MoE models should not perform Level 1 sleep, wake up, and resume inference without reloading weights. Use a staged checkpoint reload instead:
 
-- `w13_weight` (gate/up projection): transposed back to the runtime layout when its second dimension matches `hidden_size`;
-- `w2_weight` (down projection): transposed back to the runtime layout when its third dimension matches `hidden_size`.
+```python
+llm.wake_up(tags=["weights"])
+# Prepare the model for checkpoint-format loading.
+# Reload or update checkpoint-format weights.
+# Finalize the reload to run process_weights_after_loading().
+llm.wake_up(tags=["kv_cache"])
+```
 
-This step is skipped entirely for dense models (which have no expert weights) and for quantized models (whose weights are handled by the quantization method).
+Use the weight-update lifecycle (`start_weight_update`, one or more `update_weights` calls, and `finish_weight_update`) or the equivalent vLLM layerwise reload APIs for the prepare/load/finalize steps. Finalization converts the newly loaded checkpoint weights back to the NPU runtime layout.
+
+Level 2 sleep discards the weight contents, so weight reload and post-loading finalization are mandatory before inference. Dense models do not require the unquantized MoE transpose, while quantized models must follow their quantization method's reload and post-processing requirements.
 
 ## Prepare Model Weights
 
