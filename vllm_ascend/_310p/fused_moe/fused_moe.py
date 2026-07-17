@@ -23,8 +23,8 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
 from vllm_ascend.ops.fused_moe.fused_moe import (
-    W13_RUNTIME_WEIGHT,
     W2_RUNTIME_WEIGHT,
+    W13_RUNTIME_WEIGHT,
     AscendMoERunner,
     _install_runtime_weight,
 )

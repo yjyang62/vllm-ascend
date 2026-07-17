@@ -9,8 +9,8 @@ from torch import nn
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe.fused_moe import (
-    W13_RUNTIME_WEIGHT,
     W2_RUNTIME_WEIGHT,
+    W13_RUNTIME_WEIGHT,
     AscendMoERunner,
     AscendUnquantizedFusedMoEMethod,
 )

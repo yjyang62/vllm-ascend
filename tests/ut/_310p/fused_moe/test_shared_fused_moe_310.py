@@ -13,8 +13,8 @@ from vllm_ascend._310p.fused_moe.fused_moe import (
 )
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.fused_moe import (
-    W13_RUNTIME_WEIGHT,
     W2_RUNTIME_WEIGHT,
+    W13_RUNTIME_WEIGHT,
     AscendMoERunner,
 )
 from vllm_ascend.quantization.quant_type import QuantType
