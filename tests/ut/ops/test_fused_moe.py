@@ -9,6 +9,7 @@ from torch import nn
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe.fused_moe import (
+    SEPARATE_RUNTIME_WEIGHTS_MARKER,
     W2_RUNTIME_WEIGHT,
     W13_RUNTIME_WEIGHT,
     AscendMoERunner,
@@ -166,6 +167,7 @@ def test_process_weights_after_loading_keeps_hf_parameters_for_dynamic_eplb(monk
 @pytest.mark.parametrize("use_expert_lists", [False, True])
 def test_update_runtime_weight_from_kernel_syncs_checkpoint_parameter(use_expert_lists):
     layer = _build_weight_layer()
+    setattr(layer, SEPARATE_RUNTIME_WEIGHTS_MARKER, True)
     runtime_weight = torch.randn(2, 4, 3)
     if use_expert_lists:
         layer.w13_weight_list = [torch.zeros_like(weight) for weight in runtime_weight.unbind(0)]
