@@ -239,3 +239,18 @@ def test_sparse_flash_mla_wrappers_adapt_dsa_kwargs():
     assert "kv_quant_mode" not in attention_kwargs
     assert "tile_size" not in attention_kwargs
     assert "rope_head_dim" not in attention_kwargs
+
+
+def test_a5_bf16_dsa_scatter_uses_block_offset_mapping():
+    cache = torch.zeros(3, 4, 1, 2, dtype=torch.bfloat16)
+    updates = torch.tensor(
+        [[[1.0, 2.0]], [[3.0, 4.0]], [[5.0, 6.0]]],
+        dtype=torch.bfloat16,
+    )
+    slot_mapping = torch.tensor([[0, 1], [2, 3], [1, 0]], dtype=torch.int32)
+
+    A5DeviceAdaptor.dsa_kv_compress_scatter(cache, updates, slot_mapping)
+
+    torch.testing.assert_close(cache[0, 1], updates[0])
+    torch.testing.assert_close(cache[2, 3], updates[1])
+    torch.testing.assert_close(cache[1, 0], updates[2])

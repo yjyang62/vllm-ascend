@@ -740,9 +740,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_c128_cmp_seqlen_list = None
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.kv_cache_dtype)
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
-            self.seqused_q.device, self.kv_cache_dtype
-        )
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device, self.kv_cache_dtype)
         if self.compressor_ratio <= 1:
             if self.prefill_ratio_to_sas_metadata.get(layer_name) is None:
                 self.prefill_ratio_to_sas_metadata[layer_name] = metadata_op(
@@ -970,9 +968,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.cu_seqlens_ori_kv,
         )
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.kv_cache_dtype)
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
-            self.seqused_q.device, self.kv_cache_dtype
-        )
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device, self.kv_cache_dtype)
         cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         if self.compressor_ratio <= 1:
             if self.decode_ratio_to_sas_metadata.get(layer_name) is None:
@@ -1195,9 +1191,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         block_table = common_attn_metadata.block_table_tensor[: common_attn_metadata.num_reqs]
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.kv_cache_dtype)
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
-            self.seqused_q.device, self.kv_cache_dtype
-        )
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device, self.kv_cache_dtype)
         sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=n_local_heads,
@@ -1277,9 +1271,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         block_table = common_attn_metadata.block_table_tensor
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.kv_cache_dtype)
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
-            self.seqused_q.device, self.kv_cache_dtype
-        )
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device, self.kv_cache_dtype)
 
         decode_sas_metadata = metadata_op(
             **metadata_kwargs,
