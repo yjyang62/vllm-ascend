@@ -167,7 +167,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.metadata_cls = metadata_cls if metadata_cls is not None else AscendDSAMetadata
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        self.kv_cache_dtype = kv_cache_spec.dtype
+        self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+            vllm_config.cache_config.cache_dtype, vllm_config.model_config
+        )
         self.device = device
         scheduler_config = vllm_config.scheduler_config
 
