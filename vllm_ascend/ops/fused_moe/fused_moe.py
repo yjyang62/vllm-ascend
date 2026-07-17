@@ -107,6 +107,56 @@ def _install_runtime_weight_list(layer: torch.nn.Module, name: str, weight: torc
     return runtime_weights
 
 
+def update_runtime_weight_from_kernel(
+    layer: torch.nn.Module,
+    parameter_name: str,
+    weight: torch.Tensor,
+) -> bool:
+    """Update a runtime-format MoE weight and its checkpoint Parameter."""
+    runtime_name = {
+        "w13_weight": W13_RUNTIME_WEIGHT,
+        "w2_weight": W2_RUNTIME_WEIGHT,
+    }.get(parameter_name)
+    if runtime_name is None:
+        return False
+
+    runtime_weight = getattr(layer, runtime_name, None)
+    runtime_weight_list = getattr(layer, f"{parameter_name}_list", None)
+    if isinstance(runtime_weight, torch.Tensor):
+        if runtime_weight.shape != weight.shape:
+            raise ValueError(
+                f"Runtime weight shape mismatch for {parameter_name}: "
+                f"expected {tuple(runtime_weight.shape)}, got {tuple(weight.shape)}"
+            )
+        runtime_weight.copy_(weight)
+    elif isinstance(runtime_weight_list, list):
+        expert_weights = list(weight.unbind(dim=0))
+        if len(runtime_weight_list) != len(expert_weights):
+            raise ValueError(
+                f"Runtime expert count mismatch for {parameter_name}: "
+                f"expected {len(runtime_weight_list)}, got {len(expert_weights)}"
+            )
+        for existing, updated in zip(runtime_weight_list, expert_weights):
+            if existing.shape != updated.shape:
+                raise ValueError(
+                    f"Runtime expert shape mismatch for {parameter_name}: "
+                    f"expected {tuple(existing.shape)}, got {tuple(updated.shape)}"
+                )
+            existing.copy_(updated)
+    else:
+        return False
+
+    checkpoint_weight = getattr(layer, parameter_name)
+    checkpoint_value = weight.transpose(1, 2)
+    if checkpoint_weight.shape != checkpoint_value.shape:
+        raise ValueError(
+            f"Checkpoint weight shape mismatch for {parameter_name}: "
+            f"expected {tuple(checkpoint_weight.shape)}, got {tuple(checkpoint_value.shape)}"
+        )
+    checkpoint_weight.copy_(checkpoint_value)
+    return True
+
+
 @dataclass
 class FusedMoEResult:
     routed_out: torch.Tensor
@@ -175,11 +225,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w13_data = maybe_trans_nz(w13_data)
             w2_data = maybe_trans_nz(w2_data)
 
-        w13_runtime = _install_runtime_weight(layer, W13_RUNTIME_WEIGHT, w13_data)
-        w2_runtime = _install_runtime_weight(layer, W2_RUNTIME_WEIGHT, w2_data)
         if enable_fused_mc2 == 1 and self.dynamic_eplb:
-            _install_runtime_weight_list(layer, "w13_weight_list", w13_runtime)
-            _install_runtime_weight_list(layer, "w2_weight_list", w2_runtime)
+            _install_runtime_weight_list(layer, "w13_weight_list", w13_data)
+            _install_runtime_weight_list(layer, "w2_weight_list", w2_data)
+        else:
+            _install_runtime_weight(layer, W13_RUNTIME_WEIGHT, w13_data)
+            _install_runtime_weight(layer, W2_RUNTIME_WEIGHT, w2_data)
 
     def apply(
         self,
@@ -274,24 +325,22 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
-        w13_runtime = getattr(layer, W13_RUNTIME_WEIGHT)
-        w2_runtime = getattr(layer, W2_RUNTIME_WEIGHT)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
             if self.dynamic_eplb and not has_split_weight_lists:
                 logger.warning_once(
                     "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
                     "tensor lists. This may cause accuracy issues or communication hangs."
                 )
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [w13_runtime]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [w2_runtime]
+            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [getattr(layer, W13_RUNTIME_WEIGHT)]
+            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [getattr(layer, W2_RUNTIME_WEIGHT)]
             w1_scale = [torch.tensor([], dtype=torch.int64)]
             w2_scale = [torch.tensor([], dtype=torch.int64)]
             w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
             w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else w13_runtime
+            w1 = w13_weight_list if isinstance(w13_weight_list, list) else getattr(layer, W13_RUNTIME_WEIGHT)
             w1_scale = None
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else w2_runtime
+            w2 = w2_weight_list if isinstance(w2_weight_list, list) else getattr(layer, W2_RUNTIME_WEIGHT)
             w2_scale = None
             w1_scale_bias = None
             w2_scale_bias = None

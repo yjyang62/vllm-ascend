@@ -326,8 +326,16 @@ class NPUWorker(WorkerBase):
             else:
 
                 def load_weights_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
+                    from vllm_ascend.ops.fused_moe.fused_moe import (
+                        update_runtime_weight_from_kernel,
+                    )
+
                     with torch.no_grad():
                         for name, weight in weights:
+                            module_path, _, parameter_name = name.rpartition(".")
+                            layer = model.get_submodule(module_path) if module_path else model
+                            if update_runtime_weight_from_kernel(layer, parameter_name, weight):
+                                continue
                             param = model.get_parameter(name)
                             param.copy_(weight)
 

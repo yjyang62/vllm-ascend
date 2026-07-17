@@ -1517,6 +1517,42 @@ class TestNPUWorkerWeightUpdate(TestBase):
         torch.testing.assert_close(param.detach(), torch.zeros(2))
         self.assertTrue(param.requires_grad)
 
+    @patch("torch.npu.synchronize", create=True)
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_update_weights_kernel_format_updates_moe_runtime_and_checkpoint_weights(self, mock_sync):
+        engine = MagicMock()
+        w13_runtime = torch.randn(2, 4, 3)
+        w2_runtime = torch.randn(2, 3, 4)
+
+        def fake_receive(update_info, load_weights):
+            load_weights(
+                [
+                    ("experts.w13_weight", w13_runtime),
+                    ("experts.w2_weight", w2_runtime),
+                ]
+            )
+
+        engine.receive_weights.side_effect = fake_receive
+        worker = self._make_worker(engine=engine)
+        model = torch.nn.Module()
+        model.experts = torch.nn.Module()
+        model.experts.w13_weight = torch.nn.Parameter(torch.zeros(2, 3, 4))
+        model.experts.w2_weight = torch.nn.Parameter(torch.zeros(2, 4, 3))
+        model.experts.w13_weight_runtime = torch.zeros_like(w13_runtime)
+        model.experts.w2_weight_runtime = torch.zeros_like(w2_runtime)
+        worker.model_runner.model = model
+        engine.parse_update_info.return_value = "typed_update"
+        worker._weight_update_active = True
+        worker._is_checkpoint_format = False
+
+        worker.update_weights({"foo": "bar"})
+
+        torch.testing.assert_close(model.experts.w13_weight_runtime, w13_runtime)
+        torch.testing.assert_close(model.experts.w2_weight_runtime, w2_runtime)
+        torch.testing.assert_close(model.experts.w13_weight, w13_runtime.transpose(1, 2))
+        torch.testing.assert_close(model.experts.w2_weight, w2_runtime.transpose(1, 2))
+        mock_sync.assert_called_once()
+
     @patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload")
     def test_finish_weight_update_resets_state(self, mock_finalize_reload):
         engine = MagicMock()

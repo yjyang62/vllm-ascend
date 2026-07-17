@@ -13,6 +13,7 @@ from vllm_ascend.ops.fused_moe.fused_moe import (
     W13_RUNTIME_WEIGHT,
     AscendMoERunner,
     AscendUnquantizedFusedMoEMethod,
+    update_runtime_weight_from_kernel,
 )
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -138,14 +139,48 @@ def test_process_weights_after_loading_keeps_hf_parameters_for_dynamic_eplb(monk
     assert layer.w2_weight is w2_parameter
     assert len(layer.w13_weight_list) == layer.w13_weight.shape[0]
     assert len(layer.w2_weight_list) == layer.w2_weight.shape[0]
+    assert not hasattr(layer, W13_RUNTIME_WEIGHT)
+    assert not hasattr(layer, W2_RUNTIME_WEIGHT)
+    w13_runtime_list = layer.w13_weight_list
+    w2_runtime_list = layer.w2_weight_list
     torch.testing.assert_close(
         torch.stack(layer.w13_weight_list),
-        getattr(layer, W13_RUNTIME_WEIGHT),
+        layer.w13_weight.transpose(1, 2),
     )
     torch.testing.assert_close(
         torch.stack(layer.w2_weight_list),
-        getattr(layer, W2_RUNTIME_WEIGHT),
+        layer.w2_weight.transpose(1, 2),
     )
+
+    with torch.no_grad():
+        layer.w13_weight.add_(1)
+        layer.w2_weight.add_(1)
+    method.process_weights_after_loading(layer)
+
+    assert layer.w13_weight_list is w13_runtime_list
+    assert layer.w2_weight_list is w2_runtime_list
+    torch.testing.assert_close(torch.stack(layer.w13_weight_list), layer.w13_weight.transpose(1, 2))
+    torch.testing.assert_close(torch.stack(layer.w2_weight_list), layer.w2_weight.transpose(1, 2))
+
+
+@pytest.mark.parametrize("use_expert_lists", [False, True])
+def test_update_runtime_weight_from_kernel_syncs_checkpoint_parameter(use_expert_lists):
+    layer = _build_weight_layer()
+    runtime_weight = torch.randn(2, 4, 3)
+    if use_expert_lists:
+        layer.w13_weight_list = [torch.zeros_like(weight) for weight in runtime_weight.unbind(0)]
+    else:
+        layer.w13_weight_runtime = torch.zeros_like(runtime_weight)
+
+    with torch.no_grad():
+        updated = update_runtime_weight_from_kernel(layer, "w13_weight", runtime_weight)
+
+    assert updated
+    if use_expert_lists:
+        torch.testing.assert_close(torch.stack(layer.w13_weight_list), runtime_weight)
+    else:
+        torch.testing.assert_close(layer.w13_weight_runtime, runtime_weight)
+    torch.testing.assert_close(layer.w13_weight, runtime_weight.transpose(1, 2))
 
 
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])
