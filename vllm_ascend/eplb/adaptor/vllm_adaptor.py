@@ -26,7 +26,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.quantization.quant_type import QuantType
 
 EPLB_EXPERT_WEIGHT_NAMES = {
-    (QuantType.NONE, False): ("w13_weight", "w2_weight"),
+    (QuantType.NONE, False): ("w13_weight_runtime", "w2_weight_runtime"),
     (QuantType.NONE, True): ("w13_weight_list", "w2_weight_list"),
     (QuantType.W8A8, False): (
         "w13_weight_list",

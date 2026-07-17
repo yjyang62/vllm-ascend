@@ -52,6 +52,9 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
+W13_RUNTIME_WEIGHT = "w13_weight_runtime"
+W2_RUNTIME_WEIGHT = "w2_weight_runtime"
+
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
     global_indices = torch.where(expert_map != -1)[0]
@@ -60,6 +63,48 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
         f"{local_index.item()}->{global_index.item()}"
         for local_index, global_index in zip(local_indices, global_indices)
     )
+
+
+def _install_runtime_weight(layer: torch.nn.Module, name: str, weight: torch.Tensor) -> torch.Tensor:
+    """Install or refresh a runtime-only weight while preserving its address."""
+    current = getattr(layer, name, None)
+    if (
+        isinstance(current, torch.Tensor)
+        and current.shape == weight.shape
+        and current.dtype == weight.dtype
+        and current.device == weight.device
+    ):
+        if (
+            current.data_ptr() != weight.data_ptr()
+            or current.storage_offset() != weight.storage_offset()
+            or current.stride() != weight.stride()
+        ):
+            with torch.no_grad():
+                current.copy_(weight)
+        return current
+    setattr(layer, name, weight)
+    return weight
+
+
+def _install_runtime_weight_list(layer: torch.nn.Module, name: str, weight: torch.Tensor) -> list[torch.Tensor]:
+    """Install or refresh per-expert runtime weights used by dynamic EPLB."""
+    expert_weights = list(weight.unbind(dim=0))
+    current = getattr(layer, name, None)
+    if (
+        isinstance(current, list)
+        and len(current) == len(expert_weights)
+        and all(
+            existing.shape == updated.shape and existing.dtype == updated.dtype and existing.device == updated.device
+            for existing, updated in zip(current, expert_weights)
+        )
+    ):
+        with torch.no_grad():
+            for existing, updated in zip(current, expert_weights):
+                existing.copy_(updated)
+        return current
+    runtime_weights = [expert_weight.clone() for expert_weight in expert_weights]
+    setattr(layer, name, runtime_weights)
+    return runtime_weights
 
 
 @dataclass
@@ -111,16 +156,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # (798185d) and is present in the verified main commit only.
         if not vllm_version_is("0.24.0"):
             w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2)
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
             w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2)
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
         else:
             w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
             w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
         # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
@@ -130,17 +169,17 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
-            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if enable_fused_mc2 == 1 and self.dynamic_eplb:
-                layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                del layer.w13_weight
-                del layer.w2_weight
-                torch.npu.empty_cache()
+            w13_data = torch_npu.npu_format_cast(w13_data, ACL_FORMAT_FRACTAL_NZ)
+            w2_data = torch_npu.npu_format_cast(w2_data, ACL_FORMAT_FRACTAL_NZ)
         else:
-            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+            w13_data = maybe_trans_nz(w13_data)
+            w2_data = maybe_trans_nz(w2_data)
+
+        w13_runtime = _install_runtime_weight(layer, W13_RUNTIME_WEIGHT, w13_data)
+        w2_runtime = _install_runtime_weight(layer, W2_RUNTIME_WEIGHT, w2_data)
+        if enable_fused_mc2 == 1 and self.dynamic_eplb:
+            _install_runtime_weight_list(layer, "w13_weight_list", w13_runtime)
+            _install_runtime_weight_list(layer, "w2_weight_list", w2_runtime)
 
     def apply(
         self,
@@ -235,22 +274,24 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
+        w13_runtime = getattr(layer, W13_RUNTIME_WEIGHT)
+        w2_runtime = getattr(layer, W2_RUNTIME_WEIGHT)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
             if self.dynamic_eplb and not has_split_weight_lists:
                 logger.warning_once(
                     "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
                     "tensor lists. This may cause accuracy issues or communication hangs."
                 )
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [w13_runtime]
+            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [w2_runtime]
             w1_scale = [torch.tensor([], dtype=torch.int64)]
             w2_scale = [torch.tensor([], dtype=torch.int64)]
             w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
             w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
+            w1 = w13_weight_list if isinstance(w13_weight_list, list) else w13_runtime
             w1_scale = None
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else layer.w2_weight
+            w2 = w2_weight_list if isinstance(w2_weight_list, list) else w2_runtime
             w2_scale = None
             w1_scale_bias = None
             w2_scale_bias = None
@@ -438,6 +479,22 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
         # so only real MoE layers on this rank are registered.
         VllmEplbAdaptor.register_layer(self)
+
+    @property
+    def w13_weight_runtime(self) -> torch.Tensor:
+        return getattr(self.routed_experts, W13_RUNTIME_WEIGHT)
+
+    @property
+    def w2_weight_runtime(self) -> torch.Tensor:
+        return getattr(self.routed_experts, W2_RUNTIME_WEIGHT)
+
+    @property
+    def w13_weight_list(self) -> list[torch.Tensor]:
+        return self.routed_experts.w13_weight_list
+
+    @property
+    def w2_weight_list(self) -> list[torch.Tensor]:
+        return self.routed_experts.w2_weight_list
 
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated computation."""

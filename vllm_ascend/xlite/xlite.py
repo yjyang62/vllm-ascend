@@ -438,8 +438,10 @@ class QwenMoeXliteModel(LlamaXliteModel):
         xlite_model.gate = get_layer_weights(layers, "mlp.gate.weight")
         prefix = "mlp.experts."
         kwargs: WeightGetterConfig = {"secondary_flattening": f"{prefix}local_num_experts", "post_processor": None}
-        xlite_model.re_up_gate = get_layer_weights(layers, f"{prefix}w13_weight", **kwargs)
-        xlite_model.re_down = get_layer_weights(layers, f"{prefix}w2_weight", **kwargs)
+        w13_name = "w13_weight" if self.quantization else "w13_weight_runtime"
+        w2_name = "w2_weight" if self.quantization else "w2_weight_runtime"
+        xlite_model.re_up_gate = get_layer_weights(layers, f"{prefix}{w13_name}", **kwargs)
+        xlite_model.re_down = get_layer_weights(layers, f"{prefix}{w2_name}", **kwargs)
         xlite_config.experts_weight_nz = self.is_tensor_nz(xlite_model.re_up_gate[0])
 
         if self.quantization:
@@ -488,8 +490,10 @@ class Glm4MoeXliteModel(LlamaXliteModel):
 
         prefix = "mlp.experts."
         kwargs: WeightGetterConfig = {"secondary_flattening": f"{prefix}local_num_experts", "post_processor": None}
-        xlite_model.re_up_gate = get_layer_weights(layers, f"{prefix}w13_weight", **kwargs)
-        xlite_model.re_down = get_layer_weights(layers, f"{prefix}w2_weight", **kwargs)
+        w13_name = "w13_weight" if self.quantization else "w13_weight_runtime"
+        w2_name = "w2_weight" if self.quantization else "w2_weight_runtime"
+        xlite_model.re_up_gate = get_layer_weights(layers, f"{prefix}{w13_name}", **kwargs)
+        xlite_model.re_down = get_layer_weights(layers, f"{prefix}{w2_name}", **kwargs)
         if xlite_model.re_up_gate:
             xlite_config.experts_weight_nz = self.is_tensor_nz(xlite_model.re_up_gate[0])
 
@@ -532,8 +536,10 @@ class MiniMaxM2XliteModel(LlamaXliteModel):
 
         prefix = "block_sparse_moe.experts."
         kwargs: WeightGetterConfig = {"secondary_flattening": f"{prefix}local_num_experts", "post_processor": None}
-        xlite_model.re_up_gate = get_layer_weights(layers, f"{prefix}w13_weight", **kwargs)
-        xlite_model.re_down = get_layer_weights(layers, f"{prefix}w2_weight", **kwargs)
+        w13_name = "w13_weight" if self.quantization else "w13_weight_runtime"
+        w2_name = "w2_weight" if self.quantization else "w2_weight_runtime"
+        xlite_model.re_up_gate = get_layer_weights(layers, f"{prefix}{w13_name}", **kwargs)
+        xlite_model.re_down = get_layer_weights(layers, f"{prefix}{w2_name}", **kwargs)
         if xlite_model.re_up_gate:
             xlite_config.experts_weight_nz = self.is_tensor_nz(xlite_model.re_up_gate[0])
 

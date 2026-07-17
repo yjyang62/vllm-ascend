@@ -23,6 +23,8 @@ class TestVllmAdaptor(unittest.TestCase):
         self.mock_layer.w2_weight_scale_list = [torch.tensor([1.0]) for _ in range(n_routed_experts)]
         self.mock_layer.w13_weight = torch.randn(n_routed_experts, 256, 128)
         self.mock_layer.w2_weight = torch.randn(n_routed_experts, 128, 256)
+        self.mock_layer.w13_weight_runtime = self.mock_layer.w13_weight.transpose(1, 2)
+        self.mock_layer.w2_weight_runtime = self.mock_layer.w2_weight.transpose(1, 2)
         self.mock_layer.moe_load = torch.randn(n_routed_experts)
         self.mock_layer.global_expert_map = torch.arange(n_routed_experts * 4).reshape(n_routed_experts, 4)
         self.mock_layer.get_log2phy_map.return_value = torch.arange(4)
@@ -52,6 +54,20 @@ class TestVllmAdaptor(unittest.TestCase):
         self.assertEqual(adaptor.expert_weight_key_per_layer[0], (QuantType.NONE, True))
         self.assertIs(adaptor.expert_param_per_layer[0][0][0], self.mock_layer.w13_weight_list[0])
         self.assertIs(adaptor.expert_param_per_layer[0][0][1], self.mock_layer.w2_weight_list[0])
+
+    @patch("torch.empty_like", return_value=torch.zeros(16, 32))
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
+    def test_init_fp16_without_fused_mc2_uses_runtime_weights(self, mock_get_config, mock_func):
+        mock_config = MagicMock()
+        mock_config.enable_fused_mc2 = 0
+        mock_get_config.return_value = mock_config
+        self.model.quant_config = None
+
+        adaptor = VllmEplbAdaptor(self.model)
+
+        self.assertEqual(adaptor.expert_weight_key_per_layer[0], (QuantType.NONE, False))
+        self.assertIs(adaptor.expert_param_per_layer[0][0][0], self.mock_layer.w13_weight_runtime[0])
+        self.assertIs(adaptor.expert_param_per_layer[0][0][1], self.mock_layer.w2_weight_runtime[0])
 
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")

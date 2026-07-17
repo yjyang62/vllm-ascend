@@ -249,6 +249,41 @@ class TestNPUWorker(TestBase):
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
 
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_preserves_moe_checkpoint_parameters(
+        self,
+        mock_get_config,
+        mock_allocator_class,
+    ):
+        """Wakeup restores allocator memory without changing MoE parameters."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_extra_cleanup = False
+        mock_get_config.return_value = mock_config
+
+        model = torch.nn.Module()
+        model.experts = torch.nn.Module()
+        model.experts.w13_weight = torch.nn.Parameter(torch.randn(2, 6, 4))
+        model.experts.w2_weight = torch.nn.Parameter(torch.randn(2, 4, 3))
+        w13_weight = model.experts.w13_weight
+        w2_weight = model.experts.w2_weight
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.model_runner.model = model
+            worker._sleep_saved_buffers = {}
+            worker.sleep_wakeup_manager = MagicMock()
+
+            worker.wake_up(tags=["weights"])
+
+        mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(tags=["weights"])
+        self.assertIs(model.experts.w13_weight, w13_weight)
+        self.assertIs(model.experts.w2_weight, w2_weight)
+
     @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
