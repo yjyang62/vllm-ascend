@@ -288,9 +288,7 @@ class TestNPUWorker(TestBase):
 
             worker.wake_up(tags=["weights"])
 
-        mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(
-            tags=["weights"]
-        )
+        mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(tags=["weights"])
         self.assertIs(model.experts.w13_weight, w13_weight)
         self.assertIs(model.experts.w2_weight, w2_weight)
         self.assertEqual(
