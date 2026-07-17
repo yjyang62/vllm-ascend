@@ -483,9 +483,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         num_heads = self.model_config.hf_config.num_attention_heads
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.kv_cache_dtype)
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
-            self.seqused_q.device, self.kv_cache_dtype
-        )
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device, self.kv_cache_dtype)
         metadata_kwargs.setdefault("device", str(self.seqused_q.device))
         cu_seqlens_ori_kv = (
             local_query_start_loc
