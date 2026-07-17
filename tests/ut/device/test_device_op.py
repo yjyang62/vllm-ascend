@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+from vllm_ascend.ops.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 
 
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():
@@ -182,3 +183,59 @@ def test_a5_npu_flash_attention_uses_python_sequence_lengths():
     assert call_kwargs["actual_seq_qlen"] == [2, 5]
     assert all(isinstance(seq_len, int) for seq_len in call_kwargs["actual_seq_qlen"])
     assert call_kwargs["actual_seq_kvlen"] is call_kwargs["actual_seq_qlen"]
+
+
+def test_a5_dsa_sparse_attention_selects_ops_by_kv_dtype():
+    assert A5DeviceAdaptor.get_dsa_sparse_attn_op(torch.bfloat16) is sparse_flash_mla
+    assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_op(torch.bfloat16) is sparse_flash_mla_metadata
+    assert A5DeviceAdaptor.get_dsa_kv_layout(torch.bfloat16) == "PA_BBND"
+
+    assert A5DeviceAdaptor.get_dsa_sparse_attn_op(torch.float8_e4m3fn) is not sparse_flash_mla
+    assert A5DeviceAdaptor.get_dsa_kv_layout(torch.float8_e4m3fn) == "PA_ND"
+
+
+def test_sparse_flash_mla_wrappers_adapt_dsa_kwargs():
+    attention_op = mock.MagicMock(return_value=("output", "lse"))
+    metadata_op = mock.MagicMock(return_value="metadata")
+    seqused_kv = torch.tensor([10, 65], dtype=torch.int32)
+
+    with mock.patch(
+        "vllm_ascend.ops.sparse_flash_mla._get_sparse_flash_mla_ops",
+        return_value=(attention_op, metadata_op),
+    ):
+        metadata = sparse_flash_mla_metadata(
+            num_heads_q=64,
+            num_heads_kv=1,
+            head_dim=512,
+            seqused_kv=seqused_kv,
+            max_seqlen_kv=65,
+            cmp_ratio=4,
+            kv_quant_mode=1,
+            device="npu:0",
+        )
+        output = sparse_flash_mla(
+            torch.empty(1, 64, 512, dtype=torch.bfloat16),
+            seqused_kv=seqused_kv,
+            cmp_ratio=4,
+            kv_quant_mode=1,
+            tile_size=64,
+            rope_head_dim=64,
+        )
+
+    assert metadata == "metadata"
+    assert output == ("output", "lse")
+
+    metadata_kwargs = metadata_op.call_args.kwargs
+    torch.testing.assert_close(metadata_kwargs["seqused_ori_kv"], seqused_kv)
+    torch.testing.assert_close(metadata_kwargs["seqused_cmp_kv"], seqused_kv // 4)
+    torch.testing.assert_close(metadata_kwargs["cmp_residual_kv"], seqused_kv % 4)
+    assert metadata_kwargs["max_seqlen_ori_kv"] == 65
+    assert metadata_kwargs["max_seqlen_cmp_kv"] == 16
+    assert "kv_quant_mode" not in metadata_kwargs
+    assert "device" not in metadata_kwargs
+
+    attention_kwargs = attention_op.call_args.kwargs
+    torch.testing.assert_close(attention_kwargs["seqused_ori_kv"], seqused_kv)
+    assert "kv_quant_mode" not in attention_kwargs
+    assert "tile_size" not in attention_kwargs
+    assert "rope_head_dim" not in attention_kwargs
