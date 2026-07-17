@@ -72,7 +72,7 @@ With extra cleanup enabled, ACL graphs are recaptured only when `tags` is `None`
 
 The sleep-mode allocator operates on allocation bytes. For Level 1 sleep, it copies the allocator-managed weight bytes to CPU memory and restores the same bytes to the same virtual addresses. It does not change tensor shape, stride, storage offset, or model-specific weight layout. Therefore, the allocator itself restores the layout that was active before sleep; it does not restore a separate "original untransposed" tensor layout.
 
-For **unquantized MoE models** (`quant_config is None`), `process_weights_after_loading()` converts checkpoint-format expert weights to the NPU runtime layout by transposing the second and third dimensions of `w13_weight` and `w2_weight`. The current unquantized MoE wakeup path performs the inverse layout conversion when the `"weights"` tag is restored. This conversion prepares the parameters for loading checkpoint-format weights; it is not a consequence of the allocator restoring untransposed memory.
+For **unquantized MoE models** (`quant_config is None`), `process_weights_after_loading()` converts checkpoint-format expert weights to the NPU runtime layout by transposing the second and third dimensions of `w13_weight` and `w2_weight`. The current unquantized MoE wakeup path performs the inverse layout conversion when the `"weights"` tag is restored to prepare the parameters for loading checkpoint-format weights.
 
 As a result, under the current behavior, unquantized MoE models should not perform Level 1 sleep, wake up, and resume inference without reloading weights. Use a staged checkpoint reload instead:
 
