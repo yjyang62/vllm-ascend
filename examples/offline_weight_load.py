@@ -78,23 +78,6 @@ os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
-def patch_vllm_moe_model_weight_loader(model):
-    # Define MLP attribute mapping for different model types
-
-    model = getattr(model, "model", None) or getattr(model, "language_model", None)
-    if model is None:
-        raise ValueError("The provided model does not have a valid 'model' or 'language_model' attribute.")
-
-    for layer in model.layers:
-        mlp_attr = "mlp"
-        mlp = getattr(layer, mlp_attr)
-
-        param_dict = dict(mlp.named_parameters())
-        for name, param in param_dict.items():
-            if "w13_weight" in name or "w2_weight" in name:
-                param.weight_loader = mlp.experts.weight_loader
-
-
 def load_and_merge_safetensors(directory):
     merged_dict = {}
 
@@ -221,7 +204,6 @@ def main(
 
         model_path = model
         runmodel = llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
-        patch_vllm_moe_model_weight_loader(runmodel)
         sd = load_and_merge_safetensors(model_path)
         runmodel.load_weights(sd.items())
         print("load state dict done")

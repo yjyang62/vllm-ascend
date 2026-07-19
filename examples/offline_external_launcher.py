@@ -77,19 +77,6 @@ os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
-def patch_vllm_moe_model_weight_loader(model):
-    model = getattr(model, "model", None) or getattr(model, "language_model", None)
-    if model is None:
-        raise ValueError("The provided model does not have a valid 'model' or 'language_model' attribute.")
-    for layer in model.layers:
-        mlp_attr = "mlp"
-        mlp = getattr(layer, mlp_attr)
-        param_dict = dict(mlp.named_parameters())
-        for name, param in param_dict.items():
-            if "w13_weight" in name or "w2_weight" in name:
-                param.weight_loader = mlp.experts.weight_loader
-
-
 def load_and_merge_safetensors(directory):
     if not os.path.isdir(directory):
         raise ValueError(f"The provided directory does not exist: {directory}")
@@ -223,7 +210,6 @@ def main(
         else:
             llm.wake_up(tags=["weights"])
             run_model = llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
-            patch_vllm_moe_model_weight_loader(run_model)
             sd = load_and_merge_safetensors(model)
             run_model.load_weights(sd.items())
             llm.wake_up(tags=["kv_cache"])
