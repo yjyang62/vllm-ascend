@@ -70,6 +70,7 @@ from vllm.distributed.parallel_state import (  # noqa E402
     destroy_model_parallel,
     get_tp_group,
 )
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_open_port
 
@@ -212,6 +213,9 @@ def main(
             run_model = llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
             sd = load_and_merge_safetensors(model)
             run_model.load_weights(sd.items())
+            model_config = llm.llm_engine.vllm_config.model_config
+            device = next(run_model.parameters()).device
+            process_weights_after_loading(run_model, model_config, device)
             llm.wake_up(tags=["kv_cache"])
 
         outputs_after_wakeup = llm.generate(prompts, sampling_params)
