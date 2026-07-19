@@ -275,22 +275,6 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, flash_comm_v1_ena
     assert runner._maybe_reduce_shared_expert_output(shared_output) is shared_output
 
 
-def test_runner_exposes_unquantized_runtime_weights_for_eplb():
-    runner = AscendMoERunner.__new__(AscendMoERunner)
-    nn.Module.__init__(runner)
-    routed_experts = nn.Module()
-    routed_experts.w13_weight_runtime = torch.randn(2, 3, 4)
-    routed_experts.w2_weight_runtime = torch.randn(2, 4, 3)
-    routed_experts.w13_weight_list = [torch.randn(3, 4) for _ in range(2)]
-    routed_experts.w2_weight_list = [torch.randn(4, 3) for _ in range(2)]
-    runner.routed_experts = routed_experts
-
-    assert runner.w13_weight_runtime is routed_experts.w13_weight_runtime
-    assert runner.w2_weight_runtime is routed_experts.w2_weight_runtime
-    assert runner.w13_weight_list is routed_experts.w13_weight_list
-    assert runner.w2_weight_list is routed_experts.w2_weight_list
-
-
 class _Projection(nn.Module):
     def forward(self, hidden_states):
         return hidden_states * 2.0 + 1.0, None

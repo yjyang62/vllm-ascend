@@ -534,22 +534,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # so only real MoE layers on this rank are registered.
         VllmEplbAdaptor.register_layer(self)
 
-    @property
-    def w13_weight_runtime(self) -> torch.Tensor:
-        return getattr(self.routed_experts, W13_RUNTIME_WEIGHT)
-
-    @property
-    def w2_weight_runtime(self) -> torch.Tensor:
-        return getattr(self.routed_experts, W2_RUNTIME_WEIGHT)
-
-    @property
-    def w13_weight_list(self) -> list[torch.Tensor]:
-        return self.routed_experts.w13_weight_list
-
-    @property
-    def w2_weight_list(self) -> list[torch.Tensor]:
-        return self.routed_experts.w2_weight_list
-
     def _validate_shared_expert_consistency(self):
         """Validate that split shared expert computation matches integrated computation."""
         test_input = (

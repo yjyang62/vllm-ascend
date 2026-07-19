@@ -62,12 +62,16 @@ class TestVllmAdaptor(unittest.TestCase):
         mock_config.enable_fused_mc2 = 0
         mock_get_config.return_value = mock_config
         self.model.quant_config = None
+        routed_experts = MagicMock()
+        routed_experts.w13_weight_runtime = self.mock_layer.w13_weight_runtime
+        routed_experts.w2_weight_runtime = self.mock_layer.w2_weight_runtime
+        self.mock_layer._modules = {"routed_experts": routed_experts}
 
         adaptor = VllmEplbAdaptor(self.model)
 
         self.assertEqual(adaptor.expert_weight_key_per_layer[0], (QuantType.NONE, False))
-        self.assertIs(adaptor.expert_param_per_layer[0][0][0], self.mock_layer.w13_weight_runtime[0])
-        self.assertIs(adaptor.expert_param_per_layer[0][0][1], self.mock_layer.w2_weight_runtime[0])
+        self.assertIs(adaptor.expert_param_per_layer[0][0][0], routed_experts.w13_weight_runtime[0])
+        self.assertIs(adaptor.expert_param_per_layer[0][0][1], routed_experts.w2_weight_runtime[0])
 
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
