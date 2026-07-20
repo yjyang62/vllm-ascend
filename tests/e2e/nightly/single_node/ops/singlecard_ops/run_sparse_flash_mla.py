@@ -89,7 +89,7 @@ import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401,E402
 # CONFIG -- adjust to match the deployed operator / model dims.
 # ---------------------------------------------------------------------------
 SEED = 42
-NUM_Q_HEADS = 64  # SparseFlashMla TND constraint: N1 == 64
+NUM_Q_HEADS = 64
 NUM_KV_HEADS = 1  # KV_N == 1
 # DSV4 MLA head_dim == 512 and already INCLUDES rope:
 #   head_dim (512) = nope_head_dim (448) + rope_head_dim (64).
@@ -106,6 +106,11 @@ DEVICE = "npu"
 # large-negative sink so exp(sink - m) underflows to ~0 on both the op and the
 # golden, leaving plain causal softmax.
 SINK_DISABLED = -1.0e4
+PA_STRESS_BLOCK_COUNT = 32
+PA_STRESS_BOUNDARY_LENGTH = BLOCK_SIZE * PA_STRESS_BLOCK_COUNT
+PA_STRESS_LENGTHS = tuple(PA_STRESS_BOUNDARY_LENGTH + delta for delta in (-1, 0, 1))
+PA_STRESS_QUERY_LENGTH = BLOCK_SIZE
+PA_STRIDE_PADDING_ELEMENTS = HEAD_DIM
 
 
 def _unwrap(out):
@@ -115,7 +120,7 @@ def _unwrap(out):
     return out
 
 
-def _build_paged_kv(seq_len, head_dim, dtype, seed):
+def _build_paged_kv(seq_len, head_dim, dtype, seed, page_stride_padding=0):
     """Build a single-batch PA_BBND KV cache + block_table.
 
     Returns:
@@ -125,13 +130,28 @@ def _build_paged_kv(seq_len, head_dim, dtype, seed):
     """
     torch.manual_seed(seed)
     num_blocks = math.ceil(seq_len / BLOCK_SIZE)
-    kv_cache = torch.zeros(num_blocks, BLOCK_SIZE, NUM_KV_HEADS, head_dim, dtype=dtype)
+    cache_shape = (num_blocks, BLOCK_SIZE, NUM_KV_HEADS, head_dim)
+    contiguous_stride = torch.empty(cache_shape, dtype=dtype).stride()
+    page_stride = contiguous_stride[0] + page_stride_padding
+    storage_size = (num_blocks - 1) * page_stride + contiguous_stride[0]
+    kv_storage = torch.zeros(storage_size, dtype=dtype)
+    kv_cache = torch.as_strided(
+        kv_storage,
+        size=cache_shape,
+        stride=(page_stride, *contiguous_stride[1:]),
+    )
     kv_dense = torch.randn(seq_len, head_dim, dtype=torch.float32) * 0.1
     for s in range(seq_len):
         blk, off = s // BLOCK_SIZE, s % BLOCK_SIZE
         kv_cache[blk, off, 0] = kv_dense[s].to(dtype)
     block_table = torch.arange(num_blocks, dtype=torch.int32).view(1, num_blocks)
-    return kv_cache.to(DEVICE), block_table.to(DEVICE), kv_dense
+    kv_storage = kv_storage.to(DEVICE)
+    kv_cache = torch.as_strided(
+        kv_storage,
+        size=cache_shape,
+        stride=(page_stride, *contiguous_stride[1:]),
+    )
+    return kv_cache, block_table.to(DEVICE), kv_dense
 
 
 def _golden_shared_kv_attention(q, kv, sinks, scale):
@@ -160,17 +180,25 @@ def _golden_shared_kv_attention(q, kv, sinks, scale):
     return out
 
 
-def _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv):
+def _build_metadata(
+    t_len,
+    seq_len,
+    cu_seqlens_q,
+    cu_seqlens_ori_kv,
+    seqused_ori_kv,
+    window,
+    num_q_heads,
+):
     """Build the required `metadata` tensor via npu_sparse_flash_mla_metadata.
 
     Scenario 1 (SWA-only): has_ori_kv=True, has_cmp_kv=False, no compressed KV.
     """
     return torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
-        NUM_Q_HEADS,
+        num_q_heads,
         NUM_KV_HEADS,
         HEAD_DIM,
         cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_ori_kv=cu_seqlens_q,
+        cu_seqlens_ori_kv=cu_seqlens_ori_kv,
         cu_seqlens_cmp_kv=None,
         seqused_q=None,
         seqused_ori_kv=seqused_ori_kv,
@@ -187,7 +215,7 @@ def _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv):
         cmp_ratio=1,
         ori_mask_mode=4,  # 4: sliding window
         cmp_mask_mode=3,  # 3: causal
-        ori_win_left=WINDOW - 1,
+        ori_win_left=window - 1,
         ori_win_right=0,
         layout_q="TND",
         layout_kv="PA_BBND",
@@ -197,7 +225,18 @@ def _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv):
     )
 
 
-def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, scale, metadata):
+def _call_swa_only(
+    q,
+    ori_kv,
+    block_table,
+    seqused_ori_kv,
+    cu_seqlens_q,
+    cu_seqlens_ori_kv,
+    sinks,
+    scale,
+    metadata,
+    window,
+):
     """Invoke npu_sparse_flash_mla for scenario 1 (SWA-only)."""
     return _unwrap(
         torch.ops._C_ascend.npu_sparse_flash_mla(
@@ -205,13 +244,14 @@ def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, 
             ori_kv=ori_kv,
             ori_block_table=block_table,
             cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
             seqused_ori_kv=seqused_ori_kv,
             sinks=sinks,
             metadata=metadata,
             softmax_scale=scale,
             cmp_ratio=1,
             ori_mask_mode=4,
-            ori_win_left=WINDOW - 1,
+            ori_win_left=window - 1,
             ori_win_right=0,
             layout_q="TND",
             layout_kv="PA_BBND",
@@ -219,7 +259,16 @@ def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, 
     )
 
 
-def run_scenario_one(seq_len, sink_value=None):
+def run_scenario_one(
+    seq_len,
+    sink_value=None,
+    *,
+    window=WINDOW,
+    num_q_heads=NUM_Q_HEADS,
+    query_len=None,
+    page_stride_padding=0,
+    check_golden=True,
+):
     """Scenario 1 (only ori_kv -> SWA): smoke + golden compare.
 
     ``sink_value``:
@@ -232,21 +281,50 @@ def run_scenario_one(seq_len, sink_value=None):
     """
     effective_sink = SINK_DISABLED if sink_value is None else float(sink_value)
     tag = "no-sink" if sink_value is None else f"sink={sink_value:g}"
-    print(f"\n=== scenario 1 (SWA-only), seq_len={seq_len}, {tag} ===")
+    t_len = seq_len if query_len is None else query_len
+    print(
+        f"\n=== scenario 1 (SWA-only), q_len={t_len}, kv_len={seq_len}, "
+        f"N1={num_q_heads}, page_stride_padding={page_stride_padding}, {tag} ==="
+    )
     torch.manual_seed(SEED)
-    t_len = seq_len  # prefill-style single batch: query length == key length
 
-    q_cpu = torch.randn(t_len, NUM_Q_HEADS, HEAD_DIM, dtype=torch.float32) * 0.1
+    q_cpu = torch.randn(t_len, num_q_heads, HEAD_DIM, dtype=torch.float32) * 0.1
     q = q_cpu.to(DTYPE).to(DEVICE)
-    ori_kv, block_table, kv_dense = _build_paged_kv(seq_len, HEAD_DIM, DTYPE, SEED + 1)
+    ori_kv, block_table, kv_dense = _build_paged_kv(
+        seq_len,
+        HEAD_DIM,
+        DTYPE,
+        SEED + 1,
+        page_stride_padding=page_stride_padding,
+    )
     cu_seqlens_q = torch.tensor([0, t_len], dtype=torch.int32).to(DEVICE)
+    cu_seqlens_ori_kv = torch.tensor([0, seq_len], dtype=torch.int32).to(DEVICE)
     seqused_ori_kv = torch.tensor([seq_len], dtype=torch.int32).to(DEVICE)
-    sinks_cpu = torch.full((NUM_Q_HEADS,), effective_sink, dtype=torch.float32)
+    sinks_cpu = torch.full((num_q_heads,), effective_sink, dtype=torch.float32)
     sinks = sinks_cpu.to(DEVICE)
     scale = 1.0 / math.sqrt(HEAD_DIM)
 
-    metadata = _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv)
-    out = _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, scale, metadata)
+    metadata = _build_metadata(
+        t_len,
+        seq_len,
+        cu_seqlens_q,
+        cu_seqlens_ori_kv,
+        seqused_ori_kv,
+        window,
+        num_q_heads,
+    )
+    out = _call_swa_only(
+        q,
+        ori_kv,
+        block_table,
+        seqused_ori_kv,
+        cu_seqlens_q,
+        cu_seqlens_ori_kv,
+        sinks,
+        scale,
+        metadata,
+        window,
+    )
     out_cpu = out.cpu().float()
 
     # --- smoke ---
@@ -254,10 +332,12 @@ def run_scenario_one(seq_len, sink_value=None):
     finite = torch.isfinite(out_cpu).all().item()
     print(f"all finite : {finite}")
     assert out.shape[0] == t_len, f"token dim mismatch: {tuple(out.shape)}"
-    assert out.shape[1] == NUM_Q_HEADS, f"head dim mismatch: {tuple(out.shape)}"
+    assert out.shape[1] == num_q_heads, f"head dim mismatch: {tuple(out.shape)}"
     assert finite, "output contains NaN/Inf"
 
     # --- golden compare (only when output head_dim == query head_dim) ---
+    if not check_golden:
+        return None
     if out_cpu.shape[-1] != HEAD_DIM:
         print(
             f"[skip golden] output head_dim {out_cpu.shape[-1]} != q head_dim {HEAD_DIM}; "
@@ -325,6 +405,21 @@ def main():
     sink_ok = []
     for sink_value in (0.0, 2.0):
         sink_ok.append(run_scenario_one(sink_seq, sink_value=sink_value))
+
+    # Pass 4: exercise multi-block PageAttention addressing immediately
+    # before, at, and after a block boundary, with contiguous and padded page
+    # strides. Query and KV lengths are independent to keep memory bounded.
+    print("\n##### PASS 4: PageAttention stride boundary finite-output regression #####")
+    for page_stride_padding in (0, PA_STRIDE_PADDING_ELEMENTS):
+        for seq_len in PA_STRESS_LENGTHS:
+            run_scenario_one(
+                seq_len,
+                sink_value=None,
+                window=seq_len,
+                query_len=PA_STRESS_QUERY_LENGTH,
+                page_stride_padding=page_stride_padding,
+                check_golden=False,
+            )
 
     print("\n=== SUMMARY ===")
     print(f"core (no-sink) match @ block-aligned {aligned_lens} : {core_ok}")
