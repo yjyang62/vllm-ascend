@@ -1187,6 +1187,14 @@ std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_npu(const at::Tensor &q,
     std::tuple<at::Tensor, at::Tensor> output = construct_output_tensor(q, layout_q_str, return_softmax_lse);
     at::Tensor attn_out = std::get<0>(output);
     at::Tensor softmax_lse = std::get<1>(output);
+    int64_t ori_kv_stride = 0;
+    int64_t cmp_kv_stride = 0;
+    if (ori_kv.has_value() && ori_kv.value().defined()) {
+        ori_kv_stride = ori_kv.value().stride(0);
+    }
+    if (cmp_kv.has_value() && cmp_kv.value().defined()) {
+        cmp_kv_stride = cmp_kv.value().stride(0);
+    }
 
     char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
     char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
@@ -1194,7 +1202,7 @@ std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_npu(const at::Tensor &q,
         ori_block_table, cmp_block_table, cu_seqlens_q, cu_seqlens_ori_kv, cu_seqlens_cmp_kv, seqused_q,
         seqused_ori_kv, seqused_cmp_kv, cmp_residual_kv, ori_topk_length, cmp_topk_length, sinks, metadata,
         softmax_scale, cmp_ratio, ori_mask_mode, cmp_mask_mode, ori_win_left, ori_win_right, layout_q_ptr,
-        layout_kv_ptr, topk_value_mode, return_softmax_lse, attn_out, softmax_lse);
+        layout_kv_ptr, topk_value_mode, return_softmax_lse, ori_kv_stride, cmp_kv_stride, attn_out, softmax_lse);
     return std::tuple<at::Tensor, at::Tensor>(attn_out, softmax_lse);
 }
 

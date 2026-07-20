@@ -106,11 +106,11 @@ DEVICE = "npu"
 # large-negative sink so exp(sink - m) underflows to ~0 on both the op and the
 # golden, leaving plain causal softmax.
 SINK_DISABLED = -1.0e4
-S2_TILE_SIZE = 128
-S2_SPLIT_BOUNDARY_TILES = 32
-S2_SPLIT_BOUNDARY_LENGTH = S2_TILE_SIZE * S2_SPLIT_BOUNDARY_TILES
-S2_SPLIT_REGRESSION_LENGTHS = tuple(S2_SPLIT_BOUNDARY_LENGTH + delta for delta in (-1, 0, 1))
-S2_SPLIT_REGRESSION_QUERY_LENGTH = BLOCK_SIZE
+PA_STRESS_BLOCK_COUNT = 32
+PA_STRESS_BOUNDARY_LENGTH = BLOCK_SIZE * PA_STRESS_BLOCK_COUNT
+PA_STRESS_LENGTHS = tuple(PA_STRESS_BOUNDARY_LENGTH + delta for delta in (-1, 0, 1))
+PA_STRESS_QUERY_LENGTH = BLOCK_SIZE
+PA_STRIDE_PADDING_ELEMENTS = HEAD_DIM
 
 
 def _unwrap(out):
@@ -120,7 +120,7 @@ def _unwrap(out):
     return out
 
 
-def _build_paged_kv(seq_len, head_dim, dtype, seed):
+def _build_paged_kv(seq_len, head_dim, dtype, seed, page_stride_padding=0):
     """Build a single-batch PA_BBND KV cache + block_table.
 
     Returns:
@@ -130,13 +130,28 @@ def _build_paged_kv(seq_len, head_dim, dtype, seed):
     """
     torch.manual_seed(seed)
     num_blocks = math.ceil(seq_len / BLOCK_SIZE)
-    kv_cache = torch.zeros(num_blocks, BLOCK_SIZE, NUM_KV_HEADS, head_dim, dtype=dtype)
+    cache_shape = (num_blocks, BLOCK_SIZE, NUM_KV_HEADS, head_dim)
+    contiguous_stride = torch.empty(cache_shape, dtype=dtype).stride()
+    page_stride = contiguous_stride[0] + page_stride_padding
+    storage_size = (num_blocks - 1) * page_stride + contiguous_stride[0]
+    kv_storage = torch.zeros(storage_size, dtype=dtype)
+    kv_cache = torch.as_strided(
+        kv_storage,
+        size=cache_shape,
+        stride=(page_stride, *contiguous_stride[1:]),
+    )
     kv_dense = torch.randn(seq_len, head_dim, dtype=torch.float32) * 0.1
     for s in range(seq_len):
         blk, off = s // BLOCK_SIZE, s % BLOCK_SIZE
         kv_cache[blk, off, 0] = kv_dense[s].to(dtype)
     block_table = torch.arange(num_blocks, dtype=torch.int32).view(1, num_blocks)
-    return kv_cache.to(DEVICE), block_table.to(DEVICE), kv_dense
+    kv_storage = kv_storage.to(DEVICE)
+    kv_cache = torch.as_strided(
+        kv_storage,
+        size=cache_shape,
+        stride=(page_stride, *contiguous_stride[1:]),
+    )
+    return kv_cache, block_table.to(DEVICE), kv_dense
 
 
 def _golden_shared_kv_attention(q, kv, sinks, scale):
@@ -251,6 +266,7 @@ def run_scenario_one(
     window=WINDOW,
     num_q_heads=NUM_Q_HEADS,
     query_len=None,
+    page_stride_padding=0,
     check_golden=True,
 ):
     """Scenario 1 (only ori_kv -> SWA): smoke + golden compare.
@@ -266,12 +282,21 @@ def run_scenario_one(
     effective_sink = SINK_DISABLED if sink_value is None else float(sink_value)
     tag = "no-sink" if sink_value is None else f"sink={sink_value:g}"
     t_len = seq_len if query_len is None else query_len
-    print(f"\n=== scenario 1 (SWA-only), q_len={t_len}, kv_len={seq_len}, N1={num_q_heads}, {tag} ===")
+    print(
+        f"\n=== scenario 1 (SWA-only), q_len={t_len}, kv_len={seq_len}, "
+        f"N1={num_q_heads}, page_stride_padding={page_stride_padding}, {tag} ==="
+    )
     torch.manual_seed(SEED)
 
     q_cpu = torch.randn(t_len, num_q_heads, HEAD_DIM, dtype=torch.float32) * 0.1
     q = q_cpu.to(DTYPE).to(DEVICE)
-    ori_kv, block_table, kv_dense = _build_paged_kv(seq_len, HEAD_DIM, DTYPE, SEED + 1)
+    ori_kv, block_table, kv_dense = _build_paged_kv(
+        seq_len,
+        HEAD_DIM,
+        DTYPE,
+        SEED + 1,
+        page_stride_padding=page_stride_padding,
+    )
     cu_seqlens_q = torch.tensor([0, t_len], dtype=torch.int32).to(DEVICE)
     cu_seqlens_ori_kv = torch.tensor([0, seq_len], dtype=torch.int32).to(DEVICE)
     seqused_ori_kv = torch.tensor([seq_len], dtype=torch.int32).to(DEVICE)
@@ -381,19 +406,20 @@ def main():
     for sink_value in (0.0, 2.0):
         sink_ok.append(run_scenario_one(sink_seq, sink_value=sink_value))
 
-    # Pass 4: exercise the S2-split Flash Decode staging path immediately
-    # before, at, and after a multi-tile boundary. Query and KV lengths are
-    # intentionally independent so this remains a low-memory operator test
-    # instead of encoding one model/request shape.
-    print("\n##### PASS 4: S2-split boundary finite-output regression #####")
-    for seq_len in S2_SPLIT_REGRESSION_LENGTHS:
-        run_scenario_one(
-            seq_len,
-            sink_value=None,
-            window=seq_len,
-            query_len=S2_SPLIT_REGRESSION_QUERY_LENGTH,
-            check_golden=False,
-        )
+    # Pass 4: exercise multi-block PageAttention addressing immediately
+    # before, at, and after a block boundary, with contiguous and padded page
+    # strides. Query and KV lengths are independent to keep memory bounded.
+    print("\n##### PASS 4: PageAttention stride boundary finite-output regression #####")
+    for page_stride_padding in (0, PA_STRIDE_PADDING_ELEMENTS):
+        for seq_len in PA_STRESS_LENGTHS:
+            run_scenario_one(
+                seq_len,
+                sink_value=None,
+                window=seq_len,
+                query_len=PA_STRESS_QUERY_LENGTH,
+                page_stride_padding=page_stride_padding,
+                check_golden=False,
+            )
 
     print("\n=== SUMMARY ===")
     print(f"core (no-sink) match @ block-aligned {aligned_lens} : {core_ok}")

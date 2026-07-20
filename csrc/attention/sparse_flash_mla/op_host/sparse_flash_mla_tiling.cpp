@@ -418,6 +418,8 @@ ge::graphStatus SMLAInfoParser::GetAttrParaInfo()
     opParamInfo_.layoutKv = attrs->GetStr(ATTR_LAYOUT_KV_INDEX);
     opParamInfo_.topkValueMode = attrs->GetAttrPointer<uint32_t>(ATTR_TOPK_VALUE_MODE_INDEX);
     opParamInfo_.returnSoftmaxLse = attrs->GetAttrPointer<bool>(ATTR_RETURN_SOFTMAX_LSE_INDEX);
+    opParamInfo_.oriKvStride = attrs->GetAttrPointer<uint32_t>(ATTR_ORI_KV_STRIDE_INDEX);
+    opParamInfo_.cmpKvStride = attrs->GetAttrPointer<uint32_t>(ATTR_CMP_KV_STRIDE_INDEX);
 
     auto oriKeyStrides = context_->GetDynamicInputStride(ORI_KV_INDEX, 0);
     if (oriKeyStrides != nullptr && oriKeyStrides->GetDimNum() > 0) {
@@ -1043,18 +1045,18 @@ void SMLAInfoParser::GenerateInfo(SMLATilingInfo &smlaInfo)
     smlaInfo.actualLenDimsCmpKV = actualLenDimsCmpKV_;
     smlaInfo.cmpResidualKVSize = cmpResidualKVSize_;
 
-    // oriKeyStride0/cmpKeyStride0 feed the A5 kernel's stride-based PageAttention
-    // KV addressing (blockStride0 = oriKeyStride0 / (blockSize * n2) - dSize).
-    // GetDynamicInputStride only returns strides for dynamic inputs; ori_kv/cmp_kv
-    // are plain optional inputs here, so oriKeyStridesVec_ is empty on this build.
-    // Falling back to 0 would make the kernel compute blockStride0 = -dSize and
-    // read KV from the wrong GM offsets (all-zero / uninitialized attention out).
-    // Default to the contiguous per-PA-block stride (oriKvStride0/cmpKvStride0),
-    // which GetOptionalInputStride0 already resolves via the storage shape.
-    smlaInfo.oriKeyStride0 = !oriKeyStridesVec_.empty() ?
-        static_cast<uint32_t>(oriKeyStridesVec_[0]) : static_cast<uint32_t>(smlaInfo.oriKvStride0);
-    smlaInfo.cmpKeyStride0 = !cmpKeyStridesVec_.empty() ?
-        static_cast<uint32_t>(cmpKeyStridesVec_[0]) : static_cast<uint32_t>(smlaInfo.cmpKvStride0);
+    // The torch binding supplies the actual dim-0 stride for PA cache views.
+    // Prefer it over tiling-context stride discovery: optional-input stride
+    // APIs are unavailable on some CANN versions, and storage shape cannot
+    // represent trailing padding between PA blocks.
+    smlaInfo.oriKeyStride0 = opParamInfo_.oriKvStride != nullptr && *opParamInfo_.oriKvStride > 0 ?
+        *opParamInfo_.oriKvStride :
+        (!oriKeyStridesVec_.empty() ? static_cast<uint32_t>(oriKeyStridesVec_[0]) :
+                                     static_cast<uint32_t>(smlaInfo.oriKvStride0));
+    smlaInfo.cmpKeyStride0 = opParamInfo_.cmpKvStride != nullptr && *opParamInfo_.cmpKvStride > 0 ?
+        *opParamInfo_.cmpKvStride :
+        (!cmpKeyStridesVec_.empty() ? static_cast<uint32_t>(cmpKeyStridesVec_[0]) :
+                                     static_cast<uint32_t>(smlaInfo.cmpKvStride0));
 }
 
 ge::graphStatus SMLAInfoParser::Parse(SMLATilingInfo &smlaInfo)
