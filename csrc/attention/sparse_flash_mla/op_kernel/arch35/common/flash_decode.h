@@ -176,6 +176,15 @@ __aicore__ inline void StageVec2PartialO(const S2SplitFdStagingLayout &layout,
     outParams.dstStride = 0;
     outParams.blockCount = validRows;
     DataCopyPad(stagingOut[offset], vec2ResUb, outParams);
+    // The Flash Decode reduction runs after a cross-core SyncAll and reads
+    // this staging region through MTE2. SyncAll synchronizes cores, but does
+    // not drain an outstanding MTE3 write from this vector core. Without the
+    // explicit MTE3 -> V wait, long sequences that split S2 across cores can
+    // race the reduction and consume partially written FP32 output, producing
+    // extreme values and eventually NaN/Inf. StageVec1Lse above already uses
+    // the same write-completion handshake for its max/sum staging buffers.
+    SetFlag<HardEvent::MTE3_V>(mte3ToVId);
+    WaitFlag<HardEvent::MTE3_V>(mte3ToVId);
 }
 
 // FD chunk reduction: read all splits from staging, compute weights, reduce partial O.

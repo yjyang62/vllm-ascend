@@ -89,7 +89,7 @@ import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401,E402
 # CONFIG -- adjust to match the deployed operator / model dims.
 # ---------------------------------------------------------------------------
 SEED = 42
-NUM_Q_HEADS = 64  # SparseFlashMla TND constraint: N1 == 64
+NUM_Q_HEADS = 64  # Baseline coverage; the long-sequence regression uses N1=16.
 NUM_KV_HEADS = 1  # KV_N == 1
 # DSV4 MLA head_dim == 512 and already INCLUDES rope:
 #   head_dim (512) = nope_head_dim (448) + rope_head_dim (64).
@@ -106,6 +106,8 @@ DEVICE = "npu"
 # large-negative sink so exp(sink - m) underflows to ~0 on both the op and the
 # golden, leaving plain causal softmax.
 SINK_DISABLED = -1.0e4
+LONG_SEQUENCE_REGRESSION_LENGTH = 4479
+LONG_SEQUENCE_REGRESSION_Q_HEADS = 16
 
 
 def _unwrap(out):
@@ -160,13 +162,13 @@ def _golden_shared_kv_attention(q, kv, sinks, scale):
     return out
 
 
-def _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv):
+def _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv, window, num_q_heads):
     """Build the required `metadata` tensor via npu_sparse_flash_mla_metadata.
 
     Scenario 1 (SWA-only): has_ori_kv=True, has_cmp_kv=False, no compressed KV.
     """
     return torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
-        NUM_Q_HEADS,
+        num_q_heads,
         NUM_KV_HEADS,
         HEAD_DIM,
         cu_seqlens_q=cu_seqlens_q,
@@ -187,7 +189,7 @@ def _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv):
         cmp_ratio=1,
         ori_mask_mode=4,  # 4: sliding window
         cmp_mask_mode=3,  # 3: causal
-        ori_win_left=WINDOW - 1,
+        ori_win_left=window - 1,
         ori_win_right=0,
         layout_q="TND",
         layout_kv="PA_BBND",
@@ -197,7 +199,7 @@ def _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv):
     )
 
 
-def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, scale, metadata):
+def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, scale, metadata, window):
     """Invoke npu_sparse_flash_mla for scenario 1 (SWA-only)."""
     return _unwrap(
         torch.ops._C_ascend.npu_sparse_flash_mla(
@@ -211,7 +213,7 @@ def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, 
             softmax_scale=scale,
             cmp_ratio=1,
             ori_mask_mode=4,
-            ori_win_left=WINDOW - 1,
+            ori_win_left=window - 1,
             ori_win_right=0,
             layout_q="TND",
             layout_kv="PA_BBND",
@@ -219,7 +221,14 @@ def _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, 
     )
 
 
-def run_scenario_one(seq_len, sink_value=None):
+def run_scenario_one(
+    seq_len,
+    sink_value=None,
+    *,
+    window=WINDOW,
+    num_q_heads=NUM_Q_HEADS,
+    check_golden=True,
+):
     """Scenario 1 (only ori_kv -> SWA): smoke + golden compare.
 
     ``sink_value``:
@@ -232,21 +241,21 @@ def run_scenario_one(seq_len, sink_value=None):
     """
     effective_sink = SINK_DISABLED if sink_value is None else float(sink_value)
     tag = "no-sink" if sink_value is None else f"sink={sink_value:g}"
-    print(f"\n=== scenario 1 (SWA-only), seq_len={seq_len}, {tag} ===")
+    print(f"\n=== scenario 1 (SWA-only), seq_len={seq_len}, N1={num_q_heads}, {tag} ===")
     torch.manual_seed(SEED)
     t_len = seq_len  # prefill-style single batch: query length == key length
 
-    q_cpu = torch.randn(t_len, NUM_Q_HEADS, HEAD_DIM, dtype=torch.float32) * 0.1
+    q_cpu = torch.randn(t_len, num_q_heads, HEAD_DIM, dtype=torch.float32) * 0.1
     q = q_cpu.to(DTYPE).to(DEVICE)
     ori_kv, block_table, kv_dense = _build_paged_kv(seq_len, HEAD_DIM, DTYPE, SEED + 1)
     cu_seqlens_q = torch.tensor([0, t_len], dtype=torch.int32).to(DEVICE)
     seqused_ori_kv = torch.tensor([seq_len], dtype=torch.int32).to(DEVICE)
-    sinks_cpu = torch.full((NUM_Q_HEADS,), effective_sink, dtype=torch.float32)
+    sinks_cpu = torch.full((num_q_heads,), effective_sink, dtype=torch.float32)
     sinks = sinks_cpu.to(DEVICE)
     scale = 1.0 / math.sqrt(HEAD_DIM)
 
-    metadata = _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv)
-    out = _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, scale, metadata)
+    metadata = _build_metadata(t_len, seq_len, cu_seqlens_q, seqused_ori_kv, window, num_q_heads)
+    out = _call_swa_only(q, ori_kv, block_table, seqused_ori_kv, cu_seqlens_q, sinks, scale, metadata, window)
     out_cpu = out.cpu().float()
 
     # --- smoke ---
@@ -254,10 +263,12 @@ def run_scenario_one(seq_len, sink_value=None):
     finite = torch.isfinite(out_cpu).all().item()
     print(f"all finite : {finite}")
     assert out.shape[0] == t_len, f"token dim mismatch: {tuple(out.shape)}"
-    assert out.shape[1] == NUM_Q_HEADS, f"head dim mismatch: {tuple(out.shape)}"
+    assert out.shape[1] == num_q_heads, f"head dim mismatch: {tuple(out.shape)}"
     assert finite, "output contains NaN/Inf"
 
     # --- golden compare (only when output head_dim == query head_dim) ---
+    if not check_golden:
+        return None
     if out_cpu.shape[-1] != HEAD_DIM:
         print(
             f"[skip golden] output head_dim {out_cpu.shape[-1]} != q head_dim {HEAD_DIM}; "
@@ -325,6 +336,21 @@ def main():
     sink_ok = []
     for sink_value in (0.0, 2.0):
         sink_ok.append(run_scenario_one(sink_seq, sink_value=sink_value))
+
+    # Pass 4: regression for the S2-split Flash Decode staging path. A full
+    # causal window makes each query row span enough S2 blocks for metadata to
+    # split rows across cores. The reduction must not read partial-O before
+    # its asynchronous MTE3 write to GM has completed. This reproduces the
+    # 4479-token model failure; numerical golden is intentionally skipped
+    # because constructing it is quadratic at this length.
+    print("\n##### PASS 4: long-sequence S2-split finite-output regression #####")
+    run_scenario_one(
+        LONG_SEQUENCE_REGRESSION_LENGTH,
+        sink_value=None,
+        window=LONG_SEQUENCE_REGRESSION_LENGTH,
+        num_q_heads=LONG_SEQUENCE_REGRESSION_Q_HEADS,
+        check_golden=False,
+    )
 
     print("\n=== SUMMARY ===")
     print(f"core (no-sink) match @ block-aligned {aligned_lens} : {core_ok}")
