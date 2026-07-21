@@ -175,6 +175,18 @@ def is_950():
     return get_ascend_device_type() == AscendDeviceType.A5
 
 
+def dsv4_use_kv_bf16() -> bool:
+    """Return True when DeepSeek-V4 sparse attention should use BF16 KV.
+
+    On Ascend A5 this switches DSV4 from the default FP8 KV path
+    (``npu_kv_quant_sparse_attn_sharedkv``) to the BF16 KV path consumed by
+    ``npu_sparse_flash_mla``. Other device types keep their native path.
+    """
+    import vllm_ascend.envs as envs_ascend
+
+    return get_ascend_device_type() == AscendDeviceType.A5 and bool(envs_ascend.VLLM_ASCEND_DSV4_KV_BF16)
+
+
 def _mark_op_side_effectful(op: Any) -> None:
     torch.fx.node.has_side_effect(op)
     default_overload = getattr(op, "default", None)
