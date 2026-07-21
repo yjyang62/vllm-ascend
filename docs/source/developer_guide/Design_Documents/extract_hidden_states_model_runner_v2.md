@@ -1214,6 +1214,105 @@ hidden_states, aux_hidden_states = model_output
 当前方案明确拒绝 extract 与 pipeline parallel 同时使用，因为 v2 尚未实现跨 PP rank
 收集这些中间层输出。
 
+#### 为什么当前不支持 Pipeline Parallel
+
+Pipeline Parallel（PP）会把模型层切到多个 rank 上。假设模型有 32 层，`PP=2`：
+
+```text
+PP rank 0：第 0～15 层
+PP rank 1：第 16～31 层
+```
+
+如果用户配置：
+
+```python
+"eagle_aux_hidden_state_layer_ids": [2, 14, 26]
+```
+
+那么 hidden states 分布是：
+
+```text
+第 2 层  → PP rank 0
+第 14 层 → PP rank 0
+第 26 层 → PP rank 1
+```
+
+但是上游 Model Runner v2 当前的 PP 数据流只把正常的 pipeline
+`IntermediateTensors` 从前一个 rank 发送给后一个 rank，没有把任意中间层组成的
+`aux_hidden_states` 列表一起发送。
+
+上游 `execute_model()` 的逻辑可以简化为：
+
+```python
+if self.is_last_pp_rank:
+    if self.use_aux_hidden_state_outputs:
+        hidden_states, aux_hidden_states = model_output
+else:
+    # 非最后一个 PP rank 只向后发送 IntermediateTensors。
+    hidden_states = None
+    aux_hidden_states = None
+    output_intermediate_tensors = model_output
+```
+
+因此上面的例子中：
+
+```text
+rank 0 计算出了第 2、14 层 hidden states
+    ↓
+当前 PP 协议没有把它们发送到 rank 1
+    ↓
+rank 1 只能取得自己拥有的第 26 层结果
+    ↓
+无法组成完整的 [2, 14, 26] hidden-state tensor
+```
+
+同时，采样和 `speculator.propose()` 主要发生在最后一个 PP rank。最后一个 rank
+没有前面 rank 的 auxiliary hidden states，就不能正确执行：
+
+```python
+torch.stack(aux_hidden_states, dim=1)
+```
+
+所以这里不是说 extract 从原理上永远不能支持 PP，而是当前缺少以下实现：
+
+1. 每个 PP rank 收集自己负责层的 auxiliary hidden states；
+2. 扩展 PP 传输协议，把这些 tensor 发送或聚合到最后一个 rank；
+3. 按用户配置的 layer ID 恢复正确顺序；
+4. 处理不同 rank 的 padding、dtype、shape 和显存生命周期；
+5. 确保 graph capture、DP 与 PP collective 在所有 rank 上调用次数一致；
+6. 明确 cache-only model 和 KV Connector 应该只在哪个 rank 执行；
+7. 将最后一个 rank 生成的 draft/sample 状态同步回其他 PP rank。
+
+如果不提前报错，可能出现三种结果：
+
+- `aux_hidden_states is None`，运行到 `propose()` 才报错；
+- 只保存最后一个 PP rank 的部分层，输出内容不完整；
+- 不同 rank 执行不同 collective，造成进程等待或死锁。
+
+因此当前代码选择在初始化阶段快速失败：
+
+```python
+if self.use_pp:
+    raise ValueError(
+        "extract_hidden_states with pipeline parallelism "
+        "is not supported by model runner v2."
+    )
+```
+
+这样用户会在启动时得到明确错误，而不是运行一段时间后才得到不完整数据或 collective
+死锁。
+
+上游 Model Runner v2 对同样依赖 auxiliary hidden states 的 EAGLE3 也采用了类似限制：
+
+```python
+if self.speculative_config.method == "eagle3":
+    self.use_aux_hidden_state_outputs = True
+    if self.use_pp:
+        raise ValueError(
+            "EAGLE3 with pipeline parallel is not supported."
+        )
+```
+
 ### 5.5 转换 v2 sampled token
 
 v2 在执行 `speculator.propose()` 之前已经完成 request state 更新。原生 speculator 根据
