@@ -23,6 +23,7 @@ from vllm.config import VllmConfig
 def init_speculator(
     vllm_config: VllmConfig,
     device: torch.device,
+    runner=None,
 ):
     """Override GPU init_speculator for Ascend NPUs.
     Use AscendEagleSpeculator when eagle is used.
@@ -41,6 +42,18 @@ def init_speculator(
         )
 
         return AscendDFlashSpeculator(vllm_config, device)
+    if speculative_config.uses_extract_hidden_states():
+        from vllm_ascend.worker.v2.spec_decode.extract_hidden_states import (
+            AscendExtractHiddenStatesSpeculator,
+        )
+
+        if runner is None:
+            raise ValueError("extract_hidden_states requires the model runner instance")
+        return AscendExtractHiddenStatesSpeculator(
+            vllm_config,
+            device,
+            runner,
+        )
     if speculative_config.use_eagle():
         from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 

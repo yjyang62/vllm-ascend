@@ -123,6 +123,7 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
         batch_descriptor=None,
         dummy_compute_logits=lambda hidden_states: None,
         is_profile=False,
+        slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
         """Dummy run for ACL graph capture.
 
@@ -143,13 +144,22 @@ class AscendExtractHiddenStatesProposer(ExtractHiddenStatesProposer):
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
 
+        slot_mapping_dict: dict[str, torch.Tensor] = {}
+        if self.attn_layer_names and slot_mappings is not None:
+            layer_slot_mapping = slot_mappings.get(self.attn_layer_names[0])
+            if layer_slot_mapping is not None:
+                slot_mapping_dict = self._get_slot_mapping(
+                    num_tokens,
+                    layer_slot_mapping,
+                )
+
         with set_forward_context(
             None,
             self.vllm_config,
             num_tokens=num_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=aclgraph_runtime_mode or CUDAGraphMode.NONE,
-            slot_mapping={},
+            slot_mapping=slot_mapping_dict,
         ):
             self.model(
                 hidden_states=self.hidden_states[:num_tokens],

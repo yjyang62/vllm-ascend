@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import tempfile
 from dataclasses import dataclass
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -41,6 +42,9 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 DENSE_MODEL = "Qwen/Qwen3-8B"
 # Qwen3-8B has 36 layers; pick a spread of layer indices to extract.
 DENSE_AUX_HIDDEN_STATE_LAYER_IDS = [2, 18, 34]
+
+V2_DENSE_MODEL = "Qwen/Qwen3-0.6B"
+V2_DENSE_AUX_HIDDEN_STATE_LAYER_IDS = [2, 14, 26]
 
 HYBRID_MODEL = "Qwen/Qwen3.5-0.8B"
 HYBRID_AUX_HIDDEN_STATE_LAYER_IDS = [5, 11, 17]
@@ -142,6 +146,32 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
 @pytest.mark.parametrize("case", CASES)
 def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config):
     """Extract hidden states from the target model and validate the dump."""
+    _run_extract_hidden_states(case, sampling_config)
+
+
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+def test_extract_hidden_states_model_runner_v2(sampling_config):
+    """Exercise the v2 speculator and single-tensor cache allocation path."""
+    _run_extract_hidden_states(
+        ExtractHiddenStatesCase(
+            model_name=V2_DENSE_MODEL,
+            aux_hidden_state_layer_ids=V2_DENSE_AUX_HIDDEN_STATE_LAYER_IDS,
+            prompts=["Hello world", "Test prompt with several tokens"],
+            enforce_eager=True,
+            gpu_memory_utilization=0.4,
+            max_model_len=256,
+            load_format="dummy",
+            verify_nonzero=False,
+            verify_token_ids=True,
+        ),
+        sampling_config,
+    )
+
+
+def _run_extract_hidden_states(
+    case: ExtractHiddenStatesCase,
+    sampling_config,
+):
     with tempfile.TemporaryDirectory() as tmpdirname:
         llm_kwargs = dict(
             model=case.model_name,
