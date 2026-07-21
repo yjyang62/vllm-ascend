@@ -1302,6 +1302,72 @@ if self.use_pp:
 这样用户会在启动时得到明确错误，而不是运行一段时间后才得到不完整数据或 collective
 死锁。
 
+#### v1 支持 Pipeline Parallel 吗
+
+当前 v1 也没有完整支持 `extract_hidden_states + PP`。v1 没有像 v2 一样在初始化阶段
+明确抛出 `ValueError`，但“没有提前报错”不等于“功能可用”。
+
+第一个证据在 `NPUModelRunner._set_up_drafter()`：
+
+```python
+if get_pp_group().is_last_rank:
+    self.drafter = self._get_drafter()
+    if (
+        self.speculative_config.method
+        == "extract_hidden_states"
+    ):
+        self.use_aux_hidden_state_outputs = True
+```
+
+只有最后一个 PP rank 创建 extract proposer 并设置
+`use_aux_hidden_state_outputs=True`。前面的 PP rank 不会创建 proposer。
+
+第二个证据在 v1 `load_model()`：
+
+```python
+should_configure_aux_hidden_states = (
+    self.use_aux_hidden_state_outputs
+    if pp_group.world_size == 1
+    else self._eagle3_uses_aux_hidden_state()
+)
+```
+
+当 `PP world_size > 1` 时，它不再直接使用 extract 设置的
+`self.use_aux_hidden_state_outputs`，而是调用：
+
+```python
+def _eagle3_uses_aux_hidden_state(self) -> bool:
+    if (
+        self.speculative_config is None
+        or self.speculative_config.method != "eagle3"
+    ):
+        return False
+```
+
+extract 的 method 是 `extract_hidden_states`，不是 `eagle3`，所以这里返回
+`False`。结果是 PP 场景不会执行：
+
+```python
+self.model.set_aux_hidden_state_layers(aux_layers)
+```
+
+此外，v1 同样没有把前面 PP rank 的任意 auxiliary hidden states 聚合到最后 rank 的
+通用协议。因此即使只补上配置判断，也仍然不能正确提取跨 rank 的层。
+
+当前测试也只覆盖单卡/非 PP：
+
+```text
+tests/e2e/pull_request/one_card/spec_decode/
+test_extract_hidden_states.py
+```
+
+所以当前状态应理解为：
+
+```text
+v1：没有完整 PP 支持，也没有明确提前拒绝，可能在后续阶段失败。
+v2：同样暂不支持 PP，但在初始化阶段明确拒绝，错误更早、更清楚。
+```
+
 上游 Model Runner v2 对同样依赖 auxiliary hidden states 的 EAGLE3 也采用了类似限制：
 
 ```python
