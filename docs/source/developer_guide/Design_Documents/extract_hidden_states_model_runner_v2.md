@@ -676,20 +676,314 @@ v1 在 `get_kv_cache_spec()` 中识别 `CacheOnlyAttentionLayer`，并生成
 
 ## 4. v2 与 v1 的主要差异
 
-| 维度 | Model Runner v1 | Model Runner v2 |
-| --- | --- | --- |
-| Spec decode 抽象 | Drafter/Proposer | Speculator |
-| extract 调用入口 | `propose_draft_token_ids()` 的专用分支 | 统一调用 `speculator.propose()` |
-| 请求状态 | v1 request/input batch | v2 `RequestState`、`InputBatch` |
-| sampled token 来源 | Runner 直接传入采样结果 | 从 `last_sampled` 和 `next_prefill_tokens` 读取 |
-| attention metadata | Runner 提供 `CommonAttentionMetadata` | Speculator 根据 v2 input batch 重建 |
-| KV cache 初始化 | v1 runner 内部实现 | v2 共用 `worker/v2/attn_utils.py` |
-| Graph 流程 | Runner dummy run 中调用 proposer | `speculator.capture()` 和统一 dummy propose |
-| 上游支持情况 | 上游已有 extract proposer | 上游 v2 没有 extract speculator |
+先用一个简单比喻理解：
 
-最关键的差异是：v2 runner 不再调用 v1 的
-`propose_draft_token_ids()`，而是只认统一的 speculator 协议。因此，仅复制 v1 的
-extract 分支不能使功能生效。
+```text
+v1 像一家旧餐厅：
+  主厨 Model Runner 自己判断客人点了什么，
+  如果是 extract_hidden_states，
+  主厨就直接叫专门的助手 Proposer 来处理。
+
+v2 像一家重新分工的餐厅：
+  主厨 Model Runner 不再自己处理每种特殊订单，
+  而是把所有 speculative decoding 工作交给
+  统一岗位 Speculator。
+```
+
+所以，v1 和 v2 的区别并不只是函数改了名字，而是“谁负责组织这项工作”发生了变化。
+
+### 4.1 谁负责调用 extract
+
+v1 中，Runner 自己有一大段 `if/elif`：
+
+```python
+if method == "ngram":
+    ...
+elif method == "eagle":
+    ...
+elif method == "extract_hidden_states":
+    self.drafter.propose(...)
+```
+
+对应文件：
+
+```text
+vllm_ascend/worker/model_runner_v1.py
+└── NPUModelRunner.propose_draft_token_ids()
+```
+
+也就是说，v1 Runner 知道 extract 的具体处理细节。
+
+v2 中，Runner 不再写 extract 专用分支。它只做统一调用：
+
+```python
+draft_tokens = self.speculator.propose(...)
+```
+
+然后由具体的 `AscendExtractHiddenStatesSpeculator` 自己处理：
+
+```text
+vllm_ascend/worker/v2/spec_decode/extract_hidden_states/speculator.py
+└── AscendExtractHiddenStatesSpeculator.propose()
+```
+
+直白地说：
+
+```text
+v1：Runner 自己处理，然后调用 Proposer。
+v2：Runner 只负责转交，Speculator 完成全部 extract 工作。
+```
+
+这就是文档中“Drafter/Proposer”和“Speculator”的含义。它们都是负责 speculative
+decoding 的组件，但属于两套不同的 Runner 组织方式。
+
+### 4.2 为什么不能把 v1 Proposer 直接放进 v2
+
+v1 Proposer 希望调用方直接给它这些参数：
+
+```text
+sampled_token_ids
+target_hidden_states
+CommonAttentionMetadata
+```
+
+而 v2 Runner 统一传给 Speculator 的是：
+
+```text
+InputBatch
+last_sampled
+next_prefill_tokens
+aux_hidden_states
+block tables
+slot mappings
+```
+
+两边收到的参数不是同一套。更重要的是，v2 还要求 Speculator 自己参与：
+
+- 模型加载；
+- KV cache 绑定；
+- dummy run；
+- ACL graph capture；
+- DP/SP 同步。
+
+因此，不能简单地写成：
+
+```text
+v2 Speculator
+    ↓ 转一下参数
+v1 Proposer
+```
+
+本方案是在 v2 目录中实现原生 Speculator，不继承、不持有、也不调用 v1 Proposer。
+
+### 4.3 请求数据放在哪里不同
+
+一次推理中会同时处理多个请求，例如：
+
+```text
+请求 A："你好"
+请求 B："介绍一下北京"
+```
+
+Runner 需要记录每个请求已经处理了多少 token、上次生成了什么 token、当前在 batch
+中的位置等信息。
+
+v1 使用自己的一套 request 和 input batch 对象，`propose_draft_token_ids()` 可以直接
+拿到整理好的采样结果。
+
+v2 将长期状态放在 `RequestState` 中，将本轮输入放在 `InputBatch` 中：
+
+```text
+RequestState：保存跨多轮不变或持续更新的请求状态
+InputBatch：保存当前这一轮实际参与计算的请求
+```
+
+因此 v2 Speculator 需要使用：
+
+```python
+req_indices = input_batch.idx_mapping[:input_batch.num_reqs]
+```
+
+把“当前 batch 第几个请求”转换成“RequestState 中第几个请求”。
+
+### 4.4 sampled token 的取得方式不同
+
+sampled token 就是目标模型刚刚生成的 token。
+
+v1 的调用链已经把采样结果整理成 `valid_sampled_token_ids`，然后直接传给 proposer：
+
+```python
+self.drafter.propose(
+    sampled_token_ids=valid_sampled_token_ids,
+    ...
+)
+```
+
+v2 在调用 Speculator 之前已经更新了 `RequestState`，因此 Speculator 从
+`last_sampled` 中取：
+
+```python
+sampled_token_ids = last_sampled[req_indices, 0]
+```
+
+如果请求仍在 prefill，还没有生成新 token，则使用：
+
+```python
+next_prefill_tokens[req_indices]
+```
+
+直白地说：
+
+```text
+v1：Runner 把 token 直接递给 Proposer。
+v2：Speculator 根据请求编号去状态表中取 token。
+```
+
+### 4.5 cache 写入说明书的来源不同
+
+把 hidden states 写进 cache 时，需要知道：
+
+- 写入哪个 cache block；
+- 写入 block 中的哪个位置；
+- 当前有多少请求和 token；
+- 每个请求的序列长度是多少。
+
+这些信息合起来叫 `CommonAttentionMetadata`。可以把它理解为“cache 写入地址说明书”。
+
+v1 Runner 已经准备好了这份说明书，直接传给 proposer：
+
+```python
+common_attn_metadata = spec_decode_common_attn_metadata
+```
+
+v2 的统一 `speculator.propose()` 接口没有直接提供完整的
+`CommonAttentionMetadata`。因此 v2 Speculator 需要根据以下数据重新组成一份：
+
+```text
+InputBatch
+block tables
+slot mappings
+seq_lens
+query_start_loc
+positions
+```
+
+这就是“Speculator 根据 v2 input batch 重建 metadata”的意思，并不是重新计算
+hidden states。
+
+### 4.6 KV cache 在哪里创建不同
+
+KV cache 可以理解为模型运行时使用的一块大内存。
+
+普通 attention 需要两份：
+
+```text
+K cache + V cache
+```
+
+extract 只保存 hidden states，所以只需要一份：
+
+```text
+hidden-state cache
+```
+
+v1 的 cache 发现、分配和 reshape 主要写在：
+
+```text
+vllm_ascend/worker/model_runner_v1.py
+```
+
+v2 把这些公共操作拆到了：
+
+```text
+vllm_ascend/worker/v2/attn_utils.py
+```
+
+所以迁移时不能只增加 Speculator，还必须让 v2 的 `attn_utils.py` 认识
+`HiddenStateCacheSpec`，并知道这种 cache 是单 tensor，不是 `(K, V)` 两个 tensor。
+
+### 4.7 ACL graph 的执行方式不同
+
+ACL graph 可以粗略理解为：
+
+```text
+先把一段计算过程录下来，
+之后遇到相同形状的输入时直接重放。
+```
+
+v1 在 Runner 的 dummy run 中顺便调用 proposer：
+
+```text
+Runner dummy run
+    ↓
+Proposer dummy run
+```
+
+v2 为 Speculator 规定了独立的生命周期：
+
+```text
+Speculator.init_cudagraph_manager()
+    ↓
+Speculator.capture()
+    ↓
+运行时 Speculator.propose()
+```
+
+因此原生 v2 Speculator 必须自己实现 graph 初始化、捕获和 dummy run，不能依赖 v1
+Runner 帮它完成。
+
+### 4.8 “上游 v2 没有实现”是什么意思
+
+“上游”指 vLLM 主仓库。
+
+上游已经提供：
+
+```text
+ExtractHiddenStatesModel
+CacheOnlyAttentionLayer
+HiddenStateCacheSpec
+v1 ExtractHiddenStatesProposer
+```
+
+但是上游没有提供可以直接给 Model Runner v2 使用的
+`ExtractHiddenStatesSpeculator`。
+
+所以 vLLM Ascend 需要补充自己的原生 v2 实现。可以继续使用通用的
+`ExtractHiddenStatesModel`、`CacheOnlyAttentionLayer` 和 `HiddenStateCacheSpec`，
+但不能继续调用 v1 Proposer。
+
+### 4.9 最后用两条流程对比
+
+v1：
+
+```text
+Runner.sample_tokens()
+    ↓
+Runner.propose_draft_token_ids()
+    ↓
+AscendExtractHiddenStatesProposer.propose()
+    ↓
+CacheOnlyAttentionLayer
+```
+
+v2：
+
+```text
+Runner.sample_tokens()
+    ↓
+统一调用 speculator.propose()
+    ↓
+AscendExtractHiddenStatesSpeculator.propose()
+    ↓
+CacheOnlyAttentionLayer
+```
+
+最核心的一句话：
+
+```text
+v1 的 extract 逻辑分散在 Runner 和 Proposer 中；
+v2 的 extract 逻辑集中在原生 Speculator 中。
+```
 
 ## 5. v2 需要修改的地方
 
