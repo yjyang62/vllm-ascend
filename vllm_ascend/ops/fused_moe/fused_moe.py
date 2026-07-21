@@ -66,33 +66,35 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
     )
 
 
-def _install_runtime_weight(layer: torch.nn.Module, name: str, weight: torch.Tensor) -> torch.Tensor:
-    """Install or refresh a runtime-only weight while preserving its address."""
+def _install_runtime_weight(
+    layer: torch.nn.Module,
+    name: str,
+    weight: torch.Tensor,
+    *,
+    per_expert: bool = False,
+) -> torch.Tensor | list[torch.Tensor]:
+    """Install or refresh runtime weights while preserving their addresses."""
     setattr(layer, SEPARATE_RUNTIME_WEIGHTS_MARKER, True)
     current = getattr(layer, name, None)
-    if (
-        isinstance(current, torch.Tensor)
-        and current.shape == weight.shape
-        and current.dtype == weight.dtype
-        and current.device == weight.device
-    ):
+    if not per_expert:
         if (
-            current.data_ptr() != weight.data_ptr()
-            or current.storage_offset() != weight.storage_offset()
-            or current.stride() != weight.stride()
+            isinstance(current, torch.Tensor)
+            and current.shape == weight.shape
+            and current.dtype == weight.dtype
+            and current.device == weight.device
         ):
-            with torch.no_grad():
-                current.copy_(weight)
-        return current
-    setattr(layer, name, weight)
-    return weight
+            if (
+                current.data_ptr() != weight.data_ptr()
+                or current.storage_offset() != weight.storage_offset()
+                or current.stride() != weight.stride()
+            ):
+                with torch.no_grad():
+                    current.copy_(weight)
+            return current
+        setattr(layer, name, weight)
+        return weight
 
-
-def _install_runtime_weight_list(layer: torch.nn.Module, name: str, weight: torch.Tensor) -> list[torch.Tensor]:
-    """Install or refresh per-expert runtime weights used by dynamic EPLB."""
-    setattr(layer, SEPARATE_RUNTIME_WEIGHTS_MARKER, True)
     expert_weights = list(weight.unbind(dim=0))
-    current = getattr(layer, name, None)
     if (
         isinstance(current, list)
         and len(current) == len(expert_weights)
@@ -231,8 +233,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_data = maybe_trans_nz(w2_data)
 
         if enable_fused_mc2 == 1 and self.dynamic_eplb:
-            _install_runtime_weight_list(layer, "w13_weight_list", w13_data)
-            _install_runtime_weight_list(layer, "w2_weight_list", w2_data)
+            _install_runtime_weight(layer, "w13_weight_list", w13_data, per_expert=True)
+            _install_runtime_weight(layer, "w2_weight_list", w2_data, per_expert=True)
         else:
             _install_runtime_weight(layer, W13_RUNTIME_WEIGHT, w13_data)
             _install_runtime_weight(layer, W2_RUNTIME_WEIGHT, w2_data)
