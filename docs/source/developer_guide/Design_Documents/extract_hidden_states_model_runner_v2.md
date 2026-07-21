@@ -83,7 +83,294 @@ NPUModelRunner
 
 ### 3.2 v1 执行流程
 
+#### 第一步：根据配置创建 proposer
+
+文件：`vllm_ascend/spec_decode/__init__.py`，`get_spec_decode_method()`。
+
+```python
+elif method == "extract_hidden_states":
+    return AscendExtractHiddenStatesProposer(
+        vllm_config,
+        device,
+        runner,
+    )
+```
+
+当配置中的 `method` 是 `extract_hidden_states` 时，factory 返回 v1 使用的
+`AscendExtractHiddenStatesProposer`。
+
+#### 第二步：Runner 保存 proposer 并启用 auxiliary hidden states
+
+文件：`vllm_ascend/worker/model_runner_v1.py`，`_set_up_drafter()`，约
+587-624 行。
+
+```python
+self.drafter: (
+    AscendNgramProposer
+    | AscendEagleProposer
+    | AscendExtractHiddenStatesProposer
+    | None
+) = None
+
+if self.speculative_config:
+    if get_pp_group().is_last_rank:
+        self.drafter = self._get_drafter()
+        if self.speculative_config.method == "extract_hidden_states":
+            assert isinstance(
+                self.drafter,
+                AscendExtractHiddenStatesProposer,
+            )
+            self.use_aux_hidden_state_outputs = True
+```
+
+这里做了两件事：
+
+1. 将 factory 创建的 proposer 保存到 `self.drafter`；
+2. 设置 `use_aux_hidden_state_outputs=True`，要求目标模型 forward 时额外返回指定
+   中间层的 hidden states。
+
+#### 第三步：加载 cache-only model 并配置目标模型层
+
+文件：`vllm_ascend/worker/model_runner_v1.py`，`load_model()`，约
+3796-3821 行。
+
+```python
+if self.drafter:
+    logger.info("Loading drafter model...")
+    with get_tp_context(self.drafter):
+        self.drafter.load_model(self.model)
+
+if should_configure_aux_hidden_states:
+    from vllm.model_executor.models.interfaces import supports_eagle3
+
+    if not supports_eagle3(self.model):
+        raise RuntimeError(
+            "Model does not support EAGLE3 interface but "
+            "aux_hidden_state_outputs was requested"
+        )
+
+    aux_layers = self._get_eagle3_aux_layers_from_config()
+    if not aux_layers:
+        aux_layers = (
+            self.model.get_eagle3_default_aux_hidden_state_layers()
+        )
+    self.model.set_aux_hidden_state_layers(aux_layers)
+```
+
+`self.drafter.load_model(self.model)` 会加载 `ExtractHiddenStatesModel`。该模型主要包含
+一个 `CacheOnlyAttentionLayer`。随后，Runner 根据
+`eagle_aux_hidden_state_layer_ids` 配置目标模型应该返回哪些中间层。
+
+#### 第四步：执行目标模型并拆分输出
+
+文件：`vllm_ascend/worker/model_runner_v1.py`，`execute_model()`，约
+2354-2369 行。
+
+```python
+hidden_states = self._model_forward(
+    num_tokens_padded,
+    input_ids,
+    positions,
+    intermediate_tensors,
+    inputs_embeds,
+    **model_kwargs,
+)
+
+aux_hidden_states = None
+if self.use_aux_hidden_state_outputs:
+    hidden_states, aux_hidden_states = hidden_states
+```
+
+不开启 extract 时，模型通常只返回：
+
 ```text
+hidden_states
+```
+
+开启 extract 后，模型返回：
+
+```text
+(hidden_states, aux_hidden_states)
+```
+
+其中 `hidden_states` 继续用于计算 logits 和采样；`aux_hidden_states` 用于写入
+hidden-state cache。
+
+#### 第五步：采样完成后进入 extract 专用分支
+
+文件：`vllm_ascend/worker/model_runner_v1.py`，
+`propose_draft_token_ids()`，约 1750-1779 行。
+
+```python
+elif self.speculative_config.uses_extract_hidden_states():
+    assert isinstance(
+        self.drafter,
+        AscendExtractHiddenStatesProposer,
+    )
+    if (
+        not self.use_aux_hidden_state_outputs
+        or aux_hidden_states is None
+    ):
+        raise ValueError(
+            "aux_hidden_states are required when using "
+            "`extract_hidden_states`"
+        )
+
+    common_attn_metadata = spec_decode_common_attn_metadata
+    target_hidden_states = [
+        h[:num_scheduled_tokens]
+        for h in aux_hidden_states
+    ]
+
+    draft_token_ids = self.drafter.propose(
+        self.speculative_config.num_speculative_tokens,
+        sampled_token_ids=valid_sampled_token_ids,
+        target_hidden_states=target_hidden_states,
+        common_attn_metadata=common_attn_metadata,
+    )
+```
+
+`h[:num_scheduled_tokens]` 会移除 graph padding，只保留本轮真实 token 对应的 hidden
+states。之后 Runner 把以下数据交给 proposer：
+
+- `valid_sampled_token_ids`：目标模型已经采样出的 token；
+- `target_hidden_states`：选择层的 hidden states；
+- `common_attn_metadata`：block table、slot mapping、序列长度等 cache 写入信息。
+
+完成 proposer 调用后，Runner 还会更新下一轮 token：
+
+```python
+next_token_ids, valid_sampled_tokens_count = (
+    self.drafter.prepare_next_token_ids_padded(
+        valid_sampled_token_ids,
+        self.requests,
+        self.input_batch,
+        self.discard_request_indices.gpu,
+        self.num_discarded_requests,
+    )
+)
+self._copy_valid_sampled_token_count(
+    next_token_ids,
+    valid_sampled_tokens_count,
+)
+```
+
+#### 第六步：Proposer 堆叠多层 hidden states
+
+上游文件：`vllm/v1/spec_decode/extract_hidden_states.py`，
+`ExtractHiddenStatesProposer.propose()`。
+
+```python
+stacked_hidden_states = torch.stack(
+    target_hidden_states,
+    dim=1,
+)
+num_tokens = stacked_hidden_states.shape[0]
+self.hidden_states[:num_tokens] = stacked_hidden_states
+
+attn_metadata = self.attn_metadata_builder.build_for_drafting(
+    common_attn_metadata=common_attn_metadata,
+    draft_index=0,
+)
+per_layer_attn_metadata = {
+    layer_name: attn_metadata
+    for layer_name in self.attn_layer_names
+}
+```
+
+假设：
+
+```text
+num_tokens = 10
+选择的模型层数 = 3
+hidden_size = 1024
+```
+
+stack 后的 shape 是：
+
+```text
+[10, 3, 1024]
+```
+
+随后 proposer 建立 cache-only layer 所需的 attention metadata，并执行
+`ExtractHiddenStatesModel`：
+
+```python
+with set_forward_context(
+    per_layer_attn_metadata,
+    self.vllm_config,
+    num_tokens=num_input_tokens,
+    num_tokens_across_dp=num_tokens_across_dp,
+    cudagraph_runtime_mode=cudagraph_runtime_mode,
+    slot_mapping=self._get_slot_mapping(
+        num_input_tokens,
+        common_attn_metadata.slot_mapping,
+    ),
+):
+    self.model(
+        hidden_states=self.hidden_states[:num_input_tokens],
+    )
+
+return sampled_token_ids[:, :1]
+```
+
+返回 `sampled_token_ids[:, :1]` 表示它不预测新 token，而是把目标模型已经采样出的
+token 当作 draft token。
+
+#### 第七步：CacheOnlyAttentionLayer 写入 cache
+
+上游文件：`vllm/model_executor/models/extract_hidden_states.py`，
+`CacheOnlyAttentionLayer.forward()`。
+
+```python
+def forward(self, to_cache: torch.Tensor) -> torch.Tensor:
+    output = torch.empty(
+        0,
+        device=to_cache.device,
+        dtype=to_cache.dtype,
+    )
+    dummy_out = unified_kv_cache_update(
+        to_cache,
+        self.layer_name,
+    )
+    _ = dummy_attention(self.layer_name, dummy_out)
+    return output
+```
+
+真正的基础写入操作为：
+
+```python
+def basic_cache(to_cache, kv_cache, slot_mapping):
+    block_size = kv_cache.shape[1]
+    kv_cache[
+        slot_mapping // block_size,
+        slot_mapping % block_size,
+    ] = to_cache
+```
+
+slot mapping 将每个 token 映射为：
+
+```text
+block index = slot // block_size
+block offset = slot % block_size
+```
+
+因此每个 token 的多层 hidden states 会写入正确的 cache block。
+
+#### 第八步：KV Connector 保存或传输结果
+
+`CacheOnlyAttentionLayer.forward()` 中的 `dummy_attention()` 使用
+`@maybe_transfer_kv_layer` 装饰器。cache 更新完成后，该装饰器会通知 KV Connector
+处理当前 layer。使用 `ExampleHiddenStatesConnector` 时，hidden states 最终被保存为
+safetensors 文件，并通过输出中的 `hidden_states_path` 返回给用户。
+
+完整调用关系如下：
+
+```text
+get_spec_decode_method()
+    ↓
+AscendExtractHiddenStatesProposer
+    ↓
 目标模型 forward
     ↓
 得到 hidden_states 和 aux_hidden_states
@@ -101,9 +388,6 @@ CacheOnlyAttentionLayer 写入 hidden-state cache
     ↓
 KV Connector 保存或传输 hidden states
 ```
-
-v1 的 extract 分支直接位于 `propose_draft_token_ids()` 中。Runner 负责准备
-sampled token、attention metadata、padding 以及请求状态，然后调用 proposer。
 
 ### 3.3 v1 KV cache
 
