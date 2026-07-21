@@ -91,7 +91,187 @@ proposer 会把目标模型已经采样出的 token 作为 draft token 返回，
 
 ## 2. 核心概念
 
-### 2.1 Auxiliary hidden states
+### 2.1 Runner 是什么
+
+Runner 是“模型运行组织器”。它不是模型本身，也不是某一种算子。
+
+先看几个组件的关系：
+
+```text
+用户请求
+    ↓
+Engine
+  管理整个推理服务
+    ↓
+Scheduler
+  决定这一轮运行哪些请求、每个请求处理多少 token
+    ↓
+Worker
+  代表一个推理进程/rank，管理设备和分布式通信
+    ↓
+Model Runner
+  把 Scheduler 的决定变成 tensor，并组织一次模型运行
+    ↓
+Model
+  真正执行 Transformer 数学计算
+```
+
+可以把 Runner 理解为拍电影时的“现场执行导演”：
+
+```text
+Scheduler 给出今天拍哪些场景；
+Runner 准备演员、道具和拍摄顺序；
+Model 真正完成表演。
+```
+
+在代码中，Worker 持有 Runner：
+
+```python
+self.model_runner = NPUModelRunner(
+    self.vllm_config,
+    self.device,
+)
+```
+
+对应文件：
+
+```text
+vllm_ascend/worker/worker.py
+```
+
+Runner 通常持有或管理以下对象：
+
+```text
+self.model
+  已加载的目标模型
+
+self.req_states
+  每个请求已经运行到哪里
+
+self.input_buffers
+  input_ids、positions、seq_lens 等输入 buffer
+
+self.sampler
+  根据 logits 选择下一个 token
+
+self.kv_caches
+  attention 运行使用的 cache
+
+self.speculator
+  speculative decoding 的具体执行组件
+```
+
+一次普通推理中，Runner 主要做这些事情：
+
+```text
+1. 接收 SchedulerOutput
+2. 根据请求状态准备 input_ids、positions、seq_lens
+3. 准备 block table、slot mapping、attention metadata
+4. 调用 Model.forward()
+5. 用模型输出计算 logits
+6. 调用 Sampler 生成 token
+7. 更新请求状态和 KV cache
+8. 返回 ModelRunnerOutput
+```
+
+所以 `Model Runner` 的直白含义是：
+
+```text
+Model：负责算
+Runner：负责让 Model 正确地跑起来
+```
+
+#### Worker 和 Runner 有什么区别
+
+这两个名字容易混淆。
+
+Worker 更偏向“进程和设备管理”：
+
+- 初始化 NPU；
+- 初始化分布式通信；
+- 持有当前 rank；
+- 接收 Engine 发来的调用；
+- 调用 Runner。
+
+Runner 更偏向“一次模型计算的组织”：
+
+- 准备 batch tensor；
+- 调用模型；
+- 采样 token；
+- 管理本轮 request state、attention metadata 和 cache；
+- 调用 Speculator。
+
+调用关系通常是：
+
+```text
+NPUWorker.execute_model()
+    ↓
+NPUModelRunner.execute_model()
+    ↓
+TargetModel.forward()
+```
+
+以及：
+
+```text
+NPUWorker.sample_tokens()
+    ↓
+NPUModelRunner.sample_tokens()
+    ↓
+Sampler / Speculator
+```
+
+#### v1 Runner 和 v2 Runner
+
+本项目中有两套 Runner：
+
+```text
+v1：
+vllm_ascend/worker/model_runner_v1.py
+
+v2：
+vllm_ascend/worker/v2/model_runner.py
+```
+
+它们的目标相同，都是组织模型运行；内部的数据结构和职责划分不同：
+
+```text
+v1 Runner
+  自己包含很多 speculative method 的专用分支
+
+v2 Runner
+  使用统一的 Speculator 接口，
+  把 method 专用流程放进对应 Speculator
+```
+
+#### 为什么 Speculator 初始化时要传 `runner`
+
+创建 extract Speculator 时有：
+
+```python
+AscendExtractHiddenStatesSpeculator(
+    vllm_config,
+    device,
+    runner,
+)
+```
+
+这里传入 Runner，不是让 Speculator 再执行一遍整个 Runner，而是让它使用 Runner 已经
+提供的少数通用能力：
+
+```text
+runner._pad_for_sequence_parallelism()
+runner._sync_metadata_across_dp()
+```
+
+也就是：
+
+```text
+Runner 管理整个模型运行；
+Speculator 只管理 extract_hidden_states 这项子任务。
+```
+
+### 2.2 Auxiliary hidden states
 
 目标模型正常只返回最后一层 hidden states。开启
 `use_aux_hidden_state_outputs` 后，模型额外返回指定中间层的输出：
@@ -102,7 +282,7 @@ model_output = (hidden_states, aux_hidden_states)
 
 其中 `aux_hidden_states` 是一个 tensor 列表，每个元素对应一个被选择的模型层。
 
-### 2.2 Cache-only model
+### 2.3 Cache-only model
 
 extract 模式会加载一个轻量的 `ExtractHiddenStatesModel`。该模型没有正常的
 attention 计算，主要包含一个 `CacheOnlyAttentionLayer`，负责把 hidden states 写入
