@@ -20,6 +20,71 @@ speculative_config = {
 }
 ```
 
+### 1.1 本文中的 extract 是什么
+
+本文后面为了简短，会把 `extract_hidden_states` 写成 **extract**。
+
+这里的 extract 不是 Python 关键字，也不是另一个类名，它只是英文“提取”的意思，完整
+名称始终是：
+
+```text
+extract_hidden_states
+```
+
+模型处理一个 token 时，每一层都会产生一份中间计算结果：
+
+```text
+输入 token
+    ↓
+第 1 层 hidden states
+    ↓
+第 2 层 hidden states
+    ↓
+...
+    ↓
+最后一层 hidden states
+```
+
+正常生成文本时，用户通常只关心最后一层结果。extract 功能会把用户指定的某几层中间
+结果额外复制出来。例如：
+
+```python
+"eagle_aux_hidden_state_layer_ids": [2, 14, 26]
+```
+
+表示：
+
+```text
+保留第 2 层 hidden states
+保留第 14 层 hidden states
+保留第 26 层 hidden states
+```
+
+这些中间结果会组成一个 tensor：
+
+```text
+[num_tokens, num_selected_layers, hidden_size]
+```
+
+然后写入 hidden-state cache，最后由 KV Connector 保存或传输。
+
+所以 extract 的完整动作是：
+
+```text
+目标模型执行
+    ↓
+取得指定中间层输出
+    ↓
+把多层输出 stack 在一起
+    ↓
+写入 hidden-state cache
+    ↓
+保存到文件或传给其他组件
+```
+
+extract 不会从模型中“删除”数据，也不是把文本中的某一段截取出来。它只是把模型内部
+原本就会产生的中间 tensor 额外复制并保存。目标模型仍然会正常生成 token。
+
 该功能借用了 speculative decoding 的调度流程，但不进行真正的 token 推测：
 proposer 会把目标模型已经采样出的 token 作为 draft token 返回，因此该 token 在下一次
 验证时一定匹配。这个模式的主要产物是 hidden states，而不是推测加速。
@@ -712,7 +777,26 @@ vllm_ascend/worker/model_runner_v1.py
 └── NPUModelRunner.propose_draft_token_ids()
 ```
 
-也就是说，v1 Runner 知道 extract 的具体处理细节。
+也就是说，v1 Runner 知道 extract 的具体处理细节。这里的“具体处理细节”是指 Runner
+自己写了以下代码：
+
+```text
+判断当前 method 是不是 extract_hidden_states
+    ↓
+检查 aux_hidden_states 是否存在
+    ↓
+去掉 aux_hidden_states 中的 graph padding
+    ↓
+准备 sampled token 和 CommonAttentionMetadata
+    ↓
+调用 AscendExtractHiddenStatesProposer.propose()
+    ↓
+准备下一轮使用的 token
+```
+
+这些步骤都能在
+`vllm_ascend/worker/model_runner_v1.py` 的
+`NPUModelRunner.propose_draft_token_ids()` extract 分支中看到。
 
 v2 中，Runner 不再写 extract 专用分支。它只做统一调用：
 
