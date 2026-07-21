@@ -163,23 +163,14 @@ def test_dummy_run_basic():
         proposer.model = MagicMock()
         proposer.dp_rank = 0
         proposer.hidden_states = torch.zeros(1024, 4096, dtype=torch.float16)
-        proposer.attn_layer_names = ["cache_only_layers.0"]
         runner._sync_metadata_across_dp.return_value = (16, None, CUDAGraphMode.NONE)
-        slot_mappings = {"cache_only_layers.0": torch.arange(16, dtype=torch.int64)}
 
         with patch("vllm_ascend.spec_decode.extract_hidden_states_proposer.set_forward_context") as mock_context:
             mock_context.return_value.__enter__ = MagicMock(return_value=None)
             mock_context.return_value.__exit__ = MagicMock(return_value=None)
 
-            proposer.dummy_run(
-                num_tokens=16,
-                slot_mappings=slot_mappings,
-            )
+            proposer.dummy_run(num_tokens=16)
             proposer.model.assert_called_once()
-            assert (
-                mock_context.call_args.kwargs["slot_mapping"]["cache_only_layers.0"].data_ptr()
-                == proposer._slot_mapping_buffer.data_ptr()
-            )
 
 
 def test_dummy_run_syncs_metadata_across_dp_as_draft_model():

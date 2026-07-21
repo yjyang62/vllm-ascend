@@ -3,9 +3,11 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 
-from vllm_ascend.worker.v2.spec_decode.extract_hidden_states import (
+from vllm_ascend.worker.v2.spec_decode.extract_hidden_states.speculator import (
     AscendExtractHiddenStatesSpeculator,
+    _update_valid_hidden_state_slots,
 )
 
 
@@ -13,14 +15,23 @@ def _make_speculator() -> AscendExtractHiddenStatesSpeculator:
     speculator = AscendExtractHiddenStatesSpeculator.__new__(AscendExtractHiddenStatesSpeculator)
     speculator.device = torch.device("cpu")
     speculator.runner = MagicMock()
-    speculator.proposer = MagicMock()
-    speculator.proposer.attn_layer_names = ["cache_only_layers.0"]
-    speculator.proposer.kv_cache_gid = 1
+    speculator.runner._sync_metadata_across_dp.return_value = (
+        4,
+        None,
+        CUDAGraphMode.NONE,
+    )
+    speculator.dp_rank = 0
+    speculator.attn_layer_names = ["cache_only_layers.0"]
+    speculator.kv_cache_gid = 1
     speculator.block_tables = MagicMock()
     speculator.block_tables.input_block_tables = [
         torch.zeros(2, 4, dtype=torch.int32),
         torch.ones(2, 4, dtype=torch.int32),
     ]
+    speculator.hidden_states = torch.zeros(8, 2, 8)
+    speculator.slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)
+    speculator._dispatch_and_sync = MagicMock(return_value=(CUDAGraphMode.NONE, 3, None))
+    speculator._run_cache_only_model = MagicMock()
     return speculator
 
 
@@ -47,12 +58,9 @@ def _make_input_batch():
     return input_batch
 
 
-def test_propose_adapts_v2_inputs_to_hidden_state_proposer():
+def test_propose_runs_native_v2_cache_only_path():
     speculator = _make_speculator()
     input_batch = _make_input_batch()
-    expected = torch.tensor([[13], [29]], dtype=torch.int64)
-    speculator.proposer.propose.return_value = expected
-
     last_sampled = torch.tensor(
         [[10], [13], [20], [23]],
         dtype=torch.int64,
@@ -81,18 +89,26 @@ def test_propose_adapts_v2_inputs_to_hidden_state_proposer():
         seeds=torch.zeros(4, dtype=torch.int64),
     )
 
-    assert torch.equal(output, expected)
-    kwargs = speculator.proposer.propose.call_args.kwargs
     assert torch.equal(
-        kwargs["sampled_token_ids"],
+        output,
         torch.tensor([[13], [29]], dtype=torch.int64),
     )
-    assert all(hidden.shape[0] == 3 for hidden in kwargs["target_hidden_states"])
+    expected_hidden_states = torch.stack(
+        [hidden[:3] for hidden in aux_hidden_states],
+        dim=1,
+    )
+    assert torch.equal(
+        speculator.hidden_states[:3],
+        expected_hidden_states,
+    )
+
+    kwargs = speculator._run_cache_only_model.call_args.kwargs
     common_metadata = kwargs["common_attn_metadata"]
     assert common_metadata.num_actual_tokens == 3
     assert common_metadata.max_query_len == 2
     assert common_metadata.max_seq_len == 7
     assert common_metadata.block_table_tensor.data_ptr() == (speculator.block_tables.input_block_tables[1].data_ptr())
+    assert "cache_only_layers.0" in kwargs["slot_mapping"]
 
 
 def test_propose_requires_aux_hidden_states():
@@ -114,8 +130,9 @@ def test_propose_requires_aux_hidden_states():
         )
 
 
-def test_dummy_run_delegates_without_hidden_states():
+def test_dummy_run_uses_native_speculator_method():
     speculator = _make_speculator()
+    speculator._dummy_run = MagicMock()
     input_batch = _make_input_batch()
 
     output = speculator.propose(
@@ -134,12 +151,13 @@ def test_dummy_run_delegates_without_hidden_states():
         is_profile=True,
     )
 
-    speculator.proposer.dummy_run.assert_called_once()
+    speculator._dummy_run.assert_called_once()
     assert output.shape == (2, 1)
 
 
-def test_capture_forwards_slot_mappings_to_cache_only_model():
+def test_capture_forwards_slot_mappings_to_native_dummy_run():
     speculator = _make_speculator()
+    speculator._dummy_run = MagicMock()
     batch_desc = MagicMock()
     batch_desc.num_tokens = 4
     attention_state = MagicMock()
@@ -152,6 +170,39 @@ def test_capture_forwards_slot_mappings_to_cache_only_model():
 
     speculator.capture({batch_desc: attention_state})
 
-    kwargs = speculator.proposer.dummy_run.call_args.kwargs
+    kwargs = speculator._dummy_run.call_args.kwargs
     assert kwargs["num_tokens"] == 4
     assert kwargs["slot_mappings"] is attention_state.slot_mappings
+
+
+def test_padding_slots_do_not_write_hidden_state_cache():
+    impl = MagicMock()
+    impl.kv_cache_torch_dtype = torch.float32
+    kv_cache = torch.zeros(2, 2, 1, 1, dtype=torch.float32)
+    to_cache = torch.tensor([1.0, 2.0, 9.0]).reshape(3, 1, 1)
+    slot_mapping = torch.tensor([0, 3, -1], dtype=torch.int64)
+
+    _update_valid_hidden_state_slots(
+        impl,
+        MagicMock(),
+        to_cache,
+        kv_cache,
+        slot_mapping,
+    )
+
+    assert torch.equal(
+        kv_cache.flatten(),
+        torch.tensor([1.0, 0.0, 0.0, 2.0]),
+    )
+
+
+def test_dummy_without_slot_mapping_skips_cache_update():
+    speculator = _make_speculator()
+
+    speculator._dummy_run(
+        num_tokens=4,
+        aclgraph_runtime_mode=CUDAGraphMode.NONE,
+    )
+
+    kwargs = speculator._run_cache_only_model.call_args.kwargs
+    assert kwargs["slot_mapping"] == {}

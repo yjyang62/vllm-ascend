@@ -134,7 +134,7 @@ extract 分支不能使功能生效。
 
 ## 5. v2 需要修改的地方
 
-### 5.1 增加 v2 Speculator 适配层
+### 5.1 增加原生 v2 Speculator
 
 新增文件：
 
@@ -142,30 +142,37 @@ extract 分支不能使功能生效。
 vllm_ascend/worker/v2/spec_decode/extract_hidden_states/speculator.py
 ```
 
-`AscendExtractHiddenStatesSpeculator` 使用组合方式复用已有的
-`AscendExtractHiddenStatesProposer`：
+`AscendExtractHiddenStatesSpeculator` 在 v2 目录中独立实现完整生命周期：
 
 ```text
 v2 Model Runner
-    ↓ v2 propose 参数
+    ↓
 AscendExtractHiddenStatesSpeculator
-    ↓ 转换参数
-AscendExtractHiddenStatesProposer
     ↓
 ExtractHiddenStatesModel
+    ↓
+CacheOnlyAttentionLayer
 ```
 
-没有直接让 proposer 继承 v2 speculator，因为两者的 `propose()` 参数、生命周期和
-graph 接口不同。组合方式可以保留已有 Ascend proposer 的 DP/SP 和 cache-only forward
-逻辑，同时把 v2 相关变化限制在适配层内。
+v2 speculator 不继承、不持有、也不调用 v1 的
+`AscendExtractHiddenStatesProposer`。模型加载、buffer 管理、hidden states stack、
+metadata builder、cache-only forward、DP/SP 协调和 graph capture 都由 v2
+speculator 自己负责。
 
-适配层需要实现：
+需要区分“v1 Model Runner 实现”和上游 Python 包名。当前上游 Model Runner v2 本身仍
+位于 `vllm.v1.worker.gpu` 命名空间，因此 v2 代码仍会导入其中的公共类型，例如
+`InputBatch`、`BlockTables` 和 `KVCacheConfig`。这些是 v2 runner 正在使用的公共
+基础设施，不表示继续依赖 v1 proposer 或 `model_runner_v1.py`。
+
+原生 speculator 需要实现：
 
 - `load_model()`：加载 cache-only model；
 - `set_attn()`：记录 KV cache group 和 block tables；
-- `init_cudagraph_manager()`：初始化 proposer graph keys；
+- `init_cudagraph_manager()`：初始化自己的 graph dispatcher；
 - `capture()`：捕获 cache-only model 的 piecewise graph；
-- `propose()`：把 v2 输入转换为 proposer 所需参数。
+- `propose()`：直接执行 hidden states stack 和 cache-only forward；
+- `_dispatch_and_sync()`：执行 SP padding、graph dispatch 和 DP 同步；
+- `_run_cache_only_model()`：建立 forward context 并执行 cache 写入。
 
 ### 5.2 注册 speculator
 
@@ -186,8 +193,8 @@ if speculative_config.uses_extract_hidden_states():
     )
 ```
 
-extract speculator 需要 runner 引用，因为 Ascend proposer 使用 runner 的
-sequence-parallel padding 和 data-parallel metadata 同步方法。
+extract speculator 需要 runner 引用，以调用 v2 runner 的 sequence-parallel padding
+和 data-parallel metadata 同步方法。
 
 ### 5.3 延迟上游 speculator 初始化
 
@@ -233,7 +240,7 @@ hidden_states, aux_hidden_states = model_output
 
 ### 5.5 转换 v2 sampled token
 
-v2 在执行 `speculator.propose()` 之前已经完成 request state 更新。适配层根据
+v2 在执行 `speculator.propose()` 之前已经完成 request state 更新。原生 speculator 根据
 `input_batch.idx_mapping` 从全局状态中取得当前请求的 token：
 
 ```python
@@ -257,7 +264,7 @@ sampled_token_ids = torch.where(
 v1 runner 会直接向 proposer 提供 `CommonAttentionMetadata`；v2 的统一 speculator
 接口只提供 input batch、block tables 和 per-layer slot mappings。
 
-适配层需要根据以下数据重建 metadata：
+v2 speculator 需要根据以下数据重建 metadata：
 
 - `query_start_loc`：每个请求在 token tensor 中的起点；
 - `seq_lens`：请求当前序列长度；
@@ -266,8 +273,8 @@ v1 runner 会直接向 proposer 提供 `CommonAttentionMetadata`；v2 的统一 
 - `slot_mapping`：每个 token 的 cache 写入位置；
 - `positions`：token position。
 
-构造完成后，原 proposer 可以继续调用现有
-`AttentionMetadataBuilder.build_for_drafting()`。
+构造完成后，v2 speculator 直接调用
+`AttentionMetadataBuilder.build_for_drafting()`，再执行 cache-only model。
 
 ### 5.7 支持 HiddenStateCacheSpec
 
@@ -331,7 +338,7 @@ K/V 大小，再从底层 tensor 中切出 K/V view。
 修改：
 
 ```text
-vllm_ascend/spec_decode/extract_hidden_states_proposer.py
+vllm_ascend/worker/v2/spec_decode/extract_hidden_states/speculator.py
 ```
 
 `CacheOnlyAttentionLayer` 依赖 slot mapping 才能执行 cache update。如果 graph capture
@@ -344,18 +351,27 @@ slot_mapping={}
 捕获的图可能不包含 hidden-state cache 写入，运行时会得到空数据、零数据或旧数据。
 
 解决方案是让 `speculator.capture()` 把 captured attention state 中的
-`slot_mappings` 传给 proposer dummy run，再通过 proposer 的预分配 buffer 构造
-cache-only layer 对应的 mapping：
+`slot_mappings` 传给 v2 speculator 自己的 `_dummy_run()`，再通过 v2 的预分配
+buffer 构造 cache-only layer 对应的 mapping：
 
 ```text
 CapturedAttentionState.slot_mappings
     ↓
 speculator.capture()
     ↓
-proposer.dummy_run(slot_mappings=...)
+speculator._dummy_run(slot_mappings=...)
     ↓
 set_forward_context(slot_mapping=...)
 ```
+
+Graph 和 DP padding 使用 `-1` 表示无效 slot。上游 cache-only update 直接使用 tensor
+索引，`-1` 会被解释为最后一个 cache 位置，而不是“跳过”。因此 v2 speculator 在加载
+cache-only layer 时为该实例安装只写入 `slot_mapping >= 0` 的 update 方法，防止
+padding hidden states 覆盖真实 cache。NPU 路径使用固定 launch shape 的 Triton
+kernel，在设备端通过 mask 跳过负 slot，避免 ACL graph replay 依赖动态 tensor shape。
+
+普通 profile/dummy run 没有真实 slot mapping，此时必须向 forward context 传入空字典
+并跳过 cache update，不能复用 slot mapping buffer 中上一批请求的旧值。
 
 ## 6. v2 完整数据流
 
@@ -378,12 +394,10 @@ ExtractHiddenStatesSpeculator.propose()
     ├── 选择 last_sampled 或 next_prefill_tokens
     ├── 去除 aux hidden states 的 graph padding
     ├── 重建 CommonAttentionMetadata
-    └── 调用已有 Ascend proposer
-            ↓
-        stack 多层 hidden states
-            ↓
-        CacheOnlyAttentionLayer 写入 hidden-state cache
-            ↓
+    ├── stack 多层 hidden states
+    ├── 执行 graph dispatch 和 DP/SP 协调
+    └── CacheOnlyAttentionLayer 写入 hidden-state cache
+    ↓
 KV Connector post_forward
     ↓
 输出 hidden_states_path
@@ -408,7 +422,7 @@ auxiliary hidden-state 输出接口，而不是 MTP 模型结构。
 
 ```text
 需要迁移：
-  Speculator 适配、aux hidden states、cache-only model、
+  原生 v2 Speculator、aux hidden states、cache-only model、
   HiddenStateCacheSpec、slot mapping、DP/SP 协调、ACL graph
 
 不需要迁移：
@@ -451,10 +465,10 @@ VLLM_USE_V2_MODEL_RUNNER=1
 
 ## 9. 迁移结果
 
-完成上述修改后，v2 runner 可以复用成熟的 v1 Ascend proposer，同时遵循 v2 的统一
-speculator 生命周期。迁移没有引入 MTP 模型依赖，主要新增复杂度集中在：
+完成上述修改后，v2 runner 使用独立的原生 speculator，不依赖 v1 proposer 或
+`model_runner_v1.py`。迁移没有引入 MTP 模型依赖，主要新增复杂度集中在：
 
-1. v1 proposer 与 v2 speculator 的接口转换；
+1. 在 v2 speculator 内完整实现模型加载、buffer、metadata 和 cache-only forward；
 2. hidden-state 单 tensor cache；
 3. 跨 KV group 共享底层内存时的多种 view；
 4. ACL graph capture 中保留真实 cache 写入路径。
