@@ -9,21 +9,25 @@ from torch import nn
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe.fused_moe import (
+    SEPARATE_RUNTIME_WEIGHTS_MARKER,
+    W2_RUNTIME_WEIGHT,
+    W13_RUNTIME_WEIGHT,
     AscendMoERunner,
     AscendUnquantizedFusedMoEMethod,
+    update_runtime_weight_from_kernel,
 )
 from vllm_ascend.quantization.quant_type import QuantType
 
 
 def _build_weight_layer():
-    return SimpleNamespace(
-        w13_weight=nn.Parameter(torch.randn(2, 3, 4)),
-        w2_weight=nn.Parameter(torch.randn(2, 4, 3)),
-    )
+    layer = nn.Module()
+    layer.w13_weight = nn.Parameter(torch.randn(2, 3, 4))
+    layer.w2_weight = nn.Parameter(torch.randn(2, 4, 3))
+    return layer
 
 
 def _build_apply_layer():
-    return SimpleNamespace(
+    layer = SimpleNamespace(
         w13_weight=nn.Parameter(torch.randn(4, 3, 8)),
         w2_weight=nn.Parameter(torch.randn(4, 8, 3)),
         w13_bias=None,
@@ -33,6 +37,9 @@ def _build_apply_layer():
         n_shared_experts=0,
         swiglu_limit=0.0,
     )
+    setattr(layer, W13_RUNTIME_WEIGHT, layer.w13_weight.transpose(1, 2))
+    setattr(layer, W2_RUNTIME_WEIGHT, layer.w2_weight.transpose(1, 2))
+    return layer
 
 
 def _build_unquantized_method(*, dynamic_eplb: bool = False):
@@ -61,6 +68,8 @@ def test_process_weights_after_loading_uses_version_specific_layout(
 ):
     method = _build_unquantized_method()
     layer = _build_weight_layer()
+    w13_parameter = layer.w13_weight
+    w2_parameter = layer.w2_weight
     original_w13 = layer.w13_weight.detach().clone()
     original_w2 = layer.w2_weight.detach().clone()
     ascend_config = SimpleNamespace(enable_fused_mc2=False)
@@ -78,10 +87,115 @@ def test_process_weights_after_loading_uses_version_specific_layout(
 
     method.process_weights_after_loading(layer)
 
-    torch.testing.assert_close(layer.w13_weight, original_w13.transpose(1, 2))
-    torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2))
-    assert layer.w13_weight.is_contiguous() is expected_contiguous
-    assert layer.w2_weight.is_contiguous() is expected_contiguous
+    assert layer.w13_weight is w13_parameter
+    assert layer.w2_weight is w2_parameter
+    assert W13_RUNTIME_WEIGHT not in dict(layer.named_parameters())
+    assert W2_RUNTIME_WEIGHT not in dict(layer.named_parameters())
+    assert W13_RUNTIME_WEIGHT not in dict(layer.named_buffers())
+    assert W2_RUNTIME_WEIGHT not in dict(layer.named_buffers())
+    assert W13_RUNTIME_WEIGHT not in layer.state_dict()
+    assert W2_RUNTIME_WEIGHT not in layer.state_dict()
+    torch.testing.assert_close(layer.w13_weight, original_w13)
+    torch.testing.assert_close(layer.w2_weight, original_w2)
+
+    w13_runtime = getattr(layer, W13_RUNTIME_WEIGHT)
+    w2_runtime = getattr(layer, W2_RUNTIME_WEIGHT)
+    torch.testing.assert_close(w13_runtime, original_w13.transpose(1, 2))
+    torch.testing.assert_close(w2_runtime, original_w2.transpose(1, 2))
+    assert w13_runtime.is_contiguous() is expected_contiguous
+    assert w2_runtime.is_contiguous() is expected_contiguous
+
+    with torch.no_grad():
+        layer.w13_weight.add_(1)
+        layer.w2_weight.add_(1)
+    method.process_weights_after_loading(layer)
+
+    assert getattr(layer, W13_RUNTIME_WEIGHT) is w13_runtime
+    assert getattr(layer, W2_RUNTIME_WEIGHT) is w2_runtime
+    torch.testing.assert_close(w13_runtime, layer.w13_weight.transpose(1, 2))
+    torch.testing.assert_close(w2_runtime, layer.w2_weight.transpose(1, 2))
+
+
+def test_process_weights_after_loading_keeps_hf_parameters_for_dynamic_eplb(monkeypatch):
+    method = _build_unquantized_method(dynamic_eplb=True)
+    layer = _build_weight_layer()
+    w13_parameter = layer.w13_weight
+    w2_parameter = layer.w2_weight
+    ascend_config = SimpleNamespace(enable_fused_mc2=1)
+
+    monkeypatch.setattr(fused_moe_module, "vllm_version_is", lambda _: False)
+    monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(fused_moe_module.torch_npu, "npu_format_cast", lambda weight, _: weight)
+    upstream_method_base = AscendUnquantizedFusedMoEMethod.__mro__[2]
+    monkeypatch.setattr(
+        upstream_method_base,
+        "process_weights_after_loading",
+        lambda self, layer: None,
+        raising=False,
+    )
+
+    method.process_weights_after_loading(layer)
+
+    assert layer.w13_weight is w13_parameter
+    assert layer.w2_weight is w2_parameter
+    assert len(layer.w13_weight_list) == layer.w13_weight.shape[0]
+    assert len(layer.w2_weight_list) == layer.w2_weight.shape[0]
+    assert not hasattr(layer, W13_RUNTIME_WEIGHT)
+    assert not hasattr(layer, W2_RUNTIME_WEIGHT)
+    w13_runtime_list = layer.w13_weight_list
+    w2_runtime_list = layer.w2_weight_list
+    torch.testing.assert_close(
+        torch.stack(layer.w13_weight_list),
+        layer.w13_weight.transpose(1, 2),
+    )
+    torch.testing.assert_close(
+        torch.stack(layer.w2_weight_list),
+        layer.w2_weight.transpose(1, 2),
+    )
+
+    with torch.no_grad():
+        layer.w13_weight.add_(1)
+        layer.w2_weight.add_(1)
+    method.process_weights_after_loading(layer)
+
+    assert layer.w13_weight_list is w13_runtime_list
+    assert layer.w2_weight_list is w2_runtime_list
+    torch.testing.assert_close(torch.stack(layer.w13_weight_list), layer.w13_weight.transpose(1, 2))
+    torch.testing.assert_close(torch.stack(layer.w2_weight_list), layer.w2_weight.transpose(1, 2))
+
+
+@pytest.mark.parametrize("use_expert_lists", [False, True])
+def test_update_runtime_weight_from_kernel_syncs_checkpoint_parameter(use_expert_lists):
+    layer = _build_weight_layer()
+    setattr(layer, SEPARATE_RUNTIME_WEIGHTS_MARKER, True)
+    runtime_weight = torch.randn(2, 4, 3)
+    if use_expert_lists:
+        layer.w13_weight_list = [torch.zeros_like(weight) for weight in runtime_weight.unbind(0)]
+    else:
+        layer.w13_weight_runtime = torch.zeros_like(runtime_weight)
+
+    with torch.no_grad():
+        updated = update_runtime_weight_from_kernel(layer, "w13_weight", runtime_weight)
+
+    assert updated
+    if use_expert_lists:
+        torch.testing.assert_close(torch.stack(layer.w13_weight_list), runtime_weight)
+    else:
+        torch.testing.assert_close(layer.w13_weight_runtime, runtime_weight)
+    torch.testing.assert_close(layer.w13_weight, runtime_weight.transpose(1, 2))
+
+
+def test_update_runtime_weight_from_kernel_skips_quantized_weight_lists():
+    layer = SimpleNamespace(
+        w13_weight_list=[torch.zeros(4, 3) for _ in range(2)],
+    )
+    runtime_weight = torch.randn(2, 4, 3)
+
+    with torch.no_grad():
+        updated = update_runtime_weight_from_kernel(layer, "w13_weight", runtime_weight)
+
+    assert not updated
+    torch.testing.assert_close(torch.stack(layer.w13_weight_list), torch.zeros_like(runtime_weight))
 
 
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])
@@ -127,12 +241,14 @@ def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_c
     assert fused_input.routing.apply_router_weight_on_input
     assert fused_input.activation == "gelu"
     assert fused_input.quant.quant_type == QuantType.NONE
+    w13_runtime = getattr(layer, W13_RUNTIME_WEIGHT)
+    w2_runtime = getattr(layer, W2_RUNTIME_WEIGHT)
     if moe_comm_type == MoECommType.FUSED_MC2:
-        assert fused_input.weights.w1[0] is layer.w13_weight
-        assert fused_input.weights.w2[0] is layer.w2_weight
+        assert fused_input.weights.w1[0] is w13_runtime
+        assert fused_input.weights.w2[0] is w2_runtime
     else:
-        assert fused_input.weights.w1 is layer.w13_weight
-        assert fused_input.weights.w2 is layer.w2_weight
+        assert fused_input.weights.w1 is w13_runtime
+        assert fused_input.weights.w2 is w2_runtime
 
 
 @pytest.mark.parametrize(

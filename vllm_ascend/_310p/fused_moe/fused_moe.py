@@ -22,7 +22,12 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.experts_selector import zero_experts_compute
-from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+from vllm_ascend.ops.fused_moe.fused_moe import (
+    W2_RUNTIME_WEIGHT,
+    W13_RUNTIME_WEIGHT,
+    AscendMoERunner,
+    _install_runtime_weight,
+)
 from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.quant_type import QuantType
@@ -53,19 +58,18 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
         if not vllm_version_is("0.24.0"):
             w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2)
             w13_data = maybe_trans_nz(w13_data)
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
 
             w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2)
             w2_data = maybe_trans_nz(w2_data)
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
         else:
             w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
             w13_data = maybe_trans_nz(w13_data)
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
 
             w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
             w2_data = maybe_trans_nz(w2_data)
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+
+        _install_runtime_weight(layer, W13_RUNTIME_WEIGHT, w13_data)
+        _install_runtime_weight(layer, W2_RUNTIME_WEIGHT, w2_data)
 
     def apply(
         self,
@@ -119,8 +123,8 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                w1=getattr(layer, W13_RUNTIME_WEIGHT),
+                w2=getattr(layer, W2_RUNTIME_WEIGHT),
                 quant_type=QuantType.NONE,
                 dynamic_eplb=False,
                 expert_map=expert_map,

@@ -252,27 +252,7 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
-        hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
-        if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
-            for name, param in model.named_parameters():
-                if "w2_weight" in name and param.shape[2] == hidden_size:
-                    parts = name.split(".")
-                    param_name = parts[-1]
-                    parent_module = model.get_submodule(".".join(parts[:-1]))
-
-                    w2_data = param.transpose(1, 2)
-                    w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
-                    setattr(parent_module, param_name, w2_data)
-                elif "w13_weight" in name and param.shape[1] == hidden_size:
-                    parts = name.split(".")
-                    param_name = parts[-1]
-                    parent_module = model.get_submodule(".".join(parts[:-1]))
-
-                    w13_data = param.transpose(1, 2)
-                    w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
-                    setattr(parent_module, param_name, w13_data)
-
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
             for name, buffer in model.named_buffers():
@@ -346,8 +326,16 @@ class NPUWorker(WorkerBase):
             else:
 
                 def load_weights_direct(weights: list[tuple[str, torch.Tensor]]) -> None:
+                    from vllm_ascend.ops.fused_moe.fused_moe import (
+                        update_runtime_weight_from_kernel,
+                    )
+
                     with torch.no_grad():
                         for name, weight in weights:
+                            module_path, _, parameter_name = name.rpartition(".")
+                            layer = model.get_submodule(module_path) if module_path else model
+                            if update_runtime_weight_from_kernel(layer, parameter_name, weight):
+                                continue
                             param = model.get_parameter(name)
                             param.copy_(weight)
 

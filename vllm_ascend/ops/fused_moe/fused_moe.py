@@ -52,6 +52,10 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
+W13_RUNTIME_WEIGHT = "w13_weight_runtime"
+W2_RUNTIME_WEIGHT = "w2_weight_runtime"
+SEPARATE_RUNTIME_WEIGHTS_MARKER = "_ascend_separate_runtime_weights"
+
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
     global_indices = torch.where(expert_map != -1)[0]
@@ -60,6 +64,104 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
         f"{local_index.item()}->{global_index.item()}"
         for local_index, global_index in zip(local_indices, global_indices)
     )
+
+
+def _install_runtime_weight(
+    layer: torch.nn.Module,
+    name: str,
+    weight: torch.Tensor,
+    *,
+    per_expert: bool = False,
+) -> torch.Tensor | list[torch.Tensor]:
+    """Install or refresh runtime weights while preserving their addresses."""
+    setattr(layer, SEPARATE_RUNTIME_WEIGHTS_MARKER, True)
+    current = getattr(layer, name, None)
+    if not per_expert:
+        if (
+            isinstance(current, torch.Tensor)
+            and current.shape == weight.shape
+            and current.dtype == weight.dtype
+            and current.device == weight.device
+        ):
+            if (
+                current.data_ptr() != weight.data_ptr()
+                or current.storage_offset() != weight.storage_offset()
+                or current.stride() != weight.stride()
+            ):
+                with torch.no_grad():
+                    current.copy_(weight)
+            return current
+        setattr(layer, name, weight)
+        return weight
+
+    expert_weights = list(weight.unbind(dim=0))
+    if (
+        isinstance(current, list)
+        and len(current) == len(expert_weights)
+        and all(
+            existing.shape == updated.shape and existing.dtype == updated.dtype and existing.device == updated.device
+            for existing, updated in zip(current, expert_weights)
+        )
+    ):
+        with torch.no_grad():
+            for existing, updated in zip(current, expert_weights):
+                existing.copy_(updated)
+        return current
+    runtime_weights = [expert_weight.clone() for expert_weight in expert_weights]
+    setattr(layer, name, runtime_weights)
+    return runtime_weights
+
+
+def update_runtime_weight_from_kernel(
+    layer: torch.nn.Module,
+    parameter_name: str,
+    weight: torch.Tensor,
+) -> bool:
+    """Update a runtime-format MoE weight and its checkpoint Parameter."""
+    if not getattr(layer, SEPARATE_RUNTIME_WEIGHTS_MARKER, False):
+        return False
+    runtime_name = {
+        "w13_weight": W13_RUNTIME_WEIGHT,
+        "w2_weight": W2_RUNTIME_WEIGHT,
+    }.get(parameter_name)
+    if runtime_name is None:
+        return False
+
+    runtime_weight = getattr(layer, runtime_name, None)
+    runtime_weight_list = getattr(layer, f"{parameter_name}_list", None)
+    if isinstance(runtime_weight, torch.Tensor):
+        if runtime_weight.shape != weight.shape:
+            raise ValueError(
+                f"Runtime weight shape mismatch for {parameter_name}: "
+                f"expected {tuple(runtime_weight.shape)}, got {tuple(weight.shape)}"
+            )
+        runtime_weight.copy_(weight)
+    elif isinstance(runtime_weight_list, list):
+        expert_weights = list(weight.unbind(dim=0))
+        if len(runtime_weight_list) != len(expert_weights):
+            raise ValueError(
+                f"Runtime expert count mismatch for {parameter_name}: "
+                f"expected {len(runtime_weight_list)}, got {len(expert_weights)}"
+            )
+        for existing, updated in zip(runtime_weight_list, expert_weights):
+            if existing.shape != updated.shape:
+                raise ValueError(
+                    f"Runtime expert shape mismatch for {parameter_name}: "
+                    f"expected {tuple(existing.shape)}, got {tuple(updated.shape)}"
+                )
+            existing.copy_(updated)
+    else:
+        return False
+
+    checkpoint_weight = getattr(layer, parameter_name)
+    checkpoint_value = weight.transpose(1, 2)
+    if checkpoint_weight.shape != checkpoint_value.shape:
+        raise ValueError(
+            f"Checkpoint weight shape mismatch for {parameter_name}: "
+            f"expected {tuple(checkpoint_weight.shape)}, got {tuple(checkpoint_value.shape)}"
+        )
+    checkpoint_weight.copy_(checkpoint_value)
+    return True
 
 
 @dataclass
@@ -111,16 +213,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # (798185d) and is present in the verified main commit only.
         if not vllm_version_is("0.24.0"):
             w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2)
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
             w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2)
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
         else:
             w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
             w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
         # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
@@ -130,17 +226,18 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
-            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if enable_fused_mc2 == 1 and self.dynamic_eplb:
-                layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                del layer.w13_weight
-                del layer.w2_weight
-                torch.npu.empty_cache()
+            w13_data = torch_npu.npu_format_cast(w13_data, ACL_FORMAT_FRACTAL_NZ)
+            w2_data = torch_npu.npu_format_cast(w2_data, ACL_FORMAT_FRACTAL_NZ)
         else:
-            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+            w13_data = maybe_trans_nz(w13_data)
+            w2_data = maybe_trans_nz(w2_data)
+
+        if enable_fused_mc2 == 1 and self.dynamic_eplb:
+            _install_runtime_weight(layer, "w13_weight_list", w13_data, per_expert=True)
+            _install_runtime_weight(layer, "w2_weight_list", w2_data, per_expert=True)
+        else:
+            _install_runtime_weight(layer, W13_RUNTIME_WEIGHT, w13_data)
+            _install_runtime_weight(layer, W2_RUNTIME_WEIGHT, w2_data)
 
     def apply(
         self,
@@ -241,16 +338,16 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
                     "tensor lists. This may cause accuracy issues or communication hangs."
                 )
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [getattr(layer, W13_RUNTIME_WEIGHT)]
+            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [getattr(layer, W2_RUNTIME_WEIGHT)]
             w1_scale = [torch.tensor([], dtype=torch.int64)]
             w2_scale = [torch.tensor([], dtype=torch.int64)]
             w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
             w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
+            w1 = w13_weight_list if isinstance(w13_weight_list, list) else getattr(layer, W13_RUNTIME_WEIGHT)
             w1_scale = None
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else layer.w2_weight
+            w2 = w2_weight_list if isinstance(w2_weight_list, list) else getattr(layer, W2_RUNTIME_WEIGHT)
             w2_scale = None
             w1_scale_bias = None
             w2_scale_bias = None

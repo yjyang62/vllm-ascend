@@ -249,6 +249,41 @@ class TestNPUWorker(TestBase):
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
 
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_preserves_moe_checkpoint_parameters(
+        self,
+        mock_get_config,
+        mock_allocator_class,
+    ):
+        """Wakeup restores allocator memory without changing MoE parameters."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_config.enable_sleep_mode_extra_cleanup = False
+        mock_get_config.return_value = mock_config
+
+        model = torch.nn.Module()
+        model.experts = torch.nn.Module()
+        model.experts.w13_weight = torch.nn.Parameter(torch.randn(2, 6, 4))
+        model.experts.w2_weight = torch.nn.Parameter(torch.randn(2, 4, 3))
+        w13_weight = model.experts.w13_weight
+        w2_weight = model.experts.w2_weight
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.model_runner.model = model
+            worker._sleep_saved_buffers = {}
+            worker.sleep_wakeup_manager = MagicMock()
+
+            worker.wake_up(tags=["weights"])
+
+        mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(tags=["weights"])
+        self.assertIs(model.experts.w13_weight, w13_weight)
+        self.assertIs(model.experts.w2_weight, w2_weight)
+
     @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
@@ -1481,6 +1516,47 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.model_runner.model.get_parameter.assert_called_once_with("layer.weight")
         torch.testing.assert_close(param.detach(), torch.zeros(2))
         self.assertTrue(param.requires_grad)
+
+    @patch("torch.npu.synchronize", create=True)
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
+    def test_update_weights_kernel_format_updates_moe_runtime_and_checkpoint_weights(self, mock_sync):
+        from vllm_ascend.ops.fused_moe.fused_moe import (
+            SEPARATE_RUNTIME_WEIGHTS_MARKER,
+        )
+
+        engine = MagicMock()
+        w13_runtime = torch.randn(2, 4, 3)
+        w2_runtime = torch.randn(2, 3, 4)
+
+        def fake_receive(update_info, load_weights):
+            load_weights(
+                [
+                    ("experts.w13_weight", w13_runtime),
+                    ("experts.w2_weight", w2_runtime),
+                ]
+            )
+
+        engine.receive_weights.side_effect = fake_receive
+        worker = self._make_worker(engine=engine)
+        model = torch.nn.Module()
+        model.experts = torch.nn.Module()
+        model.experts.w13_weight = torch.nn.Parameter(torch.zeros(2, 3, 4))
+        model.experts.w2_weight = torch.nn.Parameter(torch.zeros(2, 4, 3))
+        setattr(model.experts, SEPARATE_RUNTIME_WEIGHTS_MARKER, True)
+        model.experts.w13_weight_runtime = torch.zeros_like(w13_runtime)
+        model.experts.w2_weight_runtime = torch.zeros_like(w2_runtime)
+        worker.model_runner.model = model
+        engine.parse_update_info.return_value = "typed_update"
+        worker._weight_update_active = True
+        worker._is_checkpoint_format = False
+
+        worker.update_weights({"foo": "bar"})
+
+        torch.testing.assert_close(model.experts.w13_weight_runtime, w13_runtime)
+        torch.testing.assert_close(model.experts.w2_weight_runtime, w2_runtime)
+        torch.testing.assert_close(model.experts.w13_weight, w13_runtime.transpose(1, 2))
+        torch.testing.assert_close(model.experts.w2_weight, w2_runtime.transpose(1, 2))
+        mock_sync.assert_called_once()
 
     @patch("vllm.model_executor.model_loader.reload.finalize_layerwise_reload")
     def test_finish_weight_update_resets_state(self, mock_finalize_reload):

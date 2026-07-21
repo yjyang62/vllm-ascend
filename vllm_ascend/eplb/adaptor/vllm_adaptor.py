@@ -26,7 +26,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.quantization.quant_type import QuantType
 
 EPLB_EXPERT_WEIGHT_NAMES = {
-    (QuantType.NONE, False): ("w13_weight", "w2_weight"),
+    (QuantType.NONE, False): ("w13_weight_runtime", "w2_weight_runtime"),
     (QuantType.NONE, True): ("w13_weight_list", "w2_weight_list"),
     (QuantType.W8A8, False): (
         "w13_weight_list",
@@ -127,6 +127,8 @@ class VllmEplbAdaptor:
         self.param_dict = dict()
 
         for local_idx, layer in enumerate(self.moe_layers):
+            modules = getattr(layer, "_modules", {})
+            weight_owner = modules.get("routed_experts", layer) if isinstance(modules, dict) else layer
             quant_type = QuantType.NONE if self.model.quant_config is None else layer.quant_type
             expert_weight_key = (quant_type, get_ascend_config().enable_fused_mc2 == 1)
             if expert_weight_key[0] == QuantType.W4A8MXFP:
@@ -138,7 +140,7 @@ class VllmEplbAdaptor:
             self.expert_param_per_layer[local_idx] = list()
             for name in expert_weight_names:
                 param_key = f"{local_idx}.{name}"
-                self.param_dict[param_key] = getattr(layer, name)
+                self.param_dict[param_key] = getattr(weight_owner, name)
             for local_expert_id in range(self.num_local_experts):
                 per_expert_param = list()
                 for name in expert_weight_names:

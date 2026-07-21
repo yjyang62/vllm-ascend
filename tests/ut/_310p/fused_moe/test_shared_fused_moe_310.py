@@ -12,7 +12,11 @@ from vllm_ascend._310p.fused_moe.fused_moe import (
     AscendUnquantizedFusedMoEMethod310,
 )
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+from vllm_ascend.ops.fused_moe.fused_moe import (
+    W2_RUNTIME_WEIGHT,
+    W13_RUNTIME_WEIGHT,
+    AscendMoERunner,
+)
 from vllm_ascend.quantization.quant_type import QuantType
 
 
@@ -71,6 +75,8 @@ def test_process_weights_after_loading_310_uses_version_specific_layout(
     method = AscendUnquantizedFusedMoEMethod310.__new__(AscendUnquantizedFusedMoEMethod310)
     method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
     layer = _build_weight_layer()
+    w13_parameter = layer.w13_weight
+    w2_parameter = layer.w2_weight
     original_w13 = layer.w13_weight.detach().clone()
     original_w2 = layer.w2_weight.detach().clone()
 
@@ -88,10 +94,17 @@ def test_process_weights_after_loading_310_uses_version_specific_layout(
 
     method.process_weights_after_loading(layer)
 
-    torch.testing.assert_close(layer.w13_weight, original_w13.transpose(1, 2))
-    torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2))
-    assert layer.w13_weight.is_contiguous() is expected_contiguous
-    assert layer.w2_weight.is_contiguous() is expected_contiguous
+    assert layer.w13_weight is w13_parameter
+    assert layer.w2_weight is w2_parameter
+    torch.testing.assert_close(layer.w13_weight, original_w13)
+    torch.testing.assert_close(layer.w2_weight, original_w2)
+
+    w13_runtime = getattr(layer, W13_RUNTIME_WEIGHT)
+    w2_runtime = getattr(layer, W2_RUNTIME_WEIGHT)
+    torch.testing.assert_close(w13_runtime, original_w13.transpose(1, 2))
+    torch.testing.assert_close(w2_runtime, original_w2.transpose(1, 2))
+    assert w13_runtime.is_contiguous() is expected_contiguous
+    assert w2_runtime.is_contiguous() is expected_contiguous
 
 
 class _Projection(nn.Module):
