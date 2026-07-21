@@ -1351,32 +1351,1088 @@ kernel，在设备端通过 mask 跳过负 slot，避免 ACL graph replay 依赖
 
 ## 6. v2 完整数据流
 
+这一节按照程序实际调用顺序说明应该怎样阅读 v2 代码。初学者不要先从 Triton kernel
+开始读，建议依次阅读“入口 → 初始化 → 模型加载 → cache 初始化 → 单步推理 → cache
+写入”。
+
+### 6.1 推荐的源码阅读顺序
+
+按以下顺序阅读：
+
 ```text
-用户配置 method=extract_hidden_states
+1. vllm_ascend/worker/worker.py
+   └── NPUWorker.init_device()
+       先看系统怎样选择并创建 v2 Runner
+
+2. vllm_ascend/worker/v2/model_runner.py
+   └── NPUModelRunner.__init__()
+       看 v2 Runner 怎样创建 extract Speculator
+
+3. vllm_ascend/worker/v2/spec_decode/__init__.py
+   └── init_speculator()
+       看 method 怎样映射到具体 Speculator
+
+4. vllm_ascend/worker/v2/spec_decode/extract_hidden_states/speculator.py
+   ├── AscendExtractHiddenStatesSpeculator.__init__()
+   └── load_model()
+       看 extract 组件保存了什么状态、怎样加载 cache-only model
+
+5. vllm_ascend/worker/v2/attn_utils.py
+   └── get_kv_cache_spec()
+       看 cache-only layer 怎样被识别为 HiddenStateCacheSpec
+
+6. vllm_ascend/worker/v2/spec_decode/extract_hidden_states/speculator.py
+   ├── init_cudagraph_manager()
+   ├── set_attn()
+   └── capture()
+       看 cache group、block table 和 ACL graph 怎样接入
+
+7. vllm_ascend/worker/v2/attn_utils.py
+   ├── _allocate_kv_cache()
+   └── _reshape_kv_cache_v2()
+       看 hidden-state cache 怎样分配和 reshape
+
+8. vllm/v1/worker/gpu/model_runner.py
+   ├── execute_model()
+   └── sample_tokens()
+       看上游 Model Runner v2 在什么位置调用 speculator.propose()
+
+9. vllm_ascend/worker/v2/spec_decode/extract_hidden_states/speculator.py
+   ├── propose()
+   ├── _dispatch_and_sync()
+   ├── _build_common_attn_metadata()
+   └── _run_cache_only_model()
+       看本轮 hidden states 怎样被整理并写入 cache
+
+10. vllm/model_executor/models/extract_hidden_states.py
+   ├── ExtractHiddenStatesModel.forward()
+   ├── CacheOnlyAttentionLayer.forward()
+   └── unified_kv_cache_update()
+       看 vLLM 通用模型怎样触发真正的 cache 写入
+
+11. speculator.py 文件顶部
+    ├── _update_valid_hidden_state_slots()
+    └── _cache_hidden_states_kernel()
+        最后再看 Ascend v2 怎样过滤 padding slot
+```
+
+这里第 8 步的路径中有 `vllm/v1`，但它是上游当前存放 Model Runner v2 的 Python
+命名空间。判断代码属于哪个 Runner，应看导入的类：
+
+```python
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+```
+
+本项目的 `worker/v2/model_runner.py` 继承的就是这个上游 `GPUModelRunner`。这不表示
+v2 extract 继续调用旧的 `ExtractHiddenStatesProposer`。
+
+### 6.2 第一阶段：Worker 创建 v2 Runner
+
+先读：
+
+```text
+vllm_ascend/worker/worker.py
+└── NPUWorker.init_device()
+```
+
+核心逻辑：
+
+```python
+if self.use_v2_model_runner:
+    from vllm_ascend.worker.v2.model_runner import (
+        NPUModelRunner as NPUModelRunnerV2,
+    )
+    self.model_runner = NPUModelRunnerV2(
+        self.vllm_config,
+        self.device,
+    )
+else:
+    self.model_runner = NPUModelRunner(
+        self.vllm_config,
+        self.device,
+    )
+```
+
+这一层只决定使用 v1 还是 v2。设置：
+
+```text
+VLLM_USE_V2_MODEL_RUNNER=1
+```
+
+后，Worker 创建的是
+`vllm_ascend/worker/v2/model_runner.py` 中的 `NPUModelRunner`。
+
+调用栈：
+
+```text
+Engine 启动 Worker
     ↓
-Ascend init_speculator 创建 ExtractHiddenStatesSpeculator
+NPUWorker.init_device()
     ↓
-目标模型启用 auxiliary hidden-state layers
+NPUModelRunnerV2(vllm_config, device)
     ↓
-目标模型 forward
+NPUModelRunner.__init__()
+```
+
+### 6.3 第二阶段：v2 Runner 创建 Speculator
+
+接着读：
+
+```text
+vllm_ascend/worker/v2/model_runner.py
+└── NPUModelRunner.__init__()
+```
+
+父类 `GPUModelRunner.__init__()` 也会尝试创建 Speculator，但上游 factory 还不认识
+`extract_hidden_states`。因此父类初始化期间暂时让上游 factory 对 extract 返回
+`None`：
+
+```python
+with (
+    torch_cuda_wrapper(),
+    upstream_extract_hidden_states_init_wrapper(vllm_config),
+):
+    super().__init__(vllm_config, device)
+```
+
+这个 wrapper 只在父类初始化期间生效：
+
+```python
+original_init_speculator = vllm_model_runner.init_speculator
+vllm_model_runner.init_speculator = (
+    lambda *_args, **_kwargs: None
+)
+try:
+    yield
+finally:
+    vllm_model_runner.init_speculator = (
+        original_init_speculator
+    )
+```
+
+父类字段初始化完成后，Ascend Runner 再调用自己的 factory：
+
+```python
+self.speculator = init_speculator(
+    self.vllm_config,
+    self.device,
+    runner=self,
+)
+```
+
+extract 还需要目标模型返回中间层输出，所以设置：
+
+```python
+if self.speculative_config.uses_extract_hidden_states():
+    self.use_aux_hidden_state_outputs = True
+```
+
+当前明确禁止 pipeline parallel：
+
+```python
+if self.use_pp:
+    raise ValueError(
+        "extract_hidden_states with pipeline parallelism "
+        "is not supported by model runner v2."
+    )
+```
+
+这一阶段结束后，Runner 已经知道：
+
+```text
+当前启用了 speculative decoding
+当前 method 是 extract_hidden_states
+目标模型需要返回 aux_hidden_states
+后续 speculative 工作交给 self.speculator
+```
+
+### 6.4 第三阶段：Factory 选择 extract Speculator
+
+继续读：
+
+```text
+vllm_ascend/worker/v2/spec_decode/__init__.py
+└── init_speculator()
+```
+
+核心代码：
+
+```python
+if speculative_config.uses_extract_hidden_states():
+    from vllm_ascend.worker.v2.spec_decode.extract_hidden_states import (
+        AscendExtractHiddenStatesSpeculator,
+    )
+
+    if runner is None:
+        raise ValueError(
+            "extract_hidden_states requires "
+            "the model runner instance"
+        )
+    return AscendExtractHiddenStatesSpeculator(
+        vllm_config,
+        device,
+        runner,
+    )
+```
+
+Factory 的作用就是：
+
+```text
+method=dspark                 → AscendDSparkSpeculator
+method=dflash                 → AscendDFlashSpeculator
+method=eagle/eagle3/mtp       → AscendEagleSpeculator
+method=extract_hidden_states  → AscendExtractHiddenStatesSpeculator
+```
+
+这里将 `runner` 传给 Speculator，是因为 Speculator 后续需要调用 Runner 的：
+
+```text
+_pad_for_sequence_parallelism()
+_sync_metadata_across_dp()
+```
+
+### 6.5 第四阶段：Speculator 初始化自己的 buffer
+
+接着读：
+
+```text
+vllm_ascend/worker/v2/spec_decode/extract_hidden_states/speculator.py
+└── AscendExtractHiddenStatesSpeculator.__init__()
+```
+
+首先检查配置：
+
+```python
+assert speculative_config.num_speculative_tokens == 1
+if speculative_config.disable_padded_drafter_batch:
+    raise ValueError(...)
+```
+
+为什么必须是 1：
+
+```text
+extract 不真正预测未来 token；
+它只回显目标模型已经采样出的一个 token。
+```
+
+然后读取用户选择的模型层：
+
+```python
+layer_ids = getattr(
+    hf_config,
+    "eagle_aux_hidden_state_layer_ids",
+    None,
+)
+```
+
+例如 `layer_ids=[2, 14, 26]`，表示要保存 3 层 hidden states。
+
+接着预分配 hidden-state buffer：
+
+```python
+self.hidden_states = torch.zeros(
+    (
+        max_num_tokens,
+        len(layer_ids),
+        model_hidden_size,
+    ),
+    dtype=self.dtype,
+    device=device,
+)
+```
+
+它的 shape 含义是：
+
+```text
+第 0 维：本轮最多处理多少 token
+第 1 维：选择了多少个模型层
+第 2 维：每层 hidden states 的宽度
+```
+
+还会预分配 slot mapping buffer：
+
+```python
+self.slot_mapping_buffer = torch.zeros(
+    max_num_tokens,
+    dtype=torch.int64,
+    device=device,
+)
+```
+
+预分配的原因是：
+
+- 减少每轮创建 tensor 的开销；
+- ACL graph replay 要求关键 tensor 地址保持稳定；
+- DP/SP padding 后可以在同一个 buffer 中补齐 slot。
+
+最后创建 graph dispatcher：
+
+```python
+self.cudagraph_dispatcher = CudagraphDispatcher(
+    vllm_config
+)
+```
+
+### 6.6 第五阶段：加载目标模型和 cache-only model
+
+Worker 调用：
+
+```text
+NPUWorker.load_model()
+    ↓
+GPUModelRunner.load_model()
+    ├── 加载 target model
+    ├── 配置 target model 的 aux hidden-state layers
+    └── self.speculator.load_model(self.model)
+```
+
+上游 Model Runner v2 的 `load_model()` 中有：
+
+```python
+if self.use_aux_hidden_state_outputs:
+    set_eagle3_aux_hidden_state_layers(
+        self.model,
+        self.speculative_config,
+    )
+
+if self.speculator is not None:
+    self.speculator.load_model(self.model)
+```
+
+第一段让 target model 在 forward 时返回指定中间层；第二段进入本项目实现的：
+
+```text
+AscendExtractHiddenStatesSpeculator.load_model()
+```
+
+该函数先记录 target model 已有的 attention layers：
+
+```python
+target_attn_layer_names = set(
+    get_layers_from_vllm_config(
+        self.vllm_config,
+        AttentionLayerBase,
+    )
+)
+```
+
+然后加载 `draft_model_config` 指定的 `ExtractHiddenStatesModel`：
+
+```python
+with set_model_tag("extract_hidden_states"):
+    self.model = get_model(
+        vllm_config=self.vllm_config,
+        model_config=(
+            speculative_config.draft_model_config
+        ),
+    )
+```
+
+这里虽然使用了 `draft_model_config`，但这个 model 不负责预测 token。它只是一个
+cache-only model。
+
+加载后再次查询所有 attention layers，并用集合差找到新增加的 layer：
+
+```python
+draft_attn_layers = {
+    name: layer
+    for name, layer in all_attn_layers.items()
+    if name not in target_attn_layer_names
+}
+```
+
+预期只新增一个：
+
+```text
+CacheOnlyAttentionLayer
+```
+
+之后保存 layer name，并创建它的 metadata builder：
+
+```python
+self.attn_layer_names = list(draft_attn_layers)
+draft_layer = next(iter(draft_attn_layers.values()))
+attn_backend = draft_layer.get_attn_backend()
+self.attn_metadata_builder = (
+    attn_backend.get_builder_cls()(
+        draft_layer.get_kv_cache_spec(
+            self.vllm_config
+        ),
+        self.attn_layer_names,
+        self.vllm_config,
+        self.device,
+    )
+)
+```
+
+metadata builder 后面会把通用的 `CommonAttentionMetadata` 转成
+`CacheOnlyAttentionLayer` 能使用的 metadata。
+
+### 6.7 第六阶段：发现 HiddenStateCacheSpec
+
+模型加载完成后，Engine 会查询每个 layer 需要什么 cache。此时阅读：
+
+```text
+vllm_ascend/worker/v2/attn_utils.py
+└── get_kv_cache_spec()
+```
+
+函数遍历所有 `AttentionLayerBase`：
+
+```python
+attn_layers = get_layers_from_vllm_config(
+    vllm_config,
+    AttentionLayerBase,
+)
+```
+
+遇到 cache-only layer 时：
+
+```python
+if isinstance(attn_module, CacheOnlyAttentionLayer):
+    if spec := attn_module.get_kv_cache_spec(
+        vllm_config
+    ):
+        kv_cache_spec[layer_name] = (
+            HiddenStateCacheSpec(
+                block_size=spec.block_size,
+                num_kv_heads=spec.num_kv_heads,
+                head_size=spec.head_size,
+                dtype=spec.dtype,
+                cache_dtype_str=spec.cache_dtype_str,
+            )
+        )
+```
+
+`HiddenStateCacheSpec` 是一个类型标记。后续代码看到它就知道：
+
+```text
+这不是普通 K/V cache；
+这是保存 hidden states 的单 tensor cache。
+```
+
+### 6.8 第七阶段：绑定 cache group、block table 和 graph
+
+上游 Model Runner v2 初始化 KV cache 时会依次调用：
+
+```text
+self.speculator.init_cudagraph_manager(cudagraph_mode)
+    ↓
+self.speculator.set_attn(
+    model_state,
+    kv_cache_config,
+    block_tables,
+)
+```
+
+#### `init_cudagraph_manager()`
+
+extract 的 cache-only model 只使用 PIECEWISE graph：
+
+```python
+if (
+    not speculative_config.enforce_eager
+    and cudagraph_mode.mixed_mode()
+    in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL)
+):
+    speculator_mode = CUDAGraphMode.PIECEWISE
+else:
+    speculator_mode = CUDAGraphMode.NONE
+```
+
+然后初始化 dispatcher keys：
+
+```python
+self.cudagraph_dispatcher.initialize_cudagraph_keys(
+    speculator_mode
+)
+```
+
+#### `set_attn()`
+
+这个函数找到 cache-only layer 属于哪个 KV cache group：
+
+```python
+for gid, group in enumerate(
+    kv_cache_config.kv_cache_groups
+):
+    if layer_name in group.layer_names:
+        self.kv_cache_gid = gid
+        self.block_tables = block_tables
+        return
+```
+
+为什么要保存 `kv_cache_gid`：
+
+```text
+block_tables 中有多个 cache group；
+运行时必须用正确的 group 才能找到 hidden-state cache blocks。
+```
+
+### 6.9 第八阶段：分配和 reshape hidden-state cache
+
+完成 Speculator 的 graph 和 attention 设置后，上游 `init_kv_cache()` 会进入被 Ascend
+patch 的 cache 分配函数。继续阅读：
+
+```text
+vllm_ascend/worker/v2/attn_utils.py
+├── _allocate_kv_cache()
+└── _reshape_kv_cache_v2()
+```
+
+#### 分配底层内存
+
+vLLM 可能让不同 KV group 共用同一个底层 `KVCacheTensor`，所以不能只检查
+`shared_by[0]`。代码会检查整个共享列表：
+
+```python
+has_hidden_state_cache = any(
+    is_hidden_state_cache_spec(
+        layer_kv_cache_spec[layer_name]
+    )
+    for layer_name in kv_cache_tensor.shared_by
+)
+```
+
+如果共享池中包含 hidden-state cache，就分配一个完整 tensor：
+
+```python
+if has_hidden_state_cache:
+    tensor = torch.zeros(
+        kv_cache_tensor.size,
+        dtype=torch.int8,
+        device=device,
+    )
+    for layer_name in kv_cache_tensor.shared_by:
+        kv_cache_raw_tensors[layer_name] = tensor
+```
+
+这里的 `torch.int8` 只是把底层空间按字节分配。reshape 时才会用真正 dtype 建立 view。
+
+#### 建立 hidden-state view
+
+`_reshape_kv_cache_v2()` 遇到 `HiddenStateCacheSpec` 后：
+
+```python
+kv_cache_shape = group.backend.get_kv_cache_shape(
+    num_blocks,
+    kv_cache_spec.block_size,
+    kv_cache_spec.num_kv_heads,
+    kv_cache_spec.head_size,
+    cache_dtype,
+)
+typed_tensor = raw_tensor.view(kv_cache_spec.dtype)
+kv_cache = typed_tensor.view(kv_cache_shape)
+```
+
+最终逻辑 shape 为：
+
+```text
+[num_blocks, block_size, num_selected_layers, hidden_size]
+```
+
+如果同一底层 tensor 还服务普通 attention layer，普通 layer 会从中建立 K view 和 V
+view。这里共享的是底层内存，不是说 hidden states 被当成了 K/V。
+
+### 6.10 第九阶段：目标模型执行
+
+运行时从 Worker 进入上游 Model Runner v2：
+
+```text
+NPUWorker.execute_model()
+    ↓
+NPUModelRunner.execute_model()
+    ↓
+GPUModelRunner.execute_model()
+```
+
+本项目 v2 Runner 主要复用上游 `execute_model()`，但会通过自己的
+`prepare_inputs()` 构造 Ascend 所需的 `AscendInputBatch`。
+
+目标模型执行后，因为前面设置了：
+
+```python
+self.use_aux_hidden_state_outputs = True
+```
+
+上游 Runner 会拆分输出：
+
+```python
+hidden_states, aux_hidden_states = model_output
+```
+
+两种 hidden states 的用途不同：
+
+```text
+hidden_states
+  → 计算 logits
+  → 采样 token
+
+aux_hidden_states
+  → extract Speculator
+  → 保存指定中间层
+```
+
+Runner 将这些临时数据保存到 `execute_model_state`，供随后
+`sample_tokens()` 使用。
+
+### 6.11 第十阶段：上游 Runner 调用 `speculator.propose()`
+
+随后 Worker 调用：
+
+```text
+NPUWorker.sample_tokens()
+    ↓
+GPUModelRunner.sample_tokens()
+```
+
+上游 Runner 先执行正常采样和请求状态更新：
+
+```text
+self.sample(...)
+    ↓
+self.postprocess(...)
+```
+
+然后统一调用 Speculator：
+
+```python
+draft_tokens = self.speculator.propose(
+    input_batch,
+    attn_metadata,
+    slot_mappings_by_layer,
+    spec_hidden_states,
+    aux_hidden_states,
+    num_sampled,
+    num_rejected,
+    self.req_states.last_sampled_tokens,
+    self.req_states.next_prefill_tokens,
+    temperature,
+    seeds,
+    mm_inputs=mm_inputs,
+)
+```
+
+注意这里没有：
+
+```python
+if method == "extract_hidden_states":
+```
+
+Runner 对 EAGLE、MTP、extract 等方法都使用相同的
+`self.speculator.propose()` 调用。实际对象是前面 factory 创建的
+`AscendExtractHiddenStatesSpeculator`，所以 Python 最终进入本项目的
+`propose()`。
+
+调用栈：
+
+```text
+NPUWorker.sample_tokens()
+    ↓
+GPUModelRunner.sample_tokens()
+    ↓
+self.speculator.propose(...)
+    ↓
+AscendExtractHiddenStatesSpeculator.propose()
+```
+
+### 6.12 第十一步：完整解释 `propose()`
+
+现在回到最重要的文件：
+
+```text
+vllm_ascend/worker/v2/spec_decode/extract_hidden_states/speculator.py
+└── AscendExtractHiddenStatesSpeculator.propose()
+```
+
+#### 处理 dummy run
+
+内存 profiling 或 graph 准备阶段没有真实请求：
+
+```python
+if dummy_run:
+    self._dummy_run(
+        num_tokens=input_batch.num_tokens_after_padding,
+        aclgraph_runtime_mode=CUDAGraphMode.NONE,
+        is_profile=is_profile,
+    )
+    return torch.zeros(
+        (input_batch.num_reqs, 1),
+        dtype=torch.int64,
+        device=self.device,
+    )
+```
+
+dummy run 只保持模型执行和 DP collective 对齐，不生成有意义的 draft token。
+
+#### 检查必要输入
+
+```python
+if aux_hidden_states is None:
+    raise ValueError(...)
+if slot_mappings is None:
+    raise ValueError(...)
+```
+
+没有 `aux_hidden_states` 就没有可保存的数据；没有 `slot_mappings` 就不知道应该写到
+cache 的哪个位置。
+
+#### 找到当前请求的 sampled token
+
+`idx_mapping` 把当前 batch 下标转换成全局 RequestState 下标：
+
+```python
+req_indices = input_batch.idx_mapping[
+    :input_batch.num_reqs
+].long()
+```
+
+已经完成采样的请求使用 `last_sampled`：
+
+```python
+sampled_token_ids = last_sampled[req_indices, 0]
+```
+
+仍在 prefill、还没有 sampled token 的请求使用 `next_prefill_tokens`：
+
+```python
+sampled_token_ids = torch.where(
+    num_sampled[:input_batch.num_reqs] > 0,
+    sampled_token_ids,
+    next_prefill_tokens[req_indices],
+).unsqueeze(1)
+```
+
+#### 组合多层 hidden states
+
+`aux_hidden_states` 的形式是：
+
+```text
+[
+  layer_2_hidden_states,
+  layer_14_hidden_states,
+  layer_26_hidden_states,
+]
+```
+
+每个 tensor 的 shape 是：
+
+```text
+[num_tokens_after_padding, hidden_size]
+```
+
+先用切片去掉 target graph padding，再 stack：
+
+```python
+stacked_hidden_states = torch.stack(
+    [
+        hidden_states[:input_batch.num_tokens]
+        for hidden_states in aux_hidden_states
+    ],
+    dim=1,
+)
+```
+
+得到：
+
+```text
+[num_tokens, num_selected_layers, hidden_size]
+```
+
+然后复制到预分配 buffer：
+
+```python
+self.hidden_states[:num_tokens].copy_(
+    stacked_hidden_states
+)
+```
+
+#### 决定 graph shape 并同步 DP/SP
+
+```python
+(
+    cudagraph_runtime_mode,
+    num_tokens_padded,
+    num_tokens_across_dp,
+) = self._dispatch_and_sync(num_tokens)
+```
+
+`_dispatch_and_sync()` 做三件事：
+
+1. SP 要求时把 token 数补齐到 TP size 的倍数；
+2. 根据 token 数选择 eager 或已捕获的 PIECEWISE graph；
+3. DP 大于 1 时让各 rank 使用兼容的 token 数和 graph mode。
+
+#### 重建 cache 写入 metadata
+
+```python
+common_attn_metadata = (
+    self._build_common_attn_metadata(
+        input_batch,
+        slot_mappings,
+    )
+)
+```
+
+该对象包含：
+
+```text
+query_start_loc：每个请求的 token 起点
+seq_lens：每个请求当前序列长度
+block_table_tensor：请求使用哪些 cache blocks
+slot_mapping：每个 token 写入哪个 slot
+positions：token 的位置编号
+```
+
+#### 执行 cache-only model
+
+```python
+self._run_cache_only_model(
+    num_tokens=num_tokens_padded,
+    common_attn_metadata=common_attn_metadata,
+    slot_mapping=self._get_slot_mapping(
+        num_tokens_padded,
+        layer_slot_mapping,
+    ),
+    cudagraph_runtime_mode=cudagraph_runtime_mode,
+    num_tokens_across_dp=num_tokens_across_dp,
+)
+```
+
+#### 返回 token
+
+```python
+return sampled_token_ids[:, :1]
+```
+
+extract 不预测新 token，所以直接返回目标模型已经采样出的 token。
+
+### 6.13 第十二阶段：`_run_cache_only_model()` 做什么
+
+首先把通用 metadata 转换成 cache-only layer metadata：
+
+```python
+metadata = self.attn_metadata_builder.build_for_drafting(
+    common_attn_metadata=common_attn_metadata,
+    draft_index=0,
+)
+```
+
+然后建立 forward context：
+
+```python
+with set_forward_context(
+    per_layer_attn_metadata,
+    self.vllm_config,
+    num_tokens=num_tokens,
+    num_tokens_across_dp=num_tokens_across_dp,
+    cudagraph_runtime_mode=cudagraph_runtime_mode,
+    slot_mapping=slot_mapping,
+):
+    self.model(
+        hidden_states=self.hidden_states[:num_tokens]
+    )
+```
+
+`set_forward_context()` 相当于把本轮运行说明放到一个上下文中。底层
+`CacheOnlyAttentionLayer` 可以从中取得：
+
+- 自己对应的 metadata；
+- slot mapping；
+- 当前 graph mode；
+- DP token 信息。
+
+### 6.14 第十三阶段：vLLM 通用 cache-only model
+
+接下来进入上游通用代码：
+
+```text
+vllm/model_executor/models/extract_hidden_states.py
+```
+
+调用栈：
+
+```text
+ExtractHiddenStatesModel.forward(hidden_states)
+    ↓
+CacheOnlyAttentionLayer.forward(to_cache)
+    ↓
+unified_kv_cache_update(to_cache, layer_name)
+    ↓
+attn_layer.impl.do_kv_cache_update(...)
+```
+
+`load_model()` 阶段已经把当前 v2 cache-only layer 实例的
+`do_kv_cache_update` 绑定为：
+
+```text
+_update_valid_hidden_state_slots()
+```
+
+这样只改变 v2 创建的这个 layer 实例，不修改 v1 Proposer，也不修改 vLLM 全局类。
+
+### 6.15 第十四阶段：过滤 padding 并写 cache
+
+graph、SP 或 DP 可能让：
+
+```text
+真实 token 数 < num_tokens_padded
+```
+
+补出来的 slot 使用：
+
+```text
+-1
+```
+
+但是 PyTorch 中 `-1` 表示最后一个位置，不表示跳过。如果直接写，会破坏 cache 最后
+一个 slot。
+
+所以 NPU 路径调用固定 shape Triton kernel：
+
+```text
+_update_valid_hidden_state_slots()
+    ↓
+_cache_hidden_states_kernel()
+```
+
+kernel 对每个 token 检查：
+
+```python
+valid = slot >= 0
+```
+
+只有 `valid=True` 才执行 `tl.store()`。真实 slot 的地址计算为：
+
+```text
+block_idx = slot // block_size
+block_offset = slot % block_size
+```
+
+然后根据 cache stride 写入：
+
+```text
+kv_cache[
+  block_idx,
+  block_offset,
+  selected_layer,
+  hidden_offset,
+]
+```
+
+使用固定 launch shape 和设备端 mask，是为了让 ACL graph capture 和 replay 时 tensor
+shape 保持不变。
+
+### 6.16 第十五阶段：KV Connector 返回结果
+
+`CacheOnlyAttentionLayer.forward()` 在 cache update 后会调用带
+`@maybe_transfer_kv_layer` 装饰器的 `dummy_attention()`。该装饰器通知 KV Connector
+当前 layer 已经写完。
+
+回到上游 Runner 的 `sample_tokens()` 末尾：
+
+```python
+kv_connector_output = self.kv_connector.post_forward(
+    finished_req_ids
+)
+model_runner_output.kv_connector_output = (
+    kv_connector_output
+)
+```
+
+`ExampleHiddenStatesConnector` 将 hidden states 保存为 safetensors，并在最终输出中提供：
+
+```text
+output.kv_transfer_params["hidden_states_path"]
+```
+
+### 6.17 ACL graph capture 单独调用栈
+
+正常运行调用 `propose()`；graph 捕获阶段走另一条入口：
+
+```text
+GPUModelRunner.capture_model()
+    ↓
+target cudagraph_manager.capture()
+    ↓
+self.speculator.capture(captured_attn_states)
+    ↓
+AscendExtractHiddenStatesSpeculator.capture()
+    ↓
+_dummy_run(
+    num_tokens,
+    slot_mappings=attention_state.slot_mappings,
+)
+    ↓
+_run_cache_only_model()
+```
+
+捕获时必须传真实结构的 slot mapping，否则捕获到的图可能不包含 cache write。
+
+普通 profiling 没有真实 slot mapping，`_dummy_run()` 会传空字典：
+
+```text
+slot_mapping={}
+```
+
+此时 `unified_kv_cache_update()` 找不到当前 layer mapping，会跳过 cache 写入，避免 dummy
+数据覆盖真实 cache。
+
+### 6.18 v2 总调用栈
+
+```text
+NPUWorker.init_device()
+    ↓
+NPUModelRunnerV2.__init__()
+    ↓
+Ascend init_speculator()
+    ↓
+AscendExtractHiddenStatesSpeculator.__init__()
+    ↓
+GPUModelRunner.load_model()
+    ├── 加载 target model
+    ├── 配置 aux hidden-state layers
+    └── speculator.load_model()
+    ↓
+get_kv_cache_spec()
+    ↓
+GPUModelRunner.initialize_kv_cache()
+    ├── speculator.init_cudagraph_manager()
+    ├── speculator.set_attn()
+    └── init_kv_cache()
+          ├── _allocate_kv_cache()
+          ├── _reshape_kv_cache_v2()
+          └── bind_kv_cache()
+    ↓
+GPUModelRunner.execute_model()
+    ↓
+TargetModel.forward()
     ↓
 (hidden_states, aux_hidden_states)
     ↓
-目标模型正常 sampling
-    ↓
-v2 runner 更新 RequestState
-    ↓
-ExtractHiddenStatesSpeculator.propose()
-    ├── 选择 last_sampled 或 next_prefill_tokens
-    ├── 去除 aux hidden states 的 graph padding
-    ├── 重建 CommonAttentionMetadata
-    ├── stack 多层 hidden states
-    ├── 执行 graph dispatch 和 DP/SP 协调
-    └── CacheOnlyAttentionLayer 写入 hidden-state cache
-    ↓
-KV Connector post_forward
-    ↓
-输出 hidden_states_path
+GPUModelRunner.sample_tokens()
+    ├── sample()
+    ├── postprocess()
+    └── speculator.propose()
+          ├── 选择 sampled token
+          ├── stack aux hidden states
+          ├── graph dispatch / DP / SP
+          ├── 构造 CommonAttentionMetadata
+          └── _run_cache_only_model()
+                ↓
+              ExtractHiddenStatesModel.forward()
+                ↓
+              CacheOnlyAttentionLayer.forward()
+                ↓
+              unified_kv_cache_update()
+                ↓
+              _cache_hidden_states_kernel()
+                ↓
+              hidden-state cache
+                ↓
+              KV Connector
+                ↓
+              hidden_states_path
 ```
 
 ## 7. 与 MTP 的边界
