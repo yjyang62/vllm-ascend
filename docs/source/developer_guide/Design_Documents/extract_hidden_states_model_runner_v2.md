@@ -198,8 +198,106 @@ hidden-state cache。
 
 #### 第五步：采样完成后进入 extract 专用分支
 
-文件：`vllm_ascend/worker/model_runner_v1.py`，
-`propose_draft_token_ids()`，约 1750-1779 行。
+`NPUModelRunner.propose_draft_token_ids()` 不是由 `execute_model()` 直接调用的，而是由
+`sample_tokens()` 中的局部函数调用。
+
+调用方文件：`vllm_ascend/worker/model_runner_v1.py`，
+`sample_tokens()`，约 2498-2513 行。
+
+```python
+def propose_draft_token_ids(sampled_token_ids):
+    assert spec_decode_common_attn_metadata is not None
+    self._draft_token_ids = self.propose_draft_token_ids(
+        sampled_token_ids,
+        self.input_batch.sampling_metadata,
+        scheduler_output,
+        spec_decode_metadata,
+        spec_decode_common_attn_metadata,
+        positions,
+        scheduler_output.total_num_scheduled_tokens,
+        hidden_states,
+        aux_hidden_states,
+        sample_hidden_states,
+        batch_desc,
+    )
+    self._copy_draft_token_ids_to_cpu(scheduler_output)
+```
+
+注意这里有两个名字相同、但作用不同的函数：
+
+```text
+sample_tokens() 内部的 propose_draft_token_ids()
+    ↓ 调用
+self.propose_draft_token_ids()
+    ↓ 实际是
+NPUModelRunner.propose_draft_token_ids()
+```
+
+extract 模式会被归类为 padded-batch drafter，判断代码约在 2518-2524 行：
+
+```python
+use_padded_batch = (
+    self.speculative_config.use_eagle()
+    or self.speculative_config.uses_draft_model()
+    or self.speculative_config.uses_extract_hidden_states()
+    or self.speculative_config.use_ngram_gpu()
+) and not self.speculative_config.disable_padded_drafter_batch
+```
+
+在通常的非 PP 场景中，真正触发局部函数调用的位置约在 2557-2560 行：
+
+```python
+if use_padded_batch and not early_pp_padded_drafter:
+    propose_draft_token_ids(
+        sampler_output.sampled_token_ids
+    )
+```
+
+因此通常的完整调用关系是：
+
+```text
+NPUWorker.sample_tokens()
+    ↓
+NPUModelRunner.sample_tokens()
+    ↓
+self._sample()
+    ↓ 得到 sampler_output.sampled_token_ids
+sample_tokens() 局部函数 propose_draft_token_ids(
+    sampler_output.sampled_token_ids
+)
+    ↓
+self.propose_draft_token_ids(...)
+    ↓
+NPUModelRunner.propose_draft_token_ids(...)
+    ↓
+uses_extract_hidden_states() 分支
+```
+
+如果是 pipeline parallel 且需要提前运行 padded drafter，则调用发生在约
+2530-2534 行：
+
+```python
+if early_pp_padded_drafter:
+    with record_function_or_nullcontext("draft_token"):
+        propose_draft_token_ids(
+            sampler_output.sampled_token_ids
+        )
+```
+
+只有非 padded-batch 的 speculative method 才会在 bookkeeping 之后使用
+`valid_sampled_token_ids` 调用，约在 2561-2564 行：
+
+```python
+if self.speculative_config and not use_padded_batch:
+    propose_draft_token_ids(valid_sampled_token_ids)
+```
+
+extract 默认属于 padded-batch，所以通常走
+`sampler_output.sampled_token_ids` 那条路径，不走最后这个非 padded 分支。
+
+被调用方文件：`vllm_ascend/worker/model_runner_v1.py`，
+成员方法 `NPUModelRunner.propose_draft_token_ids()`，其 extract 分支约
+1750-1779 行。
 
 ```python
 elif self.speculative_config.uses_extract_hidden_states():
