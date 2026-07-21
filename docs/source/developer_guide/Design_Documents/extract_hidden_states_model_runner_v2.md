@@ -1183,6 +1183,107 @@ vllm_ascend/worker/v2/model_runner.py
 上游 `GPUModelRunner.__init__()` 会先调用上游 `init_speculator()`，但上游 v2
 factory 不支持 `extract_hidden_states`，会直接抛出 `NotImplementedError`。
 
+#### 为什么不能只执行子类 `__init__()`
+
+“父类不支持 extract”只表示父类的 **Speculator factory 不认识这个 method**，不表示
+父类的整个 Model Runner 都不能使用。
+
+`GPUModelRunner` 父类仍然负责初始化绝大多数通用功能，例如：
+
+```text
+模型配置：
+  self.model_config
+  self.cache_config
+  self.speculative_config
+
+并行配置：
+  self.use_pp
+  self.dp_size
+  self.dp_rank
+  self.dcp_size
+
+请求和输入：
+  self.req_states
+  self.input_buffers
+
+采样：
+  self.sampler
+  self.rejection_sampler
+  self.num_speculative_steps
+
+运行环境：
+  stream、event、KV Connector、LoRA、EPLB、
+  graph 配置、最大 token 数、最大请求数
+```
+
+子类后续还直接继承父类的：
+
+```text
+load_model()
+execute_model()
+sample_tokens()
+capture_model()
+```
+
+这些方法都会使用上面的字段。如果完全不调用 `super().__init__()`，代码可能在后面出现：
+
+```text
+AttributeError: 没有 self.req_states
+AttributeError: 没有 self.sampler
+AttributeError: 没有 self.compilation_config
+```
+
+或者更隐蔽地使用错误的 speculative token 数、buffer shape 和并行状态。
+
+可以把它理解为：
+
+```text
+父类初始化一共做 100 件通用工作；
+其中只有“创建 extract Speculator”这一件不支持。
+
+正确做法：
+  保留另外 99 件通用工作，
+  只跳过不支持的那一件，
+  然后由子类补上原生 Ascend Speculator。
+
+错误做法：
+  因为一件事不支持，就完全不调用父类，
+  再在子类复制另外 99 件工作。
+```
+
+Python 不会在创建子类时自动替你执行父类初始化。子类如果不显式调用
+`super().__init__()`，就必须自己复制和维护整套 `GPUModelRunner.__init__()`，这不仅
+代码量很大，上游每次新增字段时也容易遗漏。
+
+父类初始化中与 speculative decoding 相关的逻辑可以简化为：
+
+```python
+self.speculator = None
+self.num_speculative_steps = 0
+self.use_aux_hidden_state_outputs = False
+
+if self.speculative_config is not None:
+    self.num_speculative_steps = (
+        self.speculative_config.num_speculative_tokens
+    )
+    self.speculator = init_speculator(
+        self.vllm_config,
+        self.device,
+    )
+
+# 后面还会根据 num_speculative_steps 创建
+# RequestState、Sampler、RejectionSampler 等。
+```
+
+这里必须保留：
+
+```python
+self.num_speculative_steps = ...
+```
+
+以及后面的 RequestState、Sampler 等初始化；只需要让这一次
+`init_speculator()` 暂时返回 `None`。
+
 解决方案是在执行父类初始化时暂时跳过 extract speculator 的创建，父类初始化完成后再
 用 Ascend factory 创建：
 
@@ -1193,6 +1294,61 @@ factory 不支持 `extract_hidden_states`，会直接抛出 `NotImplementedError
     ↓
 调用 Ascend init_speculator(vllm_config, device, runner=self)
 ```
+
+对应代码：
+
+```python
+with (
+    torch_cuda_wrapper(),
+    upstream_extract_hidden_states_init_wrapper(vllm_config),
+):
+    super().__init__(vllm_config, device)
+```
+
+其中：
+
+```text
+torch_cuda_wrapper()
+  处理 Ascend 对上游 CUDA API 的兼容。
+
+upstream_extract_hidden_states_init_wrapper()
+  只在 super().__init__() 执行期间，
+  暂时让上游 extract factory 返回 None。
+
+super().__init__()
+  完成所有通用 Runner 初始化。
+```
+
+`super().__init__()` 返回后，子类再创建正确的原生 v2 Speculator：
+
+```python
+self.speculator = init_speculator(
+    self.vllm_config,
+    self.device,
+    runner=self,
+)
+```
+
+子类确实会替换父类创建的少数对象：
+
+```python
+del self.req_states
+del self.input_buffers
+del self.speculator
+```
+
+原因是 Ascend 需要带额外字段的 `AscendRequestState` 和 `AscendInputBuffers`，并需要
+Ascend 自己的 Speculator。除此之外，父类初始化的大量通用字段仍然全部保留并继续使用。
+
+更理想的上游接口是父类调用一个可以被子类 override 的方法，例如：
+
+```python
+self.speculator = self.create_speculator()
+```
+
+这样 Ascend 子类只需要 override `create_speculator()`，不需要临时 wrapper。但当前
+上游父类直接调用模块级 `init_speculator()`，不是虚方法，因此现阶段使用作用域很小的
+context manager 绕过这一个调用。
 
 这个处理只影响 extract 模式，不改变 MTP、EAGLE、DSpark 或 DFlash 的初始化路径。
 
