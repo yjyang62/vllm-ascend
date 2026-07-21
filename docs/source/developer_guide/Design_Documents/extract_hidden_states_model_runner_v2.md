@@ -389,6 +389,183 @@ CacheOnlyAttentionLayer 写入 hidden-state cache
 KV Connector 保存或传输 hidden states
 ```
 
+#### v1 初始化调用栈
+
+下面的调用栈描述 Worker 创建 runner 和 proposer 的过程。`类名.方法名()` 后括号内是
+对应文件。
+
+```text
+NPUWorker.init_device()
+  (vllm_ascend/worker/worker.py)
+    ↓
+NPUModelRunner.__init__()
+  (vllm_ascend/worker/model_runner_v1.py)
+    ↓
+NPUModelRunner._set_up_drafter()
+  (vllm_ascend/worker/model_runner_v1.py)
+    ↓
+NPUModelRunner._get_drafter()
+  (vllm_ascend/worker/model_runner_v1.py)
+    ↓
+get_spec_decode_method(
+    method="extract_hidden_states"
+)
+  (vllm_ascend/spec_decode/__init__.py)
+    ↓
+AscendExtractHiddenStatesProposer.__init__()
+  (vllm_ascend/spec_decode/extract_hidden_states_proposer.py)
+    ↓
+ExtractHiddenStatesProposer.__init__()
+  (vllm/v1/spec_decode/extract_hidden_states.py)
+```
+
+模型加载在 Worker 的另一个阶段执行：
+
+```text
+NPUWorker.load_model()
+  (vllm_ascend/worker/worker.py)
+    ↓
+NPUModelRunner.load_model()
+  (vllm_ascend/worker/model_runner_v1.py)
+    ├── 加载 target model
+    ├── self.drafter.load_model(self.model)
+    │     ↓
+    │   ExtractHiddenStatesProposer.load_model()
+    │     (vllm/v1/spec_decode/extract_hidden_states.py)
+    │     ↓
+    │   get_model(draft_model_config)
+    │     ↓
+    │   ExtractHiddenStatesModel
+    │     ↓
+    │   CacheOnlyAttentionLayer
+    │
+    └── self.model.set_aux_hidden_state_layers(aux_layers)
+          配置 target model 需要输出的中间层
+```
+
+#### v1 KV cache 初始化调用栈
+
+加载 target model 和 cache-only model 后，Engine 会查询所有 layer 的 KV cache
+规格，再分配实际 cache：
+
+```text
+NPUWorker.get_kv_cache_spec()
+  (vllm_ascend/worker/worker.py)
+    ↓
+NPUModelRunner.get_kv_cache_spec()
+  (vllm_ascend/worker/model_runner_v1.py)
+    ↓
+遍历 AttentionLayerBase
+    ↓
+发现 CacheOnlyAttentionLayer
+    ↓
+CacheOnlyAttentionLayer.get_kv_cache_spec()
+  (vllm/model_executor/models/extract_hidden_states.py)
+    ↓
+生成 HiddenStateCacheSpec
+```
+
+分配阶段：
+
+```text
+NPUWorker.initialize_from_config()
+  (vllm_ascend/worker/worker.py)
+    ↓
+NPUModelRunner.initialize_kv_cache()
+  (vllm_ascend/worker/model_runner_v1.py)
+    ↓
+NPUModelRunner.initialize_kv_cache_tensors()
+    ↓
+NPUModelRunner._allocate_kv_cache_tensors()
+    ↓
+为 HiddenStateCacheSpec 分配单 tensor
+    ↓
+reshape 为
+[num_blocks, block_size, num_layers, hidden_size]
+    ↓
+bind_kv_cache()
+    ↓
+CacheOnlyAttentionLayer.kv_cache
+```
+
+#### v1 单步推理调用栈
+
+v1 将模型执行和采样拆成两个 Worker 调用。`execute_model()` 先执行 target model 并
+临时保存结果，`sample_tokens()` 再完成采样和 hidden-state 提取。
+
+```text
+NPUWorker.execute_model()
+  (vllm_ascend/worker/worker.py)
+    ↓
+NPUModelRunner.execute_model()
+  (vllm_ascend/worker/model_runner_v1.py)
+    ↓
+NPUModelRunner._model_forward()
+    ↓
+TargetModel.forward()
+    ↓
+(hidden_states, aux_hidden_states)
+    ↓
+保存到 self.execute_model_state
+```
+
+随后执行：
+
+```text
+NPUWorker.sample_tokens()
+  (vllm_ascend/worker/worker.py)
+    ↓
+NPUModelRunner.sample_tokens()
+  (vllm_ascend/worker/model_runner_v1.py)
+    ↓
+从 self.execute_model_state 取出
+hidden_states 和 aux_hidden_states
+    ↓
+NPUModelRunner._sample()
+    ↓
+得到 sampler_output.sampled_token_ids
+    ↓
+sample_tokens() 内部的 propose_draft_token_ids()
+    ↓
+NPUModelRunner.propose_draft_token_ids()
+  (vllm_ascend/worker/model_runner_v1.py)
+    ↓
+uses_extract_hidden_states() 分支
+    ↓
+AscendExtractHiddenStatesProposer.propose()
+  继承自：
+  vllm/v1/spec_decode/extract_hidden_states.py
+    ↓
+torch.stack(target_hidden_states, dim=1)
+    ↓
+ExtractHiddenStatesModel.forward()
+  (vllm/model_executor/models/extract_hidden_states.py)
+    ↓
+CacheOnlyAttentionLayer.forward()
+    ↓
+unified_kv_cache_update()
+    ↓
+CacheOnlyAttentionImpl.do_kv_cache_update()
+    ↓
+basic_cache()
+    ↓
+hidden states 写入 cache
+    ↓
+dummy_attention()
+    ↓
+@maybe_transfer_kv_layer
+    ↓
+ExampleHiddenStatesConnector
+    ↓
+生成 hidden_states_path
+```
+
+这里容易混淆的地方是存在两个同名方法：
+
+1. `sample_tokens()` 内部定义的局部函数 `propose_draft_token_ids()`，负责整理参数；
+2. `NPUModelRunner.propose_draft_token_ids()`，负责根据 speculative method 进入
+   extract、EAGLE、MTP 等具体分支。
+
 ### 3.3 v1 KV cache
 
 v1 在 `get_kv_cache_spec()` 中识别 `CacheOnlyAttentionLayer`，并生成
