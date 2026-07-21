@@ -777,8 +777,8 @@ vllm_ascend/worker/model_runner_v1.py
 └── NPUModelRunner.propose_draft_token_ids()
 ```
 
-也就是说，v1 Runner 知道 extract 的具体处理细节。这里的“具体处理细节”是指 Runner
-自己写了以下代码：
+准确地说，v1 Runner 知道的是 extract 的**调用和编排流程**，不是所有底层实现。
+Runner 自己写了以下代码：
 
 ```text
 判断当前 method 是不是 extract_hidden_states
@@ -798,13 +798,51 @@ vllm_ascend/worker/model_runner_v1.py
 `vllm_ascend/worker/model_runner_v1.py` 的
 `NPUModelRunner.propose_draft_token_ids()` extract 分支中看到。
 
+真正的实现分成三层：
+
+```text
+第一层：Ascend v1 Runner
+  文件：vllm_ascend/worker/model_runner_v1.py
+  负责：
+    - 什么时候执行 extract
+    - 从哪里取得 aux_hidden_states
+    - 传哪些参数
+    - 调用完成后如何更新请求状态
+
+第二层：vLLM ExtractHiddenStatesProposer
+  文件：vllm/v1/spec_decode/extract_hidden_states.py
+  负责：
+    - stack 多层 hidden states
+    - 构造 cache-only attention metadata
+    - 执行 ExtractHiddenStatesModel
+    - 返回 sampled token 作为 draft token
+
+第三层：vLLM CacheOnlyAttentionLayer
+  文件：vllm/model_executor/models/extract_hidden_states.py
+  负责：
+    - 根据 slot mapping 找到 cache 地址
+    - 真正把 hidden states 写入 cache
+    - 触发 KV Connector
+```
+
+所以“细节不是在 vLLM 里面吗”的答案是：
+
+```text
+底层写入细节确实在 vLLM 里；
+但 Ascend v1 Runner 中仍然存在 extract 专用的调用和编排代码。
+```
+
+迁移到 v2 时，不需要重新实现通用的 `ExtractHiddenStatesModel` 和
+`CacheOnlyAttentionLayer`；需要迁移的是原来放在 v1 Runner/Proposer 路径中的
+Ascend 编排和 v2 生命周期接入。
+
 v2 中，Runner 不再写 extract 专用分支。它只做统一调用：
 
 ```python
 draft_tokens = self.speculator.propose(...)
 ```
 
-然后由具体的 `AscendExtractHiddenStatesSpeculator` 自己处理：
+然后由具体的 `AscendExtractHiddenStatesSpeculator` 处理 v2 侧的编排：
 
 ```text
 vllm_ascend/worker/v2/spec_decode/extract_hidden_states/speculator.py
@@ -814,8 +852,9 @@ vllm_ascend/worker/v2/spec_decode/extract_hidden_states/speculator.py
 直白地说：
 
 ```text
-v1：Runner 自己处理，然后调用 Proposer。
-v2：Runner 只负责转交，Speculator 完成全部 extract 工作。
+v1：Runner 包含 extract 专用编排，然后调用 vLLM Proposer。
+v2：Runner 统一转交给原生 v2 Speculator；
+    通用模型和 cache 写入仍然使用 vLLM 提供的组件。
 ```
 
 这就是文档中“Drafter/Proposer”和“Speculator”的含义。它们都是负责 speculative
