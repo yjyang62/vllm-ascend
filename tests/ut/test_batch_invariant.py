@@ -142,6 +142,23 @@ class TestBatchInvariant:
             batch_invariant.override_envs_for_invariance.assert_not_called()
             batch_invariant.enable_batch_invariant_mode.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "has_triton,has_ascendc,missing_backend",
+        [(False, True, "Triton"), (True, False, "AscendC")],
+    )
+    def test_enable_batch_invariant_mode_warns_about_missing_backend(self, has_triton, has_ascendc, missing_backend):
+        mock_library = MagicMock()
+        batch_invariant.torch.library.Library = MagicMock(return_value=mock_library)
+        if has_ascendc:
+            batch_invariant.torch.ops.batch_invariant_ops = MagicMock()
+
+        with patch.object(batch_invariant, "HAS_TRITON", has_triton), patch.object(
+            batch_invariant, "HAS_ASCENDC_BATCH_INVARIANT", has_ascendc
+        ), patch.object(batch_invariant.logger, "warning_once") as mock_warning_once:
+            batch_invariant.enable_batch_invariant_mode()
+
+        assert missing_backend in mock_warning_once.call_args.args[0]
+
     @patch("vllm_ascend.batch_invariant.torch_npu")
     def test_add_rms_norm(self, mock_torch_npu):
         """Test add_rms_norm function"""

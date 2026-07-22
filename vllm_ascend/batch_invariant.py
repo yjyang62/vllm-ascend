@@ -110,6 +110,11 @@ def enable_batch_invariant_mode():
         _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "NPU")
+    else:
+        logger.warning_once(
+            "VLLM_BATCH_INVARIANT is enabled but Triton is unavailable; addmm/bmm/softmax "
+            "still use default kernels, so rollout logprobs may vary with batch size."
+        )
 
     # Register operators implemented in Ascend batch-invariant ops in priority.
     if HAS_ASCENDC_BATCH_INVARIANT:
@@ -125,15 +130,19 @@ def enable_batch_invariant_mode():
         torch_npu.npu_add_rms_norm = add_rms_norm
         # torch.sum can't be replaced by dispatch logic, so we patch it directly.
         torch.sum = reduce_sum
+    else:
+        logger.warning_once(
+            "VLLM_BATCH_INVARIANT is enabled but AscendC batch-invariant ops are unavailable; "
+            "attention, reduce-sum, and fused RMSNorm may still be batch-size dependent."
+        )
+        # register triton implementations if ascendc is not available.
+        if HAS_TRITON:
+            _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "NPU")
+            _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "NPU")
 
-    # register triton implementations if ascendc is not available.
-    elif HAS_TRITON:
-        _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "NPU")
-        _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "NPU")
-
-        # linear call matmul internally, so register linear only when ascendc
-        # is not available. it will get better performance with ascendc.
-        _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "NPU")
+            # linear call matmul internally, so register linear only when ascendc
+            # is not available. it will get better performance with ascendc.
+            _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "NPU")
 
 
 def init_batch_invariance():
@@ -150,13 +159,10 @@ def init_batch_invariance():
     """
     if envs.VLLM_BATCH_INVARIANT:
         if HAS_TRITON or HAS_ASCENDC_BATCH_INVARIANT:
-            logger.info(
-                "Enabling batch-invariant mode for vLLM on Ascend NPU.",
-            )
             override_envs_for_invariance()
             enable_batch_invariant_mode()
         else:
             logger.warning(
-                "Batch-invariant mode requested but Triton or AscendC batch-invariant "
-                "ops is not available.skipping batch-invariant initialization."
+                "VLLM_BATCH_INVARIANT is enabled but no batch-invariant kernel backend is installed. "
+                "Training-inference logprob parity is not active and RL importance ratios may be wrong."
             )

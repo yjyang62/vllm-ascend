@@ -50,24 +50,24 @@ class AscendSampler(Sampler):
         output_token_ids: list[list[int]],
     ) -> torch.Tensor:
         """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
-        if not HAS_TRITON:
-            logger.warning_once(
-                "[sample/sampler] Triton not available, falling back to vLLM default "
-                "penalty implementation. Penalty performance may be degraded on NPU. "
+        if HAS_TRITON:
+            if sampling_metadata.no_penalties:
+                return logits
+            assert sampling_metadata.prompt_token_ids is not None
+            return apply_all_penalties(
+                logits,
+                sampling_metadata.prompt_token_ids,
+                sampling_metadata.presence_penalties,
+                sampling_metadata.frequency_penalties,
+                sampling_metadata.repetition_penalties,
+                output_token_ids,
             )
-            return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
 
-        if sampling_metadata.no_penalties:
-            return logits
-        assert sampling_metadata.prompt_token_ids is not None
-        return apply_all_penalties(
-            logits,
-            sampling_metadata.prompt_token_ids,
-            sampling_metadata.presence_penalties,
-            sampling_metadata.frequency_penalties,
-            sampling_metadata.repetition_penalties,
-            output_token_ids,
+        logger.warning_once(
+            "[sample/sampler] Triton not available, falling back to vLLM default "
+            "penalty implementation. Penalty performance may be degraded on NPU. "
         )
+        return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
 
     def __init__(self, logprobs_mode=DEFAULT_LOGPROBS_MODE):
         # TODO: support logprobs_mode in vllm-ascend
@@ -102,6 +102,13 @@ class AscendSampler(Sampler):
             target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
             return target_argmax
         else:
+            tp_group = get_tp_group()
+            if tp_group.world_size <= 1:
+                return logits.argmax(dim=-1).view(-1)
+            logger.warning_once(
+                "Tensor-parallel greedy sampling without enable_reduce_sample uses per-shard "
+                "argmax instead of the global argmax; rollout tokens and logprobs may not match training."
+            )
             return logits.argmax(dim=-1).view(-1)
 
 
