@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 from vllm.config import VllmConfig
 from vllm.config.weight_transfer import WeightTransferConfig
+from vllm.logger import logger
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
@@ -156,6 +157,15 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
         # Unique rank across all DP groups
         worker_rank = dp_rank * world_size_per_dp + rank_within_dp
         rank = worker_rank + init_info.rank_offset
+        if init_info.world_size != world_size_per_dp * self.parallel_config.data_parallel_size:
+            logger.warning_once(
+                "HCCL weight-transfer world_size=%s does not match vLLM workers "
+                "(data_parallel_size=%s * world_size_per_dp=%s). Each worker may receive the wrong "
+                "weight shard without error.",
+                init_info.world_size,
+                self.parallel_config.data_parallel_size,
+                world_size_per_dp,
+            )
         # Create stateless process group
         device = torch.accelerator.current_device_index()
         self.model_update_group = HCCLWeightTransferEngine._stateless_init_process_group(

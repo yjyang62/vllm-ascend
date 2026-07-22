@@ -150,13 +150,20 @@ def init_batch_invariance():
     """
     if envs.VLLM_BATCH_INVARIANT:
         if HAS_TRITON or HAS_ASCENDC_BATCH_INVARIANT:
-            logger.info(
-                "Enabling batch-invariant mode for vLLM on Ascend NPU.",
-            )
+            if not HAS_TRITON:
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT is enabled but Triton is unavailable; addmm/bmm/softmax "
+                    "still use default kernels, so rollout logprobs may vary with batch size."
+                )
+            if not HAS_ASCENDC_BATCH_INVARIANT:
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT is enabled but AscendC batch-invariant ops are unavailable; "
+                    "attention, reduce-sum, and fused RMSNorm may still be batch-size dependent."
+                )
             override_envs_for_invariance()
             enable_batch_invariant_mode()
         else:
             logger.warning(
-                "Batch-invariant mode requested but Triton or AscendC batch-invariant "
-                "ops is not available.skipping batch-invariant initialization."
+                "VLLM_BATCH_INVARIANT is enabled but no batch-invariant kernel backend is installed. "
+                "Training-inference logprob parity is not active and RL importance ratios may be wrong."
             )

@@ -211,6 +211,11 @@ class NPUWorker(WorkerBase):
                     return
 
     def sleep(self, level: int = 1) -> None:
+        if level == 2:
+            logger.warning_once(
+                "Sleep level=2 discards all CaMem-pooled tensors (model weights and KV cache are not "
+                "backed up). Serving after wake_up without reloading weights will return incorrect results."
+            )
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -242,11 +247,22 @@ class NPUWorker(WorkerBase):
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
                 "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
             )
+        if tags is not None and "kv_cache" not in tags:
+            logger.warning_once(
+                "wake_up(tags=%s) did not restore KV cache memory. Inference before "
+                "wake_up(tags=['kv_cache']) may return incorrect continuations.",
+                tags,
+            )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
+        if self.vllm_config.quant_config is not None and (tags is None or "weights" in tags):
+            logger.warning_once(
+                "Quantized models skip post-sleep MoE weight layout correction during wake_up. "
+                "If logits drift after sleep, reload weights via checkpoint-format weight update."
+            )
         if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
             for name, param in model.named_parameters():
                 if "w2_weight" in name and param.shape[2] == hidden_size:
@@ -307,6 +323,13 @@ class NPUWorker(WorkerBase):
             )
 
         self._check_nz_disabled()
+
+        if not is_checkpoint_format:
+            logger.warning_once(
+                "is_checkpoint_format=false loads weights via param.copy_ only and skips "
+                "finalize_layerwise_reload. Quantized, FRACTAL_NZ, or tensor-parallel layouts "
+                "may be wrong even when shapes match."
+            )
 
         if is_checkpoint_format:
             from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
@@ -591,6 +614,11 @@ class NPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        if self._weight_update_active:
+            logger.warning_once(
+                "Inference is running while a layerwise weight update is in progress. "
+                "Concurrent forwards may mix old and new weights and return incorrect results."
+            )
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()

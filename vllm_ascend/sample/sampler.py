@@ -102,6 +102,12 @@ class AscendSampler(Sampler):
             target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
             return target_argmax
         else:
+            tp_group = get_tp_group()
+            if tp_group.world_size > 1:
+                logger.warning_once(
+                    "Tensor-parallel greedy sampling without enable_reduce_sample uses per-shard "
+                    "argmax instead of the global argmax; rollout tokens and logprobs may not match training."
+                )
             return logits.argmax(dim=-1).view(-1)
 
 

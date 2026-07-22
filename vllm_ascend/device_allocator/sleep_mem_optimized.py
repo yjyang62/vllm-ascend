@@ -120,6 +120,11 @@ class AclGraphSleepWakeupManager:
 
     def wakeup(self, tags: list[str] | None = None) -> None:
         if tags is not None and "kv_cache" not in tags:
+            logger.warning_once(
+                "ACL graphs were cleared during sleep and are not recaptured for wake_up(tags=%s). "
+                "Inference before wake_up(tags=['kv_cache']) may return incorrect results.",
+                tags,
+            )
             # Level-2 wakeup restores weights before external weight loading;
             # recapture graphs only after KV cache is restored.
             return
