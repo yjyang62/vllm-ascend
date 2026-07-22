@@ -211,14 +211,13 @@ class NPUWorker(WorkerBase):
                     return
 
     def sleep(self, level: int = 1) -> None:
+        free_bytes_before_sleep = torch.npu.mem_get_info()[0]
+        # Save the buffers before level 2 sleep
         if level == 2:
             logger.warning_once(
                 "Sleep level=2 discards all CaMem-pooled tensors (model weights and KV cache are not "
                 "backed up). Serving after wake_up without reloading weights will return incorrect results."
             )
-        free_bytes_before_sleep = torch.npu.mem_get_info()[0]
-        # Save the buffers before level 2 sleep
-        if level == 2:
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
@@ -247,40 +246,51 @@ class NPUWorker(WorkerBase):
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
                 "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
             )
-        if tags is not None and "kv_cache" not in tags:
+
+        partial_wake = tags is not None and "kv_cache" not in tags
+        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
+        if partial_wake:
             logger.warning_once(
                 "wake_up(tags=%s) did not restore KV cache memory. Inference before "
                 "wake_up(tags=['kv_cache']) may return incorrect continuations.",
                 tags,
             )
+            if cleanup_enabled:
+                logger.warning_once(
+                    "ACL graphs were cleared during sleep and are not recaptured for wake_up(tags=%s). "
+                    "Inference before wake_up(tags=['kv_cache']) may return incorrect results.",
+                    tags,
+                )
+
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
         hidden_size = self.vllm_config.model_config.hf_text_config.hidden_size
         model = self.model_runner.model
-        if self.vllm_config.quant_config is not None and (tags is None or "weights" in tags):
-            logger.warning_once(
-                "Quantized models skip post-sleep MoE weight layout correction during wake_up. "
-                "If logits drift after sleep, reload weights via checkpoint-format weight update."
-            )
-        if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
-            for name, param in model.named_parameters():
-                if "w2_weight" in name and param.shape[2] == hidden_size:
-                    parts = name.split(".")
-                    param_name = parts[-1]
-                    parent_module = model.get_submodule(".".join(parts[:-1]))
+        if tags is None or "weights" in tags:
+            if self.vllm_config.quant_config is not None:
+                logger.warning_once(
+                    "Quantized models skip post-sleep MoE weight layout correction during wake_up. "
+                    "If logits drift after sleep, reload weights via checkpoint-format weight update."
+                )
+            else:
+                for name, param in model.named_parameters():
+                    if "w2_weight" in name and param.shape[2] == hidden_size:
+                        parts = name.split(".")
+                        param_name = parts[-1]
+                        parent_module = model.get_submodule(".".join(parts[:-1]))
 
-                    w2_data = param.transpose(1, 2)
-                    w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
-                    setattr(parent_module, param_name, w2_data)
-                elif "w13_weight" in name and param.shape[1] == hidden_size:
-                    parts = name.split(".")
-                    param_name = parts[-1]
-                    parent_module = model.get_submodule(".".join(parts[:-1]))
+                        w2_data = param.transpose(1, 2)
+                        w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
+                        setattr(parent_module, param_name, w2_data)
+                    elif "w13_weight" in name and param.shape[1] == hidden_size:
+                        parts = name.split(".")
+                        param_name = parts[-1]
+                        parent_module = model.get_submodule(".".join(parts[:-1]))
 
-                    w13_data = param.transpose(1, 2)
-                    w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
-                    setattr(parent_module, param_name, w13_data)
+                        w13_data = param.transpose(1, 2)
+                        w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
+                        setattr(parent_module, param_name, w13_data)
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
@@ -288,7 +298,6 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
 
@@ -324,19 +333,18 @@ class NPUWorker(WorkerBase):
 
         self._check_nz_disabled()
 
-        if not is_checkpoint_format:
-            logger.warning_once(
-                "is_checkpoint_format=false loads weights via param.copy_ only and skips "
-                "finalize_layerwise_reload. Quantized, FRACTAL_NZ, or tensor-parallel layouts "
-                "may be wrong even when shapes match."
-            )
-
         if is_checkpoint_format:
             from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
 
             model = self.model_runner.model
             with torch.device(self.device):
                 initialize_layerwise_reload(model)
+        else:
+            logger.warning_once(
+                "is_checkpoint_format=false loads weights via param.copy_ only and skips "
+                "finalize_layerwise_reload. Quantized, FRACTAL_NZ, or tensor-parallel layouts "
+                "may be wrong even when shapes match."
+            )
 
         self._is_checkpoint_format = is_checkpoint_format
         self._weight_update_active = True

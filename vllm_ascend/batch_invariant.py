@@ -104,6 +104,17 @@ def enable_batch_invariant_mode():
         HAS_ASCENDC_BATCH_INVARIANT,
     )
 
+    if not HAS_TRITON:
+        logger.warning_once(
+            "VLLM_BATCH_INVARIANT is enabled but Triton is unavailable; addmm/bmm/softmax "
+            "still use default kernels, so rollout logprobs may vary with batch size."
+        )
+    if not HAS_ASCENDC_BATCH_INVARIANT:
+        logger.warning_once(
+            "VLLM_BATCH_INVARIANT is enabled but AscendC batch-invariant ops are unavailable; "
+            "attention, reduce-sum, and fused RMSNorm may still be batch-size dependent."
+        )
+
     # Register operators only implemented in triton.
     if HAS_TRITON:
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "NPU")
@@ -150,16 +161,6 @@ def init_batch_invariance():
     """
     if envs.VLLM_BATCH_INVARIANT:
         if HAS_TRITON or HAS_ASCENDC_BATCH_INVARIANT:
-            if not HAS_TRITON:
-                logger.warning_once(
-                    "VLLM_BATCH_INVARIANT is enabled but Triton is unavailable; addmm/bmm/softmax "
-                    "still use default kernels, so rollout logprobs may vary with batch size."
-                )
-            if not HAS_ASCENDC_BATCH_INVARIANT:
-                logger.warning_once(
-                    "VLLM_BATCH_INVARIANT is enabled but AscendC batch-invariant ops are unavailable; "
-                    "attention, reduce-sum, and fused RMSNorm may still be batch-size dependent."
-                )
             override_envs_for_invariance()
             enable_batch_invariant_mode()
         else:

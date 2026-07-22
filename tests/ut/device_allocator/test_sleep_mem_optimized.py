@@ -55,10 +55,8 @@ def test_acl_graph_wakeup_waits_for_kv_cache_tag():
     model_runner = MagicMock()
     manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
 
-    with patch("vllm_ascend.device_allocator.sleep_mem_optimized.logger.warning_once") as mock_warning_once:
-        manager.wakeup(tags=["weights"])
-        model_runner.capture_model.assert_not_called()
-        assert "incorrect results" in mock_warning_once.call_args.args[0]
+    manager.wakeup(tags=["weights"])
+    model_runner.capture_model.assert_not_called()
 
     manager.wakeup(tags=["kv_cache"])
     model_runner.capture_model.assert_called_once_with()

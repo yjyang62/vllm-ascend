@@ -146,18 +146,16 @@ class TestBatchInvariant:
         "has_triton,has_ascendc,missing_backend",
         [(False, True, "Triton"), (True, False, "AscendC")],
     )
-    def test_init_batch_invariance_warns_about_missing_backend(self, has_triton, has_ascendc, missing_backend):
-        import vllm.envs as envs
+    def test_enable_batch_invariant_mode_warns_about_missing_backend(self, has_triton, has_ascendc, missing_backend):
+        mock_library = MagicMock()
+        batch_invariant.torch.library.Library = MagicMock(return_value=mock_library)
+        if has_ascendc:
+            batch_invariant.torch.ops.batch_invariant_ops = MagicMock()
 
-        with (
-            patch.object(envs, "VLLM_BATCH_INVARIANT", True),
-            patch.object(batch_invariant, "HAS_TRITON", has_triton),
-            patch.object(batch_invariant, "HAS_ASCENDC_BATCH_INVARIANT", has_ascendc),
-            patch.object(batch_invariant, "override_envs_for_invariance"),
-            patch.object(batch_invariant, "enable_batch_invariant_mode"),
-            patch.object(batch_invariant.logger, "warning_once") as mock_warning_once,
-        ):
-            batch_invariant.init_batch_invariance()
+        with patch.object(batch_invariant, "HAS_TRITON", has_triton), patch.object(
+            batch_invariant, "HAS_ASCENDC_BATCH_INVARIANT", has_ascendc
+        ), patch.object(batch_invariant.logger, "warning_once") as mock_warning_once:
+            batch_invariant.enable_batch_invariant_mode()
 
         assert missing_backend in mock_warning_once.call_args.args[0]
 
