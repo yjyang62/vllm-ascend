@@ -255,12 +255,6 @@ class NPUWorker(WorkerBase):
                 "wake_up(tags=['kv_cache']) may return incorrect continuations.",
                 tags,
             )
-            if cleanup_enabled:
-                logger.warning_once(
-                    "ACL graphs were cleared during sleep and are not recaptured for wake_up(tags=%s). "
-                    "Inference before wake_up(tags=['kv_cache']) may return incorrect results.",
-                    tags,
-                )
 
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
@@ -299,6 +293,12 @@ class NPUWorker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
         if cleanup_enabled:
+            if partial_wake:
+                logger.warning_once(
+                    "ACL graphs were cleared during sleep and are not recaptured for wake_up(tags=%s). "
+                    "Inference before wake_up(tags=['kv_cache']) may return incorrect results.",
+                    tags,
+                )
             self.sleep_wakeup_manager.wakeup(tags)
 
     def _check_weight_transfer_engine(self) -> None:
