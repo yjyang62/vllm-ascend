@@ -32,7 +32,7 @@
 
 上游文件：`vllm/v1/worker/gpu/spec_decode/__init__.py`
 
-当前只注册了：
+MRv2 的 `init_speculator()` 当前只注册了：
 
 - `dflash`
 - `dspark`
@@ -45,6 +45,31 @@
 ```python
 raise NotImplementedError(f"{speculative_config.method} is not supported yet.")
 ```
+
+对比上游 MRv1（`vllm/v1/worker/gpu_model_runner.py` 里创建 `self.drafter`），同一批常见 method 的支持情况如下：
+
+| method / 能力 | 上游 MRv1（创建 `drafter`） | 上游 MRv2（`init_speculator()`） |
+|---|---|---|
+| `dflash` | 支持（`DFlashProposer`） | 支持（`DFlashSpeculator`） |
+| `dspark` | 未看到独立注册 | 支持（`DSparkSpeculator`） |
+| Gemma4 MTP | 支持（`Gemma4Proposer`） | 支持（`Gemma4Speculator`） |
+| `mtp` / 其他 MTP 变体 | 支持（如 Step3.5 MTP 等） | 支持（`MTPSpeculator`） |
+| eagle 家族（`use_eagle()`） | 支持（`EagleProposer`） | 支持（`EagleSpeculator`） |
+| **`extract_hidden_states`** | **支持（`ExtractHiddenStatesProposer`）** | **未注册，直接 `NotImplementedError`** |
+| `ngram` / `suffix` / `medusa` / draft model 等 | 支持 | 当前工厂未覆盖 |
+
+MRv1 对 extract 的注册代码：
+
+```python
+elif self.speculative_config.method == "extract_hidden_states":
+    self.drafter = ExtractHiddenStatesProposer(
+        vllm_config=self.vllm_config, device=self.device
+    )
+    self.use_aux_hidden_state_outputs = True
+```
+
+结论：`extract_hidden_states` 已在上游 MRv1 落地，但尚未迁入 MRv2 工厂；
+这是 Ascend 需要在 MRv2 侧自行补齐的直接原因。
 
 ### 2.2 MRv2 目录中没有 extract Speculator
 
