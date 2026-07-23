@@ -21,8 +21,11 @@ from contextlib import contextmanager
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.parallel_state import get_dp_group
+from vllm.utils.math_utils import round_up
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
@@ -46,11 +49,19 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.utils import (
+    enable_sp,
+    enable_sp_by_pass,
+    should_skip_allreduce_across_dp_group,
+)
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+from vllm_ascend.worker.v2.spec_decode.extract_hidden_states import (
+    AscendExtractHiddenStatesSpeculator,
+)
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
@@ -71,7 +82,10 @@ class NPUModelRunner(GPUModelRunner):
         if self.ascend_config.eplb_config.dynamic_eplb:
             raise NotImplementedError("dynamic_eplb is not supported by Ascend NPU model runner v2.")
 
-        with torch_cuda_wrapper():
+        with (
+            torch_cuda_wrapper(),
+            upstream_extract_hidden_states_init_wrapper(vllm_config),
+        ):
             super().__init__(vllm_config, device)
 
         # because we will override these attribute, delete these attribute to
@@ -83,9 +97,19 @@ class NPUModelRunner(GPUModelRunner):
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle.speculator
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
-        self.speculator: AscendEagleSpeculator | None = None
+        self.speculator: AscendEagleSpeculator | AscendExtractHiddenStatesSpeculator | None = None
         if self.speculative_config is not None:
-            self.speculator = init_speculator(self.vllm_config, self.device)
+            self.speculator = init_speculator(
+                self.vllm_config,
+                self.device,
+                runner=self,
+            )
+            if self.speculative_config.uses_extract_hidden_states():
+                self.use_aux_hidden_state_outputs = True
+                if self.use_pp:
+                    raise ValueError(
+                        "extract_hidden_states with pipeline parallelism is not supported by model runner v2."
+                    )
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
@@ -142,6 +166,71 @@ class NPUModelRunner(GPUModelRunner):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
+
+    def _pad_for_sequence_parallelism(
+        self,
+        num_scheduled_tokens: int,
+    ) -> int:
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        if enable_sp(self.vllm_config) or enable_sp_by_pass():
+            return round_up(num_scheduled_tokens, tp_size)
+        return num_scheduled_tokens
+
+    def _sync_metadata_across_dp(
+        self,
+        num_tokens: int,
+        is_draft_model: bool = False,
+        cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        allow_dp_padding: bool = False,
+    ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
+        if self.dp_size == 1:
+            return num_tokens, None, cudagraph_mode
+
+        if should_skip_allreduce_across_dp_group(
+            self.vllm_config,
+            is_draft_model,
+        ):
+            num_tokens_after_padding = torch.tensor(
+                [num_tokens] * self.dp_size,
+                device="cpu",
+                dtype=torch.int32,
+            )
+            return num_tokens, num_tokens_after_padding, cudagraph_mode
+
+        device_str, group = (
+            ("npu", get_dp_group().device_group)
+            if self.ascend_config.dp_allreduce_on_npu
+            else ("cpu", get_dp_group().cpu_group)
+        )
+        packed_tensor = torch.zeros(
+            2,
+            self.dp_size,
+            device=device_str,
+            dtype=torch.int32,
+        )
+        packed_tensor[0][self.dp_rank] = num_tokens
+        packed_tensor[1][self.dp_rank] = cudagraph_mode.value
+        dist.all_reduce(packed_tensor, group=group)
+        if device_str == "npu":
+            packed_tensor = packed_tensor.cpu()
+
+        num_tokens_across_dp = packed_tensor[0, :]
+        max_tokens_across_dp = int(num_tokens_across_dp.max().item())
+        synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
+        if allow_dp_padding or is_draft_model:
+            num_tokens_after_padding = torch.tensor(
+                [max_tokens_across_dp] * self.dp_size,
+                device="cpu",
+                dtype=torch.int32,
+            )
+        else:
+            num_tokens_after_padding = num_tokens_across_dp.cpu()
+
+        return (
+            max_tokens_across_dp,
+            num_tokens_after_padding,
+            synced_cudagraph_mode,
+        )
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -508,3 +597,24 @@ def graph_manager_wrapper(model_runner):
         yield
     finally:
         vllm_model_runner.ModelCudaGraphManager = original_graph_manager
+
+
+@contextmanager
+def upstream_extract_hidden_states_init_wrapper(vllm_config: VllmConfig):
+    """Defer extract-hidden-states speculator creation until runner init."""
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None or not speculative_config.uses_extract_hidden_states():
+        yield
+        return
+
+    original_init_speculator = vllm_model_runner.init_speculator
+    vllm_model_runner.init_speculator = lambda *_args, **_kwargs: None
+    try:
+        yield
+    finally:
+        vllm_model_runner.init_speculator = original_init_speculator
+
+
+def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
+    """Use the least capable cudagraph mode reported by any DP rank."""
+    return int(tensor[1, :].min().item())

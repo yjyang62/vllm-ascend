@@ -28,10 +28,13 @@ from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vll
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheSpec,
     MLAAttentionSpec,
@@ -45,7 +48,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, AscendPrefillContextParallelMetadata
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import calc_split_factor
+from vllm_ascend.utils import calc_split_factor, is_hidden_state_cache_spec
 
 _ATTENTION_MASK_BUILDER = None
 
@@ -58,6 +61,16 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
     for layer_name, attn_module in attn_layers.items():
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
+            continue
+        if isinstance(attn_module, CacheOnlyAttentionLayer):
+            if spec := attn_module.get_kv_cache_spec(vllm_config):
+                kv_cache_spec[layer_name] = HiddenStateCacheSpec(
+                    block_size=spec.block_size,
+                    num_kv_heads=spec.num_kv_heads,
+                    head_size=spec.head_size,
+                    dtype=spec.dtype,
+                    cache_dtype_str=spec.cache_dtype_str,
+                )
             continue
         if isinstance(attn_module, Attention):
             if spec := attn_module.get_kv_cache_spec(vllm_config):
@@ -262,7 +275,10 @@ def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
     device: torch.device,
-) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+) -> dict[
+    str,
+    torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+]:
     """
     Initialize the KV cache buffer with the correct size. The buffer needs to be
     reshaped to the desired shape before being used by the models.
@@ -280,7 +296,10 @@ def _allocate_kv_cache(
     vllm_config = get_current_vllm_config()
 
     # init kv cache tensors
-    kv_cache_raw_tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    kv_cache_raw_tensors: dict[
+        str,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    ] = {}
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
@@ -296,6 +315,26 @@ def _allocate_kv_cache(
         # head dim and rope head dim.
         example_layer_name = kv_cache_tensor.shared_by[0]
         example_kv_cache_spec = layer_kv_cache_spec[example_layer_name]
+        has_hidden_state_cache = any(
+            is_hidden_state_cache_spec(layer_kv_cache_spec[layer_name]) for layer_name in kv_cache_tensor.shared_by
+        )
+        if has_hidden_state_cache:
+            if vllm_config.kv_transfer_config is None:
+                tensor = torch.zeros(
+                    kv_cache_tensor.size,
+                    dtype=torch.int8,
+                    device=device,
+                )
+            else:
+                tensor = torch.zeros(
+                    kv_cache_tensor.size + alignment,
+                    dtype=torch.int8,
+                    device=device,
+                )
+                tensor = _align_memory(tensor, alignment)[: kv_cache_tensor.size]
+            for layer_name in kv_cache_tensor.shared_by:
+                kv_cache_raw_tensors[layer_name] = tensor
+            continue
         assert isinstance(example_kv_cache_spec, AttentionSpec)
 
         k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_kv_cache_spec)
@@ -434,18 +473,21 @@ def _reshape_kv_cache(
 
 def _reshape_kv_cache_v2(
     attn_groups: Sequence[AttentionGroup],
-    kv_cache_raw_tensors: dict[str, tuple[torch.Tensor, torch.Tensor]],
+    kv_cache_raw_tensors: dict[
+        str,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    ],
     cache_dtype: str,
     kernel_block_sizes: list[int],
     shared_kv_cache_layers: dict[str, str],
     kv_cache_config: "KVCacheConfig | None" = None,
-) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+) -> dict[str, Any]:
     vllm_config = get_current_vllm_config()
     is_kv_consumer = (
         vllm_config.kv_transfer_config.is_kv_consumer if vllm_config.kv_transfer_config is not None else False
     )
 
-    kv_caches: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    kv_caches: dict[str, Any] = {}
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
             continue
@@ -461,11 +503,42 @@ def _reshape_kv_cache_v2(
                 continue
 
             assert isinstance(kv_cache_spec, AttentionSpec)
+            if is_hidden_state_cache_spec(kv_cache_spec):
+                raw_tensor = kv_cache_raw_tensors[layer_name]
+                assert isinstance(raw_tensor, torch.Tensor)
+                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                kv_cache_shape = group.backend.get_kv_cache_shape(
+                    num_blocks,
+                    kv_cache_spec.block_size,
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                    cache_dtype,
+                )
+                typed_tensor = raw_tensor.view(kv_cache_spec.dtype)
+                if kv_cache_spec.page_size_padded is not None:
+                    dtype_size = get_dtype_size(kv_cache_spec.dtype)
+                    page_stride = kv_cache_spec.page_size_bytes // dtype_size
+                    strides = list(torch.empty(kv_cache_shape).stride())
+                    strides[0] = page_stride
+                    kv_cache = torch.as_strided(
+                        typed_tensor,
+                        size=kv_cache_shape,
+                        stride=tuple(strides),
+                    )
+                else:
+                    kv_cache = typed_tensor.view(kv_cache_shape)
+                kv_caches[layer_name] = kv_cache
+                continue
 
-            raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name]
-            assert raw_k_tensor is not None
-            assert raw_v_tensor is not None
-            sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
+            raw_tensors = kv_cache_raw_tensors[layer_name]
+            if isinstance(raw_tensors, torch.Tensor):
+                raw_k_tensor = raw_tensors
+                raw_v_tensor = None
+                sum_page_size_bytes = raw_tensors.numel()
+            else:
+                raw_k_tensor, raw_v_tensor = raw_tensors
+                sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
             assert sum_page_size_bytes % kv_cache_spec.page_size_bytes == 0
             num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
 
@@ -491,6 +564,15 @@ def _reshape_kv_cache_v2(
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 k_shape = (mla_num_blocks, mla_block_size, num_kv_heads, k_dim)
                 v_shape = (mla_num_blocks, mla_block_size, num_kv_heads, v_dim)
+
+            if raw_v_tensor is None:
+                k_num_bytes = int(np.prod(k_shape)) * get_dtype_size(kv_cache_spec.dtype)
+                v_num_bytes = int(np.prod(v_shape)) * get_dtype_size(kv_cache_spec.dtype)
+                padding_num_bytes = raw_k_tensor.numel() - k_num_bytes - v_num_bytes
+                assert padding_num_bytes >= 0
+                raw_kv_tensor = raw_k_tensor[padding_num_bytes:]
+                raw_k_tensor = raw_kv_tensor[:k_num_bytes]
+                raw_v_tensor = raw_kv_tensor[k_num_bytes:]
 
             k_cache_dtype = v_cache_dtype = kv_cache_spec.dtype
             if is_kv_consumer and enable_fa_quant(vllm_config):
