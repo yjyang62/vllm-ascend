@@ -227,7 +227,7 @@ elif spec_config.uses_extract_hidden_states():
 | SP padding | `num_tokens % TP == 0` | 保留 pad-before-sync |
 | discard / sampled token API | Ascend runner 状态字段不同 | 覆盖 token 准备相关 helper |
 | hybrid KV / HiddenStateCacheSpec reshape | 共享 pool、单 tensor、page padding | 上游若未覆盖 hybrid，保留 `attn_utils` 分支 |
-| mamba/hybrid 配置补丁 | 防止误走 GPU Triton | 保留或迁移到 MRv2 配置路径 |
+| mamba/hybrid 配置 | 防止误走 GPU Triton | 保留或迁移到 MRv2 配置路径 |
 | PP 限制 | 若上游仍不传 aux HS 跨 PP | 继续显式报错；上游支持后再验证 |
 
 #### 4.2.1 ACL graph `dummy_run` / capture
@@ -460,7 +460,7 @@ if is_hidden_state_cache_spec(spec) or "cache_only_layers" in layer_name:
 - 若只覆盖 dense、未覆盖 hybrid shared pool，Ascend `attn_utils.py` 分支必须保留。
 - 回归：Qwen3.5 / hybrid + extract E2E，检查 connector 导出 shape。
 
-#### 4.2.6 mamba/hybrid 配置补丁
+#### 4.2.6 mamba/hybrid 配置
 
 **上游 GPU 路径假设什么**
 
