@@ -1,10 +1,11 @@
 # Model Runner v2 中 `extract_hidden_states` 支持情况与上游对接指南
 
-本文说明三件事：
+本文说明四件事：
 
-1. 上游 [vllm-project/vllm](https://github.com/vllm-project/vllm) 的 Model Runner v1 / v2 对 `extract_hidden_states` 的支持现状。
-2. `vllm-ascend` 在 **MRv1** 上已经做了哪些适配。
-3. 如果未来上游 **MRv2** 原生支持了该特性，`vllm-ascend` 应该如何收敛改造。
+1. `extract_hidden_states` 的功能与原理（它是什么、怎么工作）。
+2. 上游 [vllm-project/vllm](https://github.com/vllm-project/vllm) 的 Model Runner v1 / v2 对它的支持现状。
+3. `vllm-ascend` 在 **MRv1** 上已经做了哪些适配。
+4. 如果未来上游 **MRv2** 原生支持了该特性，`vllm-ascend` 应该如何收敛改造。
 
 配套设计细节（Ascend 原生 Speculator 实现、v1/v2 对比、调用栈）见：
 
@@ -79,6 +80,7 @@ speculative_config = {
 示例 commit：`27ffbfd`（随 `main` 前进，结论以工厂注册与目录结构为准）。
 
 ### 3.1 MRv2 工厂未注册 extract
+
 上游文件：`vllm/v1/worker/gpu/spec_decode/__init__.py`
 
 MRv2 的 `init_speculator()` 当前只注册了：
