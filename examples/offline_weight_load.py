@@ -63,39 +63,16 @@ from multiprocessing import Process
 from time import sleep
 
 import torch
-from safetensors.torch import load_file
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (  # noqa E402
     destroy_distributed_environment,
     destroy_model_parallel,
-    get_tp_group,
-)
-from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
 )
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_open_port
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-
-def load_and_merge_safetensors(directory):
-    merged_dict = {}
-
-    if not os.path.isdir(directory):
-        raise ValueError(f"directory is not exist : {directory}")
-
-    for filename in os.listdir(directory):
-        if filename.endswith(".safetensors"):
-            file_path = os.path.join(directory, filename)
-            print(f"loading file: {file_path}")
-
-            f = load_file(file_path)
-            merged_dict.update(f)
-
-    return merged_dict
 
 
 def parse_args():
@@ -204,17 +181,9 @@ def main(
             assert freed_bytes >= model_weight_gib / tensor_parallel_size * GiB_bytes
 
         llm.wake_up()
-
-        model_path = model
-        runmodel = llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
-        model_config = llm.llm_engine.vllm_config.model_config
-        initialize_layerwise_reload(runmodel)
-        sd = load_and_merge_safetensors(model_path)
-        runmodel.load_weights(sd.items())
-        finalize_layerwise_reload(runmodel, model_config)
-        print("load state dict done")
-        tp_ranks = get_tp_group().ranks
-        print(f"TP RANKS: {tp_ranks}")
+        # Reload weights in-place via the public worker RPC API.
+        llm.collective_rpc("reload_weights")
+        print("reload_weights done")
 
         outputs_after_wakeup = llm.generate(prompts, sampling_params)
         if rank == 0:
