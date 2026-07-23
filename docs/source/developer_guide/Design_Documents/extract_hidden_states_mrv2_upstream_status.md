@@ -217,7 +217,8 @@ elif spec_config.uses_extract_hidden_states():
 
 ### 4.2 建议保留的 Ascend 适配（大概率仍需要）
 
-这些是 MRv1 已经证明“上游 GPU 路径不够用”的点，MRv2 仍要逐项核对：
+这些是 MRv1 已经证明“上游 GPU 路径不够用”的点，MRv2 仍要逐项核对。
+总表如下；其后按条目展开讲清楚“为什么不够用 / 例子 / MRv2 怎么核”。
 
 | 适配点 | 为什么可能还要留 | 建议做法 |
 |---|---|---|
@@ -228,6 +229,319 @@ elif spec_config.uses_extract_hidden_states():
 | hybrid KV / HiddenStateCacheSpec reshape | 共享 pool、单 tensor、page padding | 上游若未覆盖 hybrid，保留 `attn_utils` 分支 |
 | mamba/hybrid 配置补丁 | 防止误走 GPU Triton | 保留或迁移到 MRv2 配置路径 |
 | PP 限制 | 若上游仍不传 aux HS 跨 PP | 继续显式报错；上游支持后再验证 |
+
+#### 4.2.1 ACL graph `dummy_run` / capture
+
+**上游 GPU 路径假设什么**
+
+- CUDA Graph capture 的函数签名、runtime mode、warmup/dummy 路径是 GPU 约定。
+- upstream Proposer 的 `dummy_run(...)` 参数名/语义围绕 CUDA graph。
+
+**Ascend 为什么不够用**
+
+- NPU 用的是 **ACL graph**，不是 CUDA graph。
+- capture 时参数叫 `aclgraph_runtime_mode`，并且 idle DP rank 也必须走同一套 dummy 路径。
+- 直接调用上游 GPU `dummy_run`，签名对不上，或 idle rank 漏 sync 会挂死。
+
+**例子**
+
+假设 DP=2 做 ACL graph capture：
+
+- Rank0（busy）：propose 路径会调用 `_sync_metadata_across_dp(..., is_draft_model=True)`
+- Rank1（idle）：如果只跑上游 GPU dummy，**不发同样的 DP sync**
+- 结果：DP cpu_group 上 collective 次数不一致 → **死锁**
+
+Ascend 修法（MRv1）：
+
+```python
+def dummy_run(self, num_tokens, ..., aclgraph_runtime_mode=None, ...):
+    (num_tokens, num_tokens_across_dp, _) = self.runner._sync_metadata_across_dp(
+        num_tokens, is_draft_model=True
+    )
+    with set_forward_context(..., cudagraph_runtime_mode=aclgraph_runtime_mode or CUDAGraphMode.NONE):
+        self.model(hidden_states=self.hidden_states[:num_tokens])
+```
+
+**MRv2 怎么核**
+
+- 上游若提供 Speculator.capture / dummy，先看签名是否 NPU 可用。
+- 不可用则继续覆盖 `_dummy_run` / `capture`，并保留 idle-rank DP sync。
+- 回归：开启 ACL graph 的单卡 + DP extract E2E。
+
+#### 4.2.2 DP sync 形状 / `is_draft_model=True`
+
+**上游 GPU 路径假设什么**
+
+- draft 侧可调用 `coordinate_batch_across_dp`，同步 tensor 形状偏 GPU 约定（历史上是 `[4, dp]` 一类）。
+- 若 draft 被判定为 MoE，还可能额外 all_reduce。
+
+**Ascend 为什么不够用**
+
+1. **形状不一致**  
+   Ascend 主 runner 的 `_sync_metadata_across_dp` 使用另一套形状（如 `[2, dp]`）。  
+   同一 `cpu_group` 上，一边 post `[4, dp]`、一边 post `[2, dp]`，gloo 会报类似：
+
+   ```text
+   op.preamble.length 8 vs 4
+   ```
+
+2. **误判 MoE draft**  
+   extract 的 `hf_config` 常从 target 拷贝。若 target 是 MoE（如 DeepSeek / Qwen-MoE），
+   朴素扫描 `expert` 字段会把 extract drafter 误判成 MoE，于是 busy rank 多发 all_reduce，
+   idle rank 没有对应操作 → 再死锁。
+
+**例子 A：形状**
+
+- DP=2，主 forward 已用 runner sync（`[2,2]`）
+- extract 若改走上游 `coordinate_batch_across_dp`（`[4,2]`）
+- 同 group 上长度对不上 → gloo 失败
+
+**例子 B：MoE 误判**
+
+- target=`Qwen3-MoE`，`method=extract_hidden_states`
+- extract 实际只是 cache-only attention，**根本没有 expert**
+- 但 draft hf_config 里残留 `num_experts` 等字段
+- 不短路的话：`is_drafter_moe_model()==True` → 多余 collective
+
+Ascend 修法：
+
+```python
+# proposer: 强制走 runner sync
+self.runner._sync_metadata_across_dp(num_tokens=..., is_draft_model=True, ...)
+
+# utils: extract 永不当 MoE draft
+if speculative_config.method == "extract_hidden_states":
+    _IS_DRAFTER_MOE_MODEL = False
+```
+
+**MRv2 怎么核**
+
+- 上游 Speculator 是否仍调用 GPU 专用 DP API？
+- Ascend runner 是否仍要求统一 `_sync_metadata_across_dp`？
+- 是则保留 override + `is_draft_model=True`，并保留 extract 非 MoE 短路。
+
+#### 4.2.3 SP padding（先 pad，再 DP sync）
+
+**上游 GPU 路径假设什么**
+
+- token 数直接进 draft forward / graph dispatch，不一定先按 TP 对齐。
+
+**Ascend 为什么不够用**
+
+- Sequence Parallel / TP reduce_scatter 要求：
+
+  ```text
+  num_tokens % tensor_parallel_size == 0
+  ```
+
+- 若先 DP sync 再 pad，各 rank 可能先对一个“未对齐”的数达成一致，随后主路径再 pad，
+  反而和已同步值冲突；或 reduce_scatter 直接 shape error。
+
+**例子**
+
+- TP=4，本 step 真实 tokens=`6`
+- 正确顺序：
+
+  ```text
+  6 --SP pad--> 8 --DP sync--> 各 rank 以 8 对齐 --cache-only forward-->
+  ```
+
+- 错误顺序：
+
+  ```text
+  6 --DP sync--> 大家都同意 6 --forward--> reduce_scatter 需要 %4==0 → 失败
+  ```
+
+Ascend 修法：
+
+```python
+num_tokens = self.runner._pad_for_sequence_parallelism(num_tokens)  # 6 -> 8
+# 然后再 cudagraph dispatch / DP sync
+```
+
+单测语义：`test_determine_batch_execution_and_padding_dp1_sp_pads_and_skips_sync`、
+`..._dp2_keeps_tp_aligned_for_main_forward`。
+
+**MRv2 怎么核**
+
+- 上游 Speculator 是否保证 SP/TP 对齐？
+- 若否，继续在 Ascend Speculator 入口保留 pad-before-sync。
+
+#### 4.2.4 discard / sampled token API
+
+**上游 GPU 路径假设什么**
+
+- `prepare_next_token_ids_padded` 使用 **boolean discard mask**（长度 = batch）。
+
+**Ascend 为什么不够用**
+
+- Ascend MRv1 runner 维护的是：
+
+  ```text
+  discard_request_indices: Tensor[int64]   # 被丢弃请求的下标
+  num_discarded_requests: int             # 有效下标个数
+  ```
+
+- 直接把上游“吃 boolean mask”的函数接过来，参数对不上。
+
+**例子**
+
+batch 4 个请求，第 4 个被 discard：
+
+```text
+sampled_token_ids = [[10], [20], [-1], [40]]   # 第3个无效，第4个 discard
+discard_request_indices = [3]
+num_discarded_requests = 1
+```
+
+Ascend 先把 indices 扩成 mask，再决定用 sampled 还是 backup：
+
+```python
+discard_mask = zeros(num_reqs, dtype=bool)
+discard_mask[discard_request_indices[:num_discarded_requests]] = True
+use_sampled = is_valid & ~discard_mask
+next_token_ids = where(use_sampled, sampled, backup_tokens)
+```
+
+期望：
+
+- req0/1：用 sampled
+- req2：token 无效 → backup
+- req3：discard → backup
+
+**MRv2 怎么核**
+
+- 看 MRv2 Ascend runner / InputBatch 是否仍用 indices/count。
+- 若上游 Speculator 仍假设 boolean mask，就保留 Ascend override 或做薄适配层。
+
+#### 4.2.5 hybrid KV / `HiddenStateCacheSpec` reshape
+
+**上游 GPU 路径假设什么**
+
+- 普通 attention KV 常按 **K/V 两个 tensor**（或固定 layout）分配、reshape。
+- hybrid（attention + mamba）共享 pool 时，GPU 侧有自己的 page 对齐假设。
+
+**Ascend 为什么不够用**
+
+extract 的 cache-only 层是 **单 tensor hidden-state cache**，不能走“拆成 K/V”的普通分支。
+hybrid 模型（如 Qwen3.5）还可能：
+
+- 与 attention 共享 KV pool
+- 需要 `page_size_padded` 做 strided view
+- 必须保持 `HiddenStateCacheSpec` 类型，避免被降级成普通 MLA/AttentionSpec
+
+**例子**
+
+Qwen3.5 hybrid + extract：
+
+```text
+pool A:
+  - full attention layers (K/V)
+  - cache_only_layers.0  (HiddenStateCacheSpec, 单 tensor)
+```
+
+错误路径：
+
+```python
+raw_k, raw_v = kv_cache_raw_tensors[layer]   # cache-only 根本不是 tuple
+```
+
+正确路径：
+
+```python
+if is_hidden_state_cache_spec(spec) or "cache_only_layers" in layer_name:
+    raw = kv_cache_raw_tensors[layer]          # 单 tensor
+    # 必要时按 page_size_padded 做 view，而不是 K/V split
+```
+
+**MRv2 怎么核**
+
+- 上游 MRv2 attn/KV 是否已原生识别 `HiddenStateCacheSpec` 与 shared pool。
+- 若只覆盖 dense、未覆盖 hybrid shared pool，Ascend `attn_utils.py` 分支必须保留。
+- 回归：Qwen3.5 / hybrid + extract E2E，检查 connector 导出 shape。
+
+#### 4.2.6 mamba/hybrid 配置补丁
+
+**上游 GPU 路径假设什么**
+
+- 开 KV transfer + hybrid 时，常强制 `mamba_cache_mode="align"`，以便跨实例迁移 mamba block。
+- align 模式会走到 GPU fused postprocess Triton kernel。
+
+**Ascend 为什么不够用**
+
+- extract 用的 `ExampleHiddenStatesConnector` **只导出 hidden-state cache-only 层**，
+  并不迁移 mamba KV blocks。
+- 若仍强制 `align`，hybrid 模型会进入 Ascend Triton **编不过** 的 GPU kernel 路径。
+
+**例子**
+
+```text
+model = Qwen3.5-hybrid
+method = extract_hidden_states
+kv_connector = ExampleHiddenStatesConnector / AscendStoreConnector
+```
+
+错误结果：
+
+```text
+强制 mamba_cache_mode=align
+  → 调用 vLLM GPU Triton postprocess
+  → Ascend Triton backend compile fail
+```
+
+Ascend 修法（`patch_mamba_config.py`）：
+
+```python
+is_extract_hidden_states = (spec_config.method == "extract_hidden_states")
+if using_kv_store_with_hybrid and not is_extract_hidden_states:
+    cache_config.mamba_cache_mode = "align"
+# extract 时保持上游推导值（如 none）
+```
+
+**MRv2 怎么核**
+
+- 上游 MRv2 是否仍对 hybrid+KV transfer 强制 align。
+- 若是，继续保留 extract 例外；或把例外迁到 MRv2 配置更新路径。
+
+#### 4.2.7 PP 限制
+
+**上游 GPU 路径假设什么**
+
+- speculative / Eagle3 的 aux hidden states，在 PP 下通常只有 **最后一级 PP rank**
+  做 sampling / drafting。
+- 中间层 hidden states 若产生在非 last PP rank，需要跨 PP 传到 last rank。
+
+**Ascend / 上游为什么现在不够用**
+
+- extract 依赖多份 `aux_hidden_states`。
+- 当前 MRv1/MRv2 都没有把“非 last PP rank 的 aux HS”完整送到 last rank。
+- MRv1 甚至在 PP>1 时，aux 层配置容易被 Eagle3 专用逻辑挡住；MRv2 Ascend 选择 **启动即明确报错**。
+
+**例子**
+
+```text
+PP=2, layers=32
+layer_ids = [1, 2, 30, 31]
+```
+
+- Rank0 持有 layer 1/2 的 activation
+- Rank1 持有 layer 30/31，并负责 sample + extract propose
+- 若没有跨 PP 传输，Rank1 的 `aux_hidden_states` 缺 layer 1/2
+  → extract 无法正确堆叠/写入 cache
+
+Ascend MRv2 现状：
+
+```python
+if self.speculative_config.uses_extract_hidden_states() and self.use_pp:
+    raise ValueError(
+        "extract_hidden_states with pipeline parallelism is not supported by model runner v2."
+    )
+```
+
+**MRv2 怎么核**
+
+- 上游若仍不支持跨 PP 传 aux HS：继续保留显式 `ValueError`。
+- 上游若支持：再补 NPU PP 传输/测试，不能只删报错。
 
 ### 4.3 建议删除或收敛的临时逻辑
 
