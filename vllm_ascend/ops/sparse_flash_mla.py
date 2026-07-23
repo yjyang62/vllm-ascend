@@ -10,14 +10,22 @@ import torch
 
 @lru_cache
 def _get_sparse_flash_mla_ops() -> tuple[Callable, Callable]:
-    """Load the SparseFlashMla torch operators shipped by ops-transformer."""
+    """Load SparseFlashMla torch ops from an installed cann_ops_transformer.
+
+    SparseFlashMla is not vendored into vLLM-Ascend. Install it from
+    https://gitcode.com/cann/ops-transformer (for example under
+    ``/home/y00899261/ops-transformer``), build ``sparse_flash_mla`` and
+    ``sparse_flash_mla_metadata``, then make the resulting
+    ``cann_ops_transformer`` package importable.
+    """
     try:
         import cann_ops_transformer  # noqa: F401
     except ImportError as exc:
         raise RuntimeError(
-            "DeepSeek-V4 BF16 KV on Ascend A5 requires the "
-            "cann_ops_transformer package that provides sparse_flash_mla and "
-            "sparse_flash_mla_metadata."
+            "DeepSeek-V4 BF16 KV on Ascend A5 requires cann_ops_transformer "
+            "with sparse_flash_mla / sparse_flash_mla_metadata. Install from "
+            "https://gitcode.com/cann/ops-transformer "
+            "(e.g. /home/y00899261/ops-transformer)."
         ) from exc
 
     namespace = torch.ops.cann_ops_transformer
@@ -27,8 +35,9 @@ def _get_sparse_flash_mla_ops() -> tuple[Callable, Callable]:
     except AttributeError as exc:
         raise RuntimeError(
             "The installed cann_ops_transformer package does not provide "
-            "sparse_flash_mla and sparse_flash_mla_metadata. Install a version "
-            "matched to the CANN toolkit that contains these operators."
+            "sparse_flash_mla and sparse_flash_mla_metadata. Rebuild those "
+            "ops from https://gitcode.com/cann/ops-transformer against the "
+            "matching CANN toolkit."
         ) from exc
     return attention_op, metadata_op
 
