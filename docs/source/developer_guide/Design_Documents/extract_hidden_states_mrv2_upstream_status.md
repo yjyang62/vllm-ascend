@@ -1,9 +1,10 @@
 # Model Runner v2 中 `extract_hidden_states` 支持情况与上游对接指南
 
-本文说明两件事：
+本文说明三件事：
 
-1. 上游 [vllm-project/vllm](https://github.com/vllm-project/vllm) 的 Model Runner v2（简称 MRv2）对 `extract_hidden_states` 的支持现状。
-2. 如果未来上游 MRv2 原生支持了该特性，`vllm-ascend` 应该如何收敛改造。
+1. 上游 [vllm-project/vllm](https://github.com/vllm-project/vllm) 的 Model Runner v1 / v2 对 `extract_hidden_states` 的支持现状。
+2. `vllm-ascend` 在 **MRv1** 上已经做了哪些适配。
+3. 如果未来上游 **MRv2** 原生支持了该特性，`vllm-ascend` 应该如何收敛改造。
 
 配套设计细节（Ascend 原生 Speculator 实现、v1/v2 对比、调用栈）见：
 
