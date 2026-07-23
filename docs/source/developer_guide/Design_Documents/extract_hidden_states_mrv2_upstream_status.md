@@ -12,7 +12,56 @@
 
 ---
 
-## 1. 一句话结论
+## 1. 功能与原理简介
+
+### 1.1 功能是什么
+
+`extract_hidden_states` 用于在推理过程中抽出目标模型**指定中间层**的 hidden states，
+并借助 KV Connector 保存或传出。典型用途包括：
+
+- 采集 EAGLE / Eagle3 类 draft model 的训练数据
+- 知识蒸馏、量化或离线分析模型内部表示
+
+它挂在 `speculative_config` 上，配置形如：
+
+```python
+speculative_config = {
+    "method": "extract_hidden_states",
+    "num_speculative_tokens": 1,
+    "draft_model_config": {
+        "hf_config": {
+            "eagle_aux_hidden_state_layer_ids": [1, 2, 3, 4],
+        },
+    },
+}
+```
+
+### 1.2 原理是什么
+
+它**不是**真正的投机解码，而是借用 speculative 管线完成导出：
+
+1. target 模型正常前向，并额外返回配置层的 `aux_hidden_states`
+2. 采样得到当前 token `T`
+3. 轻量 `ExtractHiddenStatesModel`（`CacheOnlyAttentionLayer`）把 HS 写入专用
+   `HiddenStateCache`（借 KV cache 的分页/生命周期管理）
+4. 将 `draft = T` 返回；验证阶段 `draft == sampled`，因此必然通过，不影响正常生成
+5. `ExampleHiddenStatesConnector` 等从该 cache 导出 hidden states
+
+与 Eagle3 的对比可记为：
+
+| | Eagle3 | extract_hidden_states |
+|---|---|---|
+| 目的 | 用 draft 预测未来 token，加速生成 | 导出中间层 activation |
+| draft 输出 | 预测 token（可能被拒绝） | 回传 sampled token（必过） |
+| aux hidden states | 常作为 draft 输入 | 本身就是要导出的数据 |
+
+一句话：
+
+> **Eagle3 用 hidden states 去猜 token；extract 把 hidden states 本身存下来带走。**
+
+---
+
+## 2. 一句话结论
 
 | 路径 | 支持情况 |
 |---|---|
@@ -24,13 +73,12 @@
 
 ---
 
-## 2. 上游支持现状（截至本文编写时）
+## 3. 上游支持现状（截至本文编写时）
 
 核对仓库：`https://github.com/vllm-project/vllm`  
 示例 commit：`27ffbfd`（随 `main` 前进，结论以工厂注册与目录结构为准）。
 
-### 2.1 MRv2 工厂未注册 extract
-
+### 3.1 MRv2 工厂未注册 extract
 上游文件：`vllm/v1/worker/gpu/spec_decode/__init__.py`
 
 MRv2 的 `init_speculator()` 当前只注册了：
@@ -72,8 +120,7 @@ elif self.speculative_config.method == "extract_hidden_states":
 结论：`extract_hidden_states` 已在上游 MRv1 落地，但尚未迁入 MRv2 工厂；
 这是 Ascend 需要在 MRv2 侧自行补齐的直接原因。
 
-### 2.2 MRv2 目录中没有 extract Speculator
-
+### 3.2 MRv2 目录中没有 extract Speculator
 上游 MRv2 speculative 目录大致如下：
 
 ```text
@@ -91,8 +138,7 @@ vllm/v1/worker/gpu/spec_decode/
 **没有** `extract_hidden_states/` 子目录，也没有
 `ExtractHiddenStatesSpeculator` 之类的类。
 
-### 2.3 完整实现仍挂在 MRv1
-
+### 3.3 完整实现仍挂在 MRv1
 上游已有能力全部位于 MRv1 / 共享层：
 
 | 组件 | 路径 | 作用 |
@@ -121,8 +167,7 @@ elif spec_config.uses_extract_hidden_states():
     # 要求 aux_hidden_states 存在，再调用 drafter.propose(...)
 ```
 
-### 2.4 相关上游议题，但不等于 MRv2 已落地
-
+### 3.4 相关上游议题，但不等于 MRv2 已落地
 - RFC：[Hidden States Extraction #33118](https://github.com/vllm-project/vllm/issues/33118)
 - 近期相关 PR 多在修 MRv1 / hybrid / CUDA graph / connector，**尚未看到**已合并的
   “port `extract_hidden_states` to Model Runner V2” 实现。
@@ -135,13 +180,11 @@ elif spec_config.uses_extract_hidden_states():
 
 ---
 
-## 3. Ascend 在 MRv1 上做了什么适配
-
+## 4. Ascend 在 MRv1 上做了什么适配
 上游 MRv1 已有完整 `ExtractHiddenStatesProposer`。Ascend **没有重写整套 extract**，
 而是“继承上游 Proposer + 打 NPU 差异补丁 + Runner/KV 侧接线”。
 
-### 3.1 核心文件
-
+### 4.1 核心文件
 | 文件 | 作用 |
 |---|---|
 | `vllm_ascend/spec_decode/extract_hidden_states_proposer.py` | `AscendExtractHiddenStatesProposer`，继承上游 Proposer |
@@ -150,15 +193,13 @@ elif spec_config.uses_extract_hidden_states():
 | `vllm_ascend/utils.py` | `is_drafter_moe_model()` / `is_hidden_state_cache_spec()` |
 | `vllm_ascend/patch/platform/patch_mamba_config.py` | hybrid + extract 时跳过强制 mamba align |
 
-### 3.2 复用上游 vs Ascend 自研
-
+### 4.2 复用上游 vs Ascend 自研
 | 类别 | 内容 |
 |---|---|
 | **直接复用上游** | `ExtractHiddenStatesProposer.propose()` / `load_model()`、`ExtractHiddenStatesModel`、`CacheOnlyAttentionLayer`、`HiddenStateCacheSpec`、connector 协议 |
 | **Ascend 薄适配** | DP/SP 同步、ACL graph `dummy_run`、discard token API、factory、runner 接线、hybrid KV pool |
 
-### 3.3 具体适配点
-
+### 4.3 具体适配点
 1. **工厂注册**
    - `get_spec_decode_method("extract_hidden_states", ...)` 返回
      `AscendExtractHiddenStatesProposer(vllm_config, device, runner)`
@@ -200,12 +241,10 @@ elif spec_config.uses_extract_hidden_states():
 
 ---
 
-## 4. 如果上游把 MRv2 做好了，Ascend 需要做什么适配
-
+## 5. 如果上游把 MRv2 做好了，Ascend 需要做什么适配
 对应关系应是：**把现在的“完整自研 Speculator”收敛成“像 MRv1 一样的薄适配”。**
 
-### 4.1 目标形态：对齐 MRv1 适配模式
-
+### 5.1 目标形态：对齐 MRv1 适配模式
 | 维度 | 今天 Ascend MRv2（本 PR） | 上游 MRv2 落地后的目标 |
 |---|---|---|
 | Speculator | 完整自研 `AscendExtractHiddenStatesSpeculator` | 继承上游 `ExtractHiddenStatesSpeculator`，只覆盖 NPU 差异 |
@@ -215,8 +254,7 @@ elif spec_config.uses_extract_hidden_states():
 | ACL graph / DP-SP / padding | Ascend 全量实现 | 审查后保留最小 NPU 补丁 |
 | `attn_utils` / HiddenStateCacheSpec | Ascend 补 discovery + reshape | 上游已有则删除重复，只留 NPU pool/dtype 差异 |
 
-### 4.2 建议保留的 Ascend 适配（大概率仍需要）
-
+### 5.2 建议保留的 Ascend 适配（大概率仍需要）
 这些是 MRv1 已经证明“上游 GPU 路径不够用”的点，MRv2 仍要逐项核对。
 总表如下；其后按条目展开讲清楚“为什么不够用 / 例子 / MRv2 怎么核”。
 
@@ -230,8 +268,7 @@ elif spec_config.uses_extract_hidden_states():
 | mamba/hybrid 配置 | 防止误走 GPU Triton | 保留或迁移到 MRv2 配置路径 |
 | PP 限制 | 若上游仍不传 aux HS 跨 PP | 继续显式报错；上游支持后再验证 |
 
-#### 4.2.1 ACL graph `dummy_run` / capture
-
+#### 5.2.1 ACL graph `dummy_run` / capture
 **上游 GPU 路径假设什么**
 
 - CUDA Graph capture 的函数签名、runtime mode、warmup/dummy 路径是 GPU 约定。
@@ -268,8 +305,7 @@ def dummy_run(self, num_tokens, ..., aclgraph_runtime_mode=None, ...):
 - 不可用则继续覆盖 `_dummy_run` / `capture`，并保留 idle-rank DP sync。
 - 回归：开启 ACL graph 的单卡 + DP extract E2E。
 
-#### 4.2.2 DP sync 形状 / `is_draft_model=True`
-
+#### 5.2.2 DP sync 形状 / `is_draft_model=True`
 **上游 GPU 路径假设什么**
 
 - draft 侧可调用 `coordinate_batch_across_dp`，同步 tensor 形状偏 GPU 约定（历史上是 `[4, dp]` 一类）。
@@ -320,8 +356,7 @@ if speculative_config.method == "extract_hidden_states":
 - Ascend runner 是否仍要求统一 `_sync_metadata_across_dp`？
 - 是则保留 override + `is_draft_model=True`，并保留 extract 非 MoE 短路。
 
-#### 4.2.3 SP padding（先 pad，再 DP sync）
-
+#### 5.2.3 SP padding（先 pad，再 DP sync）
 **上游 GPU 路径假设什么**
 
 - token 数直接进 draft forward / graph dispatch，不一定先按 TP 对齐。
@@ -367,8 +402,7 @@ num_tokens = self.runner._pad_for_sequence_parallelism(num_tokens)  # 6 -> 8
 - 上游 Speculator 是否保证 SP/TP 对齐？
 - 若否，继续在 Ascend Speculator 入口保留 pad-before-sync。
 
-#### 4.2.4 discard / sampled token API
-
+#### 5.2.4 discard / sampled token API
 **上游 GPU 路径假设什么**
 
 - `prepare_next_token_ids_padded` 使用 **boolean discard mask**（长度 = batch）。
@@ -414,8 +448,7 @@ next_token_ids = where(use_sampled, sampled, backup_tokens)
 - 看 MRv2 Ascend runner / InputBatch 是否仍用 indices/count。
 - 若上游 Speculator 仍假设 boolean mask，就保留 Ascend override 或做薄适配层。
 
-#### 4.2.5 hybrid KV / `HiddenStateCacheSpec` reshape
-
+#### 5.2.5 hybrid KV / `HiddenStateCacheSpec` reshape
 **上游 GPU 路径假设什么**
 
 - 普通 attention KV 常按 **K/V 两个 tensor**（或固定 layout）分配、reshape。
@@ -460,8 +493,7 @@ if is_hidden_state_cache_spec(spec) or "cache_only_layers" in layer_name:
 - 若只覆盖 dense、未覆盖 hybrid shared pool，Ascend `attn_utils.py` 分支必须保留。
 - 回归：Qwen3.5 / hybrid + extract E2E，检查 connector 导出 shape。
 
-#### 4.2.6 mamba/hybrid 配置
-
+#### 5.2.6 mamba/hybrid 配置
 **上游 GPU 路径假设什么**
 
 - 开 KV transfer + hybrid 时，常强制 `mamba_cache_mode="align"`，以便跨实例迁移 mamba block。
@@ -503,8 +535,7 @@ if using_kv_store_with_hybrid and not is_extract_hidden_states:
 - 上游 MRv2 是否仍对 hybrid+KV transfer 强制 align。
 - 若是，继续保留 extract 例外；或把例外迁到 MRv2 配置更新路径。
 
-#### 4.2.7 PP 限制
-
+#### 5.2.7 PP 限制
 **上游 GPU 路径假设什么**
 
 - speculative / Eagle3 的 aux hidden states，在 PP 下通常只有 **最后一级 PP rank**
@@ -543,8 +574,7 @@ if self.speculative_config.uses_extract_hidden_states() and self.use_pp:
 - 上游若仍不支持跨 PP 传 aux HS：继续保留显式 `ValueError`。
 - 上游若支持：再补 NPU PP 传输/测试，不能只删报错。
 
-### 4.3 建议删除或收敛的临时逻辑
-
+### 5.3 建议删除或收敛的临时逻辑
 | 当前逻辑 | 上游 MRv2 支持后 |
 |---|---|
 | 完整自建 Speculator 编排 | 删除重复，改为继承上游 |
@@ -553,8 +583,7 @@ if self.speculative_config.uses_extract_hidden_states() and self.use_pp:
 | 重复设置 `use_aux_hidden_state_outputs` | 上游已设则删 |
 | 与上游重复的 `HiddenStateCacheSpec` 发现/分配 | 收敛到上游实现 |
 
-### 4.4 推荐落地步骤（按顺序）
-
+### 5.4 推荐落地步骤（按顺序）
 1. **确认上游 MRv2 extract 可跑**
    - `init_speculator()` 已注册
    - GPU UT/E2E 覆盖 propose + cache +（如有）connector
@@ -567,8 +596,7 @@ if self.speculative_config.uses_extract_hidden_states() and self.use_pp:
 5. **回归**
    - 单卡 E2E、ACL graph、DP、hybrid（如 Qwen3.5）、padding slot 不污染 cache
 
-### 4.5 一句话对照
-
+### 5.5 一句话对照
 | Runner | Ascend 适配模式 |
 |---|---|
 | **MRv1（已做）** | 上游 Proposer 可用 → Ascend **薄子类 + runner/KV 补丁** |
@@ -577,8 +605,7 @@ if self.speculative_config.uses_extract_hidden_states() and self.use_pp:
 
 ---
 
-## 5. 当前 Ascend 为什么要自己做（本 PR 过渡方案）
-
+## 6. 当前 Ascend 为什么要自己做（本 PR 过渡方案）
 因为上游 MRv2 工厂对 extract 直接失败，Ascend 不能“等上游再启用”。本 PR 的策略是：
 
 1. **原生实现** `AscendExtractHiddenStatesSpeculator`
@@ -606,8 +633,7 @@ vllm_ascend/worker/v2/attn_utils.py
 
 ---
 
-## 6. 过渡期决策表
-
+## 7. 过渡期决策表
 | 上游状态 | Ascend 策略 |
 |---|---|
 | 仍 `NotImplementedError`（当前） | 保持本 PR 原生 Speculator + init wrapper |
@@ -617,8 +643,7 @@ vllm_ascend/worker/v2/attn_utils.py
 
 ---
 
-## 7. 快速自检清单（给后续 PR）
-
+## 8. 快速自检清单（给后续 PR）
 上游已支持后，开收敛 PR 前先打勾：
 
 - [ ] 上游 `init_speculator()` 已支持 `extract_hidden_states`
@@ -632,8 +657,7 @@ vllm_ascend/worker/v2/attn_utils.py
 
 ---
 
-## 8. 相关文件索引
-
+## 9. 相关文件索引
 ### Ascend MRv1 适配
 
 - `vllm_ascend/spec_decode/extract_hidden_states_proposer.py`
