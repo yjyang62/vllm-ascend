@@ -254,3 +254,21 @@ def test_a5_bf16_dsa_scatter_uses_block_offset_mapping():
     torch.testing.assert_close(cache[0, 1], updates[0])
     torch.testing.assert_close(cache[2, 3], updates[1])
     torch.testing.assert_close(cache[1, 0], updates[2])
+
+
+def test_bootstrap_custom_op_env_registers_cann_toolkit_vendor(tmp_path, monkeypatch):
+    import os
+
+    from vllm_ascend.utils import bootstrap_custom_op_env
+
+    ascend_home = tmp_path / "cann"
+    vendor = ascend_home / "opp" / "vendors" / "custom_transformer"
+    (vendor / "op_api" / "lib").mkdir(parents=True)
+    monkeypatch.setenv("ASCEND_HOME_PATH", str(ascend_home))
+    monkeypatch.delenv("ASCEND_CUSTOM_OPP_PATH", raising=False)
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+
+    bootstrap_custom_op_env(include_vendor_lib=True)
+
+    assert str(vendor) in os.environ["ASCEND_CUSTOM_OPP_PATH"].split(":")
+    assert str(vendor / "op_api" / "lib") in os.environ["LD_LIBRARY_PATH"].split(":")

@@ -312,16 +312,38 @@ def _prepend_env_path(env_name: str, path: str) -> None:
         os.environ[env_name] = ":".join(path_entries)
 
 
-def bootstrap_custom_op_env(*, include_vendor_lib: bool = False) -> None:
-    vendor_path = os.path.join(_CUSTOM_OP_BASE_DIR, "_cann_ops_custom", "vendors", _CUSTOM_OP_VENDOR_DIR)
-    if not os.path.exists(vendor_path):
-        return
-    _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_path)
+def _custom_opp_vendor_paths() -> list[str]:
+    """Return existing CANN custom-opp vendor directories, highest priority first."""
+    candidates: list[str] = []
+    repo_vendor = os.path.join(_CUSTOM_OP_BASE_DIR, "_cann_ops_custom", "vendors", _CUSTOM_OP_VENDOR_DIR)
+    candidates.append(repo_vendor)
 
-    if include_vendor_lib:
-        vendor_lib_path = os.path.join(vendor_path, "op_api", "lib")
-        if os.path.exists(vendor_lib_path):
-            _prepend_env_path("LD_LIBRARY_PATH", vendor_lib_path)
+    ascend_home = os.environ.get("ASCEND_HOME_PATH")
+    if ascend_home:
+        for vendor_name in (_CUSTOM_OP_VENDOR_DIR, "custom"):
+            candidates.append(os.path.join(ascend_home, "opp", "vendors", vendor_name))
+
+    seen: set[str] = set()
+    existing: list[str] = []
+    for path in candidates:
+        if not os.path.isdir(path):
+            continue
+        normalized = os.path.realpath(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        existing.append(path)
+    return existing
+
+
+def bootstrap_custom_op_env(*, include_vendor_lib: bool = False) -> None:
+    vendor_paths = _custom_opp_vendor_paths()
+    for vendor_path in vendor_paths:
+        _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_path)
+        if include_vendor_lib:
+            vendor_lib_path = os.path.join(vendor_path, "op_api", "lib")
+            if os.path.exists(vendor_lib_path):
+                _prepend_env_path("LD_LIBRARY_PATH", vendor_lib_path)
 
 
 def _custom_pad(x, pad_dims):

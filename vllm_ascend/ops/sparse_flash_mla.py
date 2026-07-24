@@ -7,17 +7,23 @@ from typing import Any
 
 import torch
 
+_SPARSE_FLASH_MLA_JIT_PRELOADED = False
+
+
+def _sparse_flash_mla_vendor_hint() -> str:
+    ascend_home = __import__("os").environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/cann-9.1.0")
+    return (
+        "Install SparseFlashMla from https://gitcode.com/cann/ops-transformer, then run "
+        f"./build_out/cann-ops-transformer-custom_linux-*.run and ensure "
+        f"{ascend_home}/opp/vendors/custom_transformer (or custom) is on "
+        "ASCEND_CUSTOM_OPP_PATH. Call bootstrap_custom_op_env(include_vendor_lib=True) "
+        "before inference."
+    )
+
 
 @lru_cache
 def _get_sparse_flash_mla_ops() -> tuple[Callable, Callable]:
-    """Load SparseFlashMla torch ops from an installed cann_ops_transformer.
-
-    SparseFlashMla is not vendored into vLLM-Ascend. Install it from
-    https://gitcode.com/cann/ops-transformer (for example under
-    ``/home/y00899261/ops-transformer``), build ``sparse_flash_mla`` and
-    ``sparse_flash_mla_metadata``, then make the resulting
-    ``cann_ops_transformer`` package importable.
-    """
+    """Load SparseFlashMla torch ops from an installed cann_ops_transformer."""
     try:
         import cann_ops_transformer  # noqa: F401
     except ImportError as exc:
@@ -40,6 +46,27 @@ def _get_sparse_flash_mla_ops() -> tuple[Callable, Callable]:
             "matching CANN toolkit."
         ) from exc
     return attention_op, metadata_op
+
+
+def preload_sparse_flash_mla_jit_extensions(*, verbose: bool = False) -> None:
+    """JIT-compile cann_ops_transformer C++ wrappers before the first forward pass."""
+    global _SPARSE_FLASH_MLA_JIT_PRELOADED
+    if _SPARSE_FLASH_MLA_JIT_PRELOADED:
+        return
+
+    from cann_ops_transformer.ops.sparse_flash_mla import sparse_flash_mla_op_builder
+
+    sparse_flash_mla_op_builder.load(verbose=verbose)
+    _get_sparse_flash_mla_ops()
+    _SPARSE_FLASH_MLA_JIT_PRELOADED = True
+
+
+def preload_sparse_flash_mla_for_worker(*, verbose: bool = False) -> None:
+    """Register CANN vendor ops and prebuild SparseFlashMla torch extensions in workers."""
+    from vllm_ascend.utils import bootstrap_custom_op_env
+
+    bootstrap_custom_op_env(include_vendor_lib=True)
+    preload_sparse_flash_mla_jit_extensions(verbose=verbose)
 
 
 def _add_compressed_kv_lengths(kwargs: dict[str, Any]) -> None:
@@ -80,4 +107,9 @@ def sparse_flash_mla(q: torch.Tensor, **kwargs):
     _add_compressed_kv_lengths(kwargs)
 
     attention_op, _ = _get_sparse_flash_mla_ops()
-    return attention_op(q, **kwargs)
+    try:
+        return attention_op(q, **kwargs)
+    except RuntimeError as exc:
+        if "aclnnSparseFlashMla" in str(exc) or "SparseFlashMla" in str(exc):
+            raise RuntimeError(f"{exc}\n\n{_sparse_flash_mla_vendor_hint()}") from exc
+        raise
