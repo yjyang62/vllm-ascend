@@ -657,6 +657,19 @@ class NPUWorker(WorkerBase):
         return self.model_runner.sample_tokens(grammar_output)
 
     def load_model(self) -> None:
+        from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+                self.cache_config.cache_dtype, self.model_config
+            )
+            if kv_cache_dtype == torch.bfloat16:
+                from vllm_ascend.ops.sparse_flash_mla import preload_sparse_flash_mla_for_worker
+
+                preload_sparse_flash_mla_for_worker(verbose=False)
+
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, "Sleep mode can only be used for one instance per process."

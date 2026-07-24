@@ -788,7 +788,7 @@ class NPUPlatform(Platform):
         global _CUSTOM_OP_REGISTERED
         if _CUSTOM_OP_REGISTERED:
             return
-        bootstrap_custom_op_env()
+        bootstrap_custom_op_env(include_vendor_lib=True)
         _CUSTOM_OP_REGISTERED = True
 
     @classmethod
