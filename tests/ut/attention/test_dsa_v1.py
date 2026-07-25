@@ -76,9 +76,7 @@ def test_a5_bf16_o_proj_does_not_access_weight_scale():
         ),
         mock.patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
         mock.patch("vllm_ascend.attention.dsa_v1.olora_tp_enable", return_value=False),
-        mock.patch(
-            "vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_quant_batchmatmul"
-        ) as quant_batch_matmul,
+        mock.patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_quant_batchmatmul") as quant_batch_matmul,
     ):
         result = AscendDSAImpl._forward_o_proj(impl, o_proj_input, output)
 
