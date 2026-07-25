@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_v1 import _dsa_o_proj_matmul
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
@@ -1231,7 +1232,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             self._switch_o_proj_to_full_weight(o_proj_full_handles)
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
-            if get_ascend_device_type() in {AscendDeviceType.A5}:
+            if self._check_dynamic_quant(self.wo_a):
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
                 o = torch_npu.npu_transpose_quant_batchmatmul(
@@ -1253,18 +1254,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 if olora_tp_enable():
                     o_proj_input = self.wo_a(o_proj_input)
                 else:
-                    # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
-                    # o = torch.einsum("tgd,grd->tgr", o, wo_a)
-                    o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                        o_proj_input,
-                        self.wo_a.weight,
-                        bias=None,
-                        scale=None,
-                        perm_x1=(1, 0, 2),
-                        perm_x2=(0, 1, 2),
-                        perm_y=(1, 0, 2),
-                        batch_split_factor=1,
-                    )
+                    o_proj_input = _dsa_o_proj_matmul(o_proj_input, self.wo_a.weight, o_proj_groups)
                 o_proj_input = o_proj_input.reshape(num_tokens, -1)
                 output[...] = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
         finally:

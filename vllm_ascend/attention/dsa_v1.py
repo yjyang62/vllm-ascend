@@ -113,13 +113,37 @@ def hadamard_scale(out: torch.Tensor, x_shape: tuple[int, ...], dim: int, scale:
     return out[..., :dim].reshape(*x_shape)
 
 
+def _has_weight_scale(linear) -> bool:
+    return getattr(linear, "weight_scale", None) is not None
+
+
+def _dsa_o_proj_weight_for_batch_matmul(
+    weight: torch.Tensor,
+    n_local_groups: int,
+) -> torch.Tensor:
+    if weight.dim() == 3:
+        return weight
+    if weight.dim() != 2:
+        raise ValueError(f"DSA wo_a weight must be 2D or 3D, got shape {tuple(weight.shape)}.")
+    return weight.view(n_local_groups, -1, weight.shape[-1])
+
+
+def _dsa_o_proj_matmul(
+    o_proj_input: torch.Tensor,
+    weight: torch.Tensor,
+    n_local_groups: int,
+) -> torch.Tensor:
+    grouped_weight = _dsa_o_proj_weight_for_batch_matmul(weight, n_local_groups)
+    return torch.matmul(o_proj_input.transpose(0, 1), grouped_weight.transpose(-1, -2)).transpose(0, 1)
+
+
 def _is_w8a8_dynamic(linear) -> bool:
-    """True iff ``linear`` is wired up with ``AscendW8A8DynamicLinearMethod``."""
+    """True iff ``linear`` can run the W8A8 dynamic matmul fast path."""
     qm = getattr(linear, "quant_method", None)
     if qm is None or isinstance(qm, AscendUnquantizedLinearMethod):
         return False
     inner = getattr(qm, "quant_method", None)
-    return isinstance(inner, AscendW8A8DynamicLinearMethod)
+    return isinstance(inner, AscendW8A8DynamicLinearMethod) and _has_weight_scale(linear)
 
 
 def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
@@ -1561,10 +1585,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         num_tokens = o_proj_input.shape[0]
         group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
         o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
-        # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
-        # + quantized batch matmul). Preserve it as-is: it predates and is
-        # orthogonal to the OTP / olora_tp paths below, so it must win first.
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        # Quantized A5 checkpoints use dynamic MX quantization for o_proj.
+        # BF16 checkpoints have regular linear weights and no weight_scale.
+        if get_ascend_device_type() in {AscendDeviceType.A5} and _has_weight_scale(self.wo_a):
             o = o_proj_input
             o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
             o = torch_npu.npu_transpose_quant_batchmatmul(
@@ -1652,16 +1675,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             o_proj_input = self.wo_a(o_proj_input)
             output[...] = self.wo_b(o_proj_input)
         else:
-            o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                o_proj_input,
-                self.wo_a.weight,
-                bias=None,
-                scale=None,
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-                batch_split_factor=1,
-            )
+            o_proj_input = _dsa_o_proj_matmul(o_proj_input, self.wo_a.weight, self.n_local_groups)
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
             output[...] = self.wo_b(o_proj_input)
         return output
