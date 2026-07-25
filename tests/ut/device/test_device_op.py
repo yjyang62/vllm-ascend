@@ -3,6 +3,7 @@ from unittest import mock
 import pytest
 import torch
 
+import vllm_ascend.ops.sparse_flash_mla as sparse_flash_mla_module
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
 from vllm_ascend.ops.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 
@@ -239,6 +240,56 @@ def test_sparse_flash_mla_wrappers_adapt_dsa_kwargs():
     assert "kv_quant_mode" not in attention_kwargs
     assert "tile_size" not in attention_kwargs
     assert "rope_head_dim" not in attention_kwargs
+
+
+def test_sparse_flash_mla_logs_non_finite_output_once_per_head_status():
+    q = torch.empty(1, 1, 4, 2, dtype=torch.bfloat16)
+    output = torch.tensor([0.0, float("nan"), float("inf"), float("-inf")])
+    attention_op = mock.MagicMock(return_value=(output, "lse"))
+    sparse_flash_mla_module._SPARSE_FLASH_MLA_LOGGED_STATES.clear()
+
+    with (
+        mock.patch(
+            "vllm_ascend.ops.sparse_flash_mla._get_sparse_flash_mla_ops",
+            return_value=(attention_op, mock.MagicMock()),
+        ),
+        mock.patch.object(
+            sparse_flash_mla_module.envs,
+            "VLLM_ASCEND_DSV4_SPARSE_MLA_OUTPUT_CHECK",
+            True,
+        ),
+        mock.patch.object(sparse_flash_mla_module.logger, "warning") as warning,
+    ):
+        assert sparse_flash_mla(q, layout_q="BSND") == (output, "lse")
+        assert sparse_flash_mla(q, layout_q="BSND") == (output, "lse")
+
+    warning.assert_called_once()
+    assert warning.call_args.args[1] == 4
+    assert warning.call_args.args[3] == "bad"
+    assert warning.call_args.args[4:9] == (1, 4, 1, 1, 1)
+
+
+def test_sparse_flash_mla_output_check_can_be_disabled():
+    q = torch.empty(1, 1, 4, 2, dtype=torch.bfloat16)
+    output = torch.tensor([float("inf")])
+    attention_op = mock.MagicMock(return_value=output)
+    sparse_flash_mla_module._SPARSE_FLASH_MLA_LOGGED_STATES.clear()
+
+    with (
+        mock.patch(
+            "vllm_ascend.ops.sparse_flash_mla._get_sparse_flash_mla_ops",
+            return_value=(attention_op, mock.MagicMock()),
+        ),
+        mock.patch.object(
+            sparse_flash_mla_module.envs,
+            "VLLM_ASCEND_DSV4_SPARSE_MLA_OUTPUT_CHECK",
+            False,
+        ),
+        mock.patch.object(sparse_flash_mla_module.logger, "warning") as warning,
+    ):
+        assert sparse_flash_mla(q, layout_q="BSND") is output
+
+    warning.assert_not_called()
 
 
 def test_a5_bf16_dsa_scatter_uses_block_offset_mapping():
