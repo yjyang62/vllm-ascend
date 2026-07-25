@@ -107,6 +107,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    # Toggle the DSV4 BF16 SparseFlashMla output sanity-check log. The check
+    # reports finite/NaN/Inf counts and finite abs-max once per head/status pair.
+    # It is enabled by default for diagnostics and introduces device syncs.
+    "VLLM_ASCEND_DSV4_SPARSE_MLA_OUTPUT_CHECK": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DSV4_SPARSE_MLA_OUTPUT_CHECK", "1"))
+    ),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
