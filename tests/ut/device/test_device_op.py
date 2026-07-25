@@ -292,6 +292,36 @@ def test_sparse_flash_mla_output_check_can_be_disabled():
     warning.assert_not_called()
 
 
+def test_sparse_flash_mla_output_check_skips_aclgraph_capture():
+    q = torch.empty(1, 1, 4, 2, dtype=torch.bfloat16)
+    output = torch.tensor([float("inf")])
+    attention_op = mock.MagicMock(return_value=output)
+    sparse_flash_mla_module._SPARSE_FLASH_MLA_LOGGED_STATES.clear()
+
+    with (
+        mock.patch(
+            "vllm_ascend.ops.sparse_flash_mla._get_sparse_flash_mla_ops",
+            return_value=(attention_op, mock.MagicMock()),
+        ),
+        mock.patch.object(
+            sparse_flash_mla_module.envs,
+            "VLLM_ASCEND_DSV4_SPARSE_MLA_OUTPUT_CHECK",
+            True,
+        ),
+        mock.patch.object(
+            sparse_flash_mla_module,
+            "_is_npu_graph_capturing",
+            return_value=True,
+        ),
+        mock.patch.object(sparse_flash_mla_module.logger, "warning") as warning,
+        mock.patch.object(torch, "isfinite") as isfinite,
+    ):
+        assert sparse_flash_mla(q, layout_q="BSND") is output
+
+    isfinite.assert_not_called()
+    warning.assert_not_called()
+
+
 def test_a5_bf16_dsa_scatter_uses_block_offset_mapping():
     cache = torch.zeros(3, 4, 1, 2, dtype=torch.bfloat16)
     updates = torch.tensor(
