@@ -60,8 +60,18 @@ def _sparse_flash_mla_q_heads(q: torch.Tensor, layout_q: str) -> int | None:
     return None
 
 
+def _is_npu_graph_capturing() -> bool:
+    npu = getattr(torch, "npu", None)
+    is_capturing = getattr(npu, "is_current_stream_capturing", None)
+    return bool(is_capturing()) if callable(is_capturing) else False
+
+
 def _log_sparse_flash_mla_output(q: Any, output: Any, layout_q: str) -> None:
     if not envs.VLLM_ASCEND_DSV4_SPARSE_MLA_OUTPUT_CHECK:
+        return
+    # Tensor reductions followed by item() synchronize NPU and cannot be
+    # captured by ACLGraph. Warmup/eager calls still provide the diagnostic.
+    if _is_npu_graph_capturing():
         return
     if not isinstance(q, torch.Tensor) or not isinstance(output, torch.Tensor):
         return
