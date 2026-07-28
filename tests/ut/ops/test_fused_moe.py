@@ -54,13 +54,15 @@ def test_ascend_unquantized_skips_upstream_modular_kernel_init():
     "is_v024, expected_contiguous",
     [(True, True), (False, False)],
 )
-def test_process_weights_after_loading_uses_version_specific_layout(
+def test_process_weights_after_loading_transposes_parameter_data(
     monkeypatch,
     is_v024,
     expected_contiguous,
 ):
     method = _build_unquantized_method()
     layer = _build_weight_layer()
+    w13_parameter = layer.w13_weight
+    w2_parameter = layer.w2_weight
     original_w13 = layer.w13_weight.detach().clone()
     original_w2 = layer.w2_weight.detach().clone()
     ascend_config = SimpleNamespace(enable_fused_mc2=False)
@@ -78,10 +80,38 @@ def test_process_weights_after_loading_uses_version_specific_layout(
 
     method.process_weights_after_loading(layer)
 
+    # Keep Parameter identity so weight_loader survives Level-2 reload.
+    assert layer.w13_weight is w13_parameter
+    assert layer.w2_weight is w2_parameter
     torch.testing.assert_close(layer.w13_weight, original_w13.transpose(1, 2))
     torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2))
     assert layer.w13_weight.is_contiguous() is expected_contiguous
     assert layer.w2_weight.is_contiguous() is expected_contiguous
+
+
+def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch):
+    method = _build_unquantized_method(dynamic_eplb=True)
+    layer = _build_weight_layer()
+    num_experts = layer.w13_weight.shape[0]
+    ascend_config = SimpleNamespace(enable_fused_mc2=1)
+
+    monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: ascend_config)
+    monkeypatch.setattr(fused_moe_module.torch_npu, "npu_format_cast", lambda weight, _: weight)
+    monkeypatch.setattr(fused_moe_module.torch.npu, "empty_cache", lambda: None)
+    upstream_method_base = AscendUnquantizedFusedMoEMethod.__mro__[2]
+    monkeypatch.setattr(
+        upstream_method_base,
+        "process_weights_after_loading",
+        lambda self, layer: None,
+        raising=False,
+    )
+
+    method.process_weights_after_loading(layer)
+
+    assert not hasattr(layer, "w13_weight")
+    assert not hasattr(layer, "w2_weight")
+    assert len(layer.w13_weight_list) == num_experts
+    assert len(layer.w2_weight_list) == num_experts
 
 
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])

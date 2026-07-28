@@ -57,28 +57,27 @@ During `wake_up()`, vLLM Ascend restores the HCCL process groups, refreshes MoE 
 
     Extra cleanup trades lower sleep-time NPU memory usage for longer wakeup latency. In particular, if ACL graph is enabled, `wake_up()` must call `capture_model()` again after the model state has been restored. Keep `enable_sleep_mode_extra_cleanup` disabled when lower wakeup latency is more important than releasing HCCL and ACL graph workspace memory.
 
-For level 2 sleep, wakeup can be split into two phases:
+For level 2 sleep, wakeup can be split into two phases. After waking weights,
+reload them on every worker (do not call `load_weights` only on the driver):
 
 ```python
 llm.wake_up(tags=["weights"])
-# Reload or update model weights here.
+llm.collective_rpc("reload_weights", kwargs={"weights_path": model})
 llm.wake_up(tags=["kv_cache"])
 ```
 
+`reload_weights` loads the checkpoint again and re-runs Ascend
+`process_weights_after_loading()` (including unquantized MoE transpose). See
+`examples/offline_weight_load.py` and `examples/offline_external_launcher.py`.
+
 With extra cleanup enabled, ACL graphs are recaptured only when `tags` is `None` or contains `"kv_cache"`. This avoids recapturing graphs before externally reloaded weights and KV-cache state are ready.
 
-### Expert weight layout restoration
+### Unquantized MoE notes
 
-For dense models, `wake_up()` simply restores the model weights to NPU memory; the tensor layout is unchanged.
-
-For **unquantized MoE models** (`quant_config is None`), the fused expert weights are stored in a transposed layout for NPU matmul efficiency. This layout is produced once at model load time by `process_weights_after_loading()`: after the weights are loaded, the method transposes the second and third dimensions (`transpose(1, 2)`) of `w13_weight` and `w2_weight` to convert the standard checkpoint layout into the format required by the `torch_npu.npu_grouped_matmul` operator.
-
-After the sleep-mode allocator restores the original (untransposed) memory, `wake_up()` re-applies the same transpose to the affected expert weights when the `"weights"` tag is being restored:
-
-- `w13_weight` (gate/up projection): transposed back to the runtime layout when its second dimension matches `hidden_size`;
-- `w2_weight` (down projection): transposed back to the runtime layout when its third dimension matches `hidden_size`.
-
-This step is skipped entirely for dense models (which have no expert weights) and for quantized models (whose weights are handled by the quantization method).
+- Expert weights are transposed in-place on the existing `Parameter` so
+  `weight_loader` remains available for Level-2 reload.
+- With expert parallel, Ascend EP expert maps are registered as named buffers
+  so Level-2 wake restores the same maps used at runtime.
 
 ## Prepare Model Weights
 

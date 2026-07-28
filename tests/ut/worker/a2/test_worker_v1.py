@@ -248,6 +248,10 @@ class TestNPUWorker(TestBase):
 
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
+            mock_model_runner.post_kv_cache_wake_up.assert_not_called()
+
+            worker.wake_up(tags=["kv_cache"])
+            mock_model_runner.post_kv_cache_wake_up.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")

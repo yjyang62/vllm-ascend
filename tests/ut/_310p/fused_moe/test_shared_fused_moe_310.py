@@ -63,7 +63,7 @@ def test_runner_310_installs_specialized_unquantized_method_and_comm():
     "is_v024, expected_contiguous",
     [(True, True), (False, False)],
 )
-def test_process_weights_after_loading_310_uses_version_specific_layout(
+def test_process_weights_after_loading_310_transposes_parameter_data(
     monkeypatch,
     is_v024,
     expected_contiguous,
@@ -71,6 +71,8 @@ def test_process_weights_after_loading_310_uses_version_specific_layout(
     method = AscendUnquantizedFusedMoEMethod310.__new__(AscendUnquantizedFusedMoEMethod310)
     method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
     layer = _build_weight_layer()
+    w13_parameter = layer.w13_weight
+    w2_parameter = layer.w2_weight
     original_w13 = layer.w13_weight.detach().clone()
     original_w2 = layer.w2_weight.detach().clone()
 
@@ -88,6 +90,8 @@ def test_process_weights_after_loading_310_uses_version_specific_layout(
 
     method.process_weights_after_loading(layer)
 
+    assert layer.w13_weight is w13_parameter
+    assert layer.w2_weight is w2_parameter
     torch.testing.assert_close(layer.w13_weight, original_w13.transpose(1, 2))
     torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2))
     assert layer.w13_weight.is_contiguous() is expected_contiguous

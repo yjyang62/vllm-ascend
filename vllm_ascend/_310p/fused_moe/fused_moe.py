@@ -48,24 +48,15 @@ class AscendUnquantizedFusedMoEMethod310(UnquantizedFusedMoEMethod):
     def process_weights_after_loading(self, layer):
         super().process_weights_after_loading(layer)
 
-        # vLLM PR #44589 landed after the v0.24 main-line cut point
-        # (798185d) and is present in the verified main commit only.
-        if not vllm_version_is("0.24.0"):
-            w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2)
-            w13_data = maybe_trans_nz(w13_data)
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
-            w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2)
-            w2_data = maybe_trans_nz(w2_data)
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
-        else:
-            w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-            w13_data = maybe_trans_nz(w13_data)
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
-            w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-            w2_data = maybe_trans_nz(w2_data)
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+        # Keep Parameter identity (and weight_loader) for Level-2 reload.
+        # vLLM PR #44589 landed after the v0.24 cut point; keep contiguous there.
+        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2)
+        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2)
+        if vllm_version_is("0.24.0"):
+            w13_data = w13_data.contiguous()
+            w2_data = w2_data.contiguous()
+        layer.w13_weight.data = maybe_trans_nz(w13_data)
+        layer.w2_weight.data = maybe_trans_nz(w2_data)
 
     def apply(
         self,

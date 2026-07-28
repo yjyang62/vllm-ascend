@@ -146,7 +146,7 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
         "Qwen/Qwen3-8B",
         local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
     )
-    # TODO: Add moe model test
+    # MoE Level-2 coverage lives in test_offline_weight_load.py.
     cmd = [
         sys.executable,
         str(EXTERNAL_LAUNCHER_SCRIPT),
@@ -172,6 +172,7 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
 
     proc, output = _run_external_launcher(cmd, env)
 
+    assert "Using sleep mode level: 2" in output
     assert "Generated text:" in output
     assert "Sleep and wake up successfully!!" in output
     assert proc.returncode == 0

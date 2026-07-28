@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 """
+Run Level-1/Level-2 sleep + weight reload for Qwen3 MoE.
+
 Run `pytest tests/e2e/pull_request/two_card/test_offline_weight_load.py`.
 """
 
@@ -30,18 +32,18 @@ from tests.e2e.conftest import wait_until_npu_memory_free
 
 MODELS = ["Qwen/Qwen3-30B-A3B"]
 REPO_ROOT = Path(__file__).resolve().parents[4]
-EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.py"
+OFFLINE_WEIGHT_LOAD_SCRIPT = REPO_ROOT / "examples" / "offline_weight_load.py"
 
 
-@pytest.mark.skip("fix me, unstable, timeout")
 @pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("sleep_mode_level", [1, 2])
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 @wait_until_npu_memory_free(0.7)
-def test_qwen3_offline_load_and_sleepmode_tp2(model):
+def test_qwen3_offline_load_and_sleepmode_tp2(model, sleep_mode_level):
     env = os.environ.copy()
     cmd = [
         sys.executable,
-        str(EXTERNAL_LAUNCHER_SCRIPT),
+        str(OFFLINE_WEIGHT_LOAD_SCRIPT),
         "--model",
         model,
         "--tp-size",
@@ -53,11 +55,14 @@ def test_qwen3_offline_load_and_sleepmode_tp2(model):
         "--proc-per-node",
         "2",
         "--trust-remote-code",
+        "--enable-expert-parallel",
         "--enable-sleep-mode",
         "--temperature",
         "0",
         "--model-weight-gib",
         "0.8",
+        "--sleep-mode-level",
+        str(sleep_mode_level),
     ]
 
     print(f"Running subprocess: {' '.join(cmd)}")
@@ -72,6 +77,7 @@ def test_qwen3_offline_load_and_sleepmode_tp2(model):
 
     print(output)
 
+    assert f"Using sleep mode level: {sleep_mode_level}" in output
     assert "Generated text:" in output
     assert "Sleep and wake up successfully!!" in output
     assert proc.returncode == 0

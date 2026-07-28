@@ -107,20 +107,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
-        # vLLM PR #44589 landed after the v0.24 main-line cut point
-        # (798185d) and is present in the verified main commit only.
-        if not vllm_version_is("0.24.0"):
-            w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2)
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
-            w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2)
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
-        else:
-            w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
-            w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+        # Keep Parameter identity (and weight_loader) for Level-2 reload.
+        # vLLM PR #44589 landed after the v0.24 cut point; keep contiguous there.
+        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2)
+        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2)
+        if vllm_version_is("0.24.0"):
+            w13_data = w13_data.contiguous()
+            w2_data = w2_data.contiguous()
+        layer.w13_weight.data = w13_data
+        layer.w2_weight.data = w2_data
 
         # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
@@ -407,7 +402,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         local_num_experts = (moe_config.num_experts + self.global_redundant_expert_num) // moe_config.ep_size
         moe_config.num_local_experts = local_num_experts
         routed_experts.expert_map_manager._local_num_experts = local_num_experts
+        # Re-register Ascend EP map as named buffer so Level-2 wake restores it.
         routed_experts.expert_map_manager._expert_map = self._expert_map
+        routed_experts.update_expert_map_info()
 
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
         self.multi_stage = False
