@@ -35,9 +35,9 @@
 > - 查看配置：是否满足上表「开启方式」与「约束条件」
 > - 日志文件：vLLM 服务 stdout / worker 日志
 > - 快速过滤：
->   - Batch：`grep -E "batch-invariant|BATCH_INVARIANT" 日志文件`
->   - Sleep/Wake：`grep -E "Sleep mode|CaMem |Destroyed .* HCCL|Restored .* HCCL|FRACTAL_NZ" 日志文件`
->   - Weight Transfer 失败：`grep -E "Weight transfer not configured|start_weight_update|HCCL weight transfer not initialized|ipc_handles_pickled|IPC handle not found|VLLM_ASCEND_ENABLE_NZ" 日志文件`
+>     - Batch：`grep -E "batch-invariant|BATCH_INVARIANT" 日志文件`
+>     - Sleep/Wake：`grep -E "Sleep mode|CaMem |Destroyed .* HCCL|Restored .* HCCL|FRACTAL_NZ" 日志文件`
+>     - Weight Transfer 失败：`grep -E "Weight transfer not configured|start_weight_update|HCCL weight transfer not initialized|ipc_handles_pickled|IPC handle not found|VLLM_ASCEND_ENABLE_NZ" 日志文件`
 >
 > **总流程**：
 
