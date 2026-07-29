@@ -1674,8 +1674,23 @@ class AscendDSAImpl(DSAAttentionImpl):
         elif olora_tp_enable():
             o_proj_input = self.wo_a(o_proj_input)
             output[...] = self.wo_b(o_proj_input)
-        else:
+        elif get_ascend_device_type() == AscendDeviceType.A5:
+            # A5 BF16 checkpoints: plain grouped matmul (no weight_scale / MX path).
             o_proj_input = _dsa_o_proj_matmul(o_proj_input, self.wo_a.weight, self.n_local_groups)
+            o_proj_input = o_proj_input.reshape(num_tokens, -1)
+            output[...] = self.wo_b(o_proj_input)
+        else:
+            # A2/A3 keep the historical npu_transpose_batchmatmul path.
+            o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
+                self.wo_a.weight,
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
             output[...] = self.wo_b(o_proj_input)
         return output
