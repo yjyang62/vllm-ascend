@@ -77,9 +77,43 @@ def test_a5_bf16_o_proj_does_not_access_weight_scale():
         mock.patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
         mock.patch("vllm_ascend.attention.dsa_v1.olora_tp_enable", return_value=False),
         mock.patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_quant_batchmatmul") as quant_batch_matmul,
+        mock.patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul") as batch_matmul,
     ):
         result = AscendDSAImpl._forward_o_proj(impl, o_proj_input, output)
 
     quant_batch_matmul.assert_not_called()
+    batch_matmul.assert_not_called()
     expected = _dsa_o_proj_matmul(o_proj_input, impl.wo_a.weight, impl.n_local_groups).reshape(2, 6)
+    torch.testing.assert_close(result, expected)
+
+
+def test_a3_o_proj_keeps_npu_transpose_batchmatmul():
+    impl = SimpleNamespace(
+        n_local_groups=3,
+        wo_a=SimpleNamespace(weight=torch.arange(24, dtype=torch.float32).reshape(6, 4)),
+        wo_b=lambda x: x,
+    )
+    o_proj_input = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    output = torch.empty(2, 6)
+    expected = torch.arange(12, dtype=torch.float32).reshape(2, 6)
+
+    with (
+        mock.patch(
+            "vllm_ascend.attention.dsa_v1.get_ascend_device_type",
+            return_value=AscendDeviceType.A3,
+        ),
+        mock.patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        mock.patch("vllm_ascend.attention.dsa_v1.olora_tp_enable", return_value=False),
+        mock.patch(
+            "vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul",
+            return_value=expected,
+        ) as batch_matmul,
+        mock.patch(
+            "vllm_ascend.attention.dsa_v1._dsa_o_proj_matmul",
+            side_effect=AssertionError("A3 must not use BF16 torch.matmul o_proj"),
+        ),
+    ):
+        result = AscendDSAImpl._forward_o_proj(impl, o_proj_input, output)
+
+    batch_matmul.assert_called_once()
     torch.testing.assert_close(result, expected)
