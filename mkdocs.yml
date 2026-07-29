@@ -311,6 +311,7 @@ nav:
         - developer_guide/performance_and_debug/optimization_and_tuning.md
         - developer_guide/performance_and_debug/service_profiling_guide.md
         - developer_guide/performance_and_debug/msprobe_guide.md
+        - developer_guide/performance_and_debug/rl_log_guide.md
   - Community:
     - community/index.md
     - community/governance.md
