@@ -117,23 +117,17 @@ def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
 
 
-def _dsa_o_proj_weight_for_batch_matmul(
-    weight: torch.Tensor,
-    n_local_groups: int,
-) -> torch.Tensor:
-    if weight.dim() == 3:
-        return weight
-    if weight.dim() != 2:
-        raise ValueError(f"DSA wo_a weight must be 2D or 3D, got shape {tuple(weight.shape)}.")
-    return weight.view(n_local_groups, -1, weight.shape[-1])
-
-
 def _dsa_o_proj_matmul(
     o_proj_input: torch.Tensor,
     weight: torch.Tensor,
     n_local_groups: int,
 ) -> torch.Tensor:
-    grouped_weight = _dsa_o_proj_weight_for_batch_matmul(weight, n_local_groups)
+    if weight.dim() == 3:
+        grouped_weight = weight
+    elif weight.dim() == 2:
+        grouped_weight = weight.view(n_local_groups, -1, weight.shape[-1])
+    else:
+        raise ValueError(f"DSA wo_a weight must be 2D or 3D, got shape {tuple(weight.shape)}.")
     return torch.matmul(o_proj_input.transpose(0, 1), grouped_weight.transpose(-1, -2)).transpose(0, 1)
 
 
