@@ -138,12 +138,12 @@ def _dsa_o_proj_matmul(
 
 
 def _is_w8a8_dynamic(linear) -> bool:
-    """True iff ``linear`` can run the W8A8 dynamic matmul fast path."""
+    """True iff ``linear`` is wired up with ``AscendW8A8DynamicLinearMethod``."""
     qm = getattr(linear, "quant_method", None)
     if qm is None or isinstance(qm, AscendUnquantizedLinearMethod):
         return False
     inner = getattr(qm, "quant_method", None)
-    return isinstance(inner, AscendW8A8DynamicLinearMethod) and _has_weight_scale(linear)
+    return isinstance(inner, AscendW8A8DynamicLinearMethod)
 
 
 def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):

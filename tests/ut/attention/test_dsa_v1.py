@@ -15,12 +15,12 @@ from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinea
 from vllm_ascend.utils import AscendDeviceType
 
 
-def test_w8a8_dynamic_requires_loaded_weight_scale():
+def test_is_w8a8_dynamic_detects_method_without_weight_scale():
     quant_method = AscendW8A8DynamicLinearMethod.__new__(AscendW8A8DynamicLinearMethod)
     linear = SimpleNamespace(quant_method=SimpleNamespace(quant_method=quant_method))
 
     assert not _has_weight_scale(linear)
-    assert not _is_w8a8_dynamic(linear)
+    assert _is_w8a8_dynamic(linear)
 
     linear.weight_scale = object()
 
