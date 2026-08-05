@@ -117,20 +117,6 @@ def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
 
 
-def _dsa_o_proj_matmul(
-    o_proj_input: torch.Tensor,
-    weight: torch.Tensor,
-    n_local_groups: int,
-) -> torch.Tensor:
-    if weight.dim() == 3:
-        grouped_weight = weight
-    elif weight.dim() == 2:
-        grouped_weight = weight.view(n_local_groups, -1, weight.shape[-1])
-    else:
-        raise ValueError(f"DSA wo_a weight must be 2D or 3D, got shape {tuple(weight.shape)}.")
-    return torch.matmul(o_proj_input.transpose(0, 1), grouped_weight.transpose(-1, -2)).transpose(0, 1)
-
-
 def _is_w8a8_dynamic(linear) -> bool:
     """True iff ``linear`` is wired up with ``AscendW8A8DynamicLinearMethod``."""
     qm = getattr(linear, "quant_method", None)
@@ -1668,13 +1654,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         elif olora_tp_enable():
             o_proj_input = self.wo_a(o_proj_input)
             output[...] = self.wo_b(o_proj_input)
-        elif get_ascend_device_type() == AscendDeviceType.A5:
-            # A5 BF16 checkpoints: plain grouped matmul (no weight_scale / MX path).
-            o_proj_input = _dsa_o_proj_matmul(o_proj_input, self.wo_a.weight, self.n_local_groups)
-            o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            output[...] = self.wo_b(o_proj_input)
         else:
-            # A2/A3 keep the historical npu_transpose_batchmatmul path.
+            # A2/A3 and A5 BF16 (no weight_scale / MX path) share the same
+            # npu_transpose_batchmatmul o_proj kernel.
             o_proj_input = torch_npu.npu_transpose_batchmatmul(
                 o_proj_input,
                 self.wo_a.weight,

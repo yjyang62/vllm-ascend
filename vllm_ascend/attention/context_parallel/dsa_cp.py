@@ -14,7 +14,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.dsa_v1 import _dsa_o_proj_matmul
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
@@ -1253,11 +1252,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 if olora_tp_enable():
                     o_proj_input = self.wo_a(o_proj_input)
-                elif get_ascend_device_type() == AscendDeviceType.A5:
-                    # A5 BF16 checkpoints: plain grouped matmul (no weight_scale / MX path).
-                    o_proj_input = _dsa_o_proj_matmul(o_proj_input, self.wo_a.weight, o_proj_groups)
                 else:
-                    # A2/A3 keep the historical npu_transpose_batchmatmul path.
+                    # A2/A3 and A5 BF16 (no weight_scale / MX path) share the same
+                    # npu_transpose_batchmatmul o_proj kernel.
                     o_proj_input = torch_npu.npu_transpose_batchmatmul(
                         o_proj_input,
                         self.wo_a.weight,
