@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_v1 import _wo_a_weight_for_transpose_batchmatmul
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
@@ -1254,10 +1255,13 @@ class AscendDSACPImpl(DSAAttentionImpl):
                     o_proj_input = self.wo_a(o_proj_input)
                 else:
                     # A2/A3 and A5 BF16 (no weight_scale / MX path) share the same
-                    # npu_transpose_batchmatmul o_proj kernel.
+                    # npu_transpose_batchmatmul o_proj kernel. A5 BF16 wo_a may
+                    # still be 2D and must be reshaped to [G, D, R] first.
                     o_proj_input = torch_npu.npu_transpose_batchmatmul(
                         o_proj_input,
-                        self.wo_a.weight,
+                        _wo_a_weight_for_transpose_batchmatmul(
+                            self.wo_a.weight, o_proj_groups, self.o_lora_rank
+                        ),
                         bias=None,
                         scale=None,
                         perm_x1=(1, 0, 2),
