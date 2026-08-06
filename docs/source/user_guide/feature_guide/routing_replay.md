@@ -1,73 +1,66 @@
-# Routing Replay
+# Routing Replay（路由回放）
 
 !!! note
 
-    Routing Replay builds on the upstream vLLM routed-experts capture path
-    (`--enable-return-routed-experts`). vLLM Ascend adapts the capture path for
-    Ascend MoE communication layouts (DP / EP / SP / AlltoAll / MC2).
+    Routing Replay 基于上游 vLLM 的 routed-experts 采集能力
+    （`--enable-return-routed-experts`）。vLLM Ascend 针对 Ascend MoE
+    通信布局（DP / EP / SP / AlltoAll / MC2）适配了采集路径。
 
-Routing Replay (also called **Routed Experts Replay** or **R3**) records which
-MoE experts process each token during inference rollout, and returns those
-expert IDs with the generated text. Training frameworks can then **replay** the
-same routing decisions in the training forward pass so that train-time expert
-selection matches inference-time routing.
+Routing Replay（也称 **Routed Experts Replay** 或 **R3**）会在推理
+rollout 阶段记录每个 token 实际命中的 MoE expert，并将这些 expert ID
+随生成结果一并返回。训练框架可以在训练 forward 中**回放**同一套路由决策，
+使训练侧 expert 选择与推理侧保持一致。
 
-This is essential for MoE RL pipelines such as GRPO and RLHF, where
-training-inference router mismatch can amplify policy KL divergence and
-destabilize training.
+这对 GRPO、RLHF 等 MoE RL 流程非常关键：训练/推理 router 不一致会放大
+policy KL，甚至导致训练不稳定或崩溃。
 
-Upstream background:
+上游参考：
 
 - [Stabilizing MoE Reinforcement Learning by Aligning Training and Inference Routers](https://arxiv.org/abs/2510.11370)
-- Upstream example: [`examples/rl/routed_experts_e2e.py`](https://github.com/vllm-project/vllm/blob/main/examples/rl/routed_experts_e2e.py)
+- 上游示例：[`examples/rl/routed_experts_e2e.py`](https://github.com/vllm-project/vllm/blob/main/examples/rl/routed_experts_e2e.py)
 
-## Motivation
+## 原理
 
-In a typical MoE RL loop, rollout and training often use different engines
-(for example, vLLM for generation and Megatron / FSDP for training). Even with
-aligned weights, MoE routers can select different experts for the same token
-across the two engines. That routing gap shows up as larger train/infer
-probability mismatch than on dense models.
+在典型 MoE RL 循环中，rollout 和训练常常使用不同引擎（例如 vLLM 负责生成，
+Megatron / FSDP 负责训练）。即便权重已经对齐，两侧 router 仍可能对同一
+token 选出不同 expert，从而使 train/infer 概率偏差显著大于 Dense 模型。
 
-| Limitation | Symptom | Consequence |
+| 局限 | 表现 | 后果 |
 | --- | --- | --- |
-| Train/infer router mismatch | Same token activates different experts | Larger policy KL, unstable RL updates |
-| Router non-determinism | Repeated forwards disagree on top-k experts | Hard-to-reproduce rollouts and gradients |
-| Off-policy amplification | Importance ratios become extreme | Training collapse on MoE RL workloads |
+| 训练/推理路由不一致 | 同一 token 激活不同 expert | policy KL 变大，RL 更新不稳定 |
+| Router 非确定性 | 多次 forward 的 top-k expert 不一致 | rollout 与梯度难以复现 |
+| Off-policy 放大 | importance ratio 出现极端值 | MoE RL 训练崩溃风险升高 |
 
-Routing Replay addresses the root cause: **reuse inference routing during training**.
+Routing Replay 直接对准根因：**训练阶段复用推理阶段的路由结果**。
 
-**Without Routing Replay:**
-
-```text
-Rollout (vLLM)  →  expert set A
-Train forward   →  expert set B  (may differ)
-                →  train/infer logits diverge
-```
-
-**With Routing Replay:**
+**没有 Routing Replay：**
 
 ```text
-Rollout (vLLM)  →  expert set A  + return routed_experts
-Train forward   →  force expert set A
-                →  train/infer routing aligned
+Rollout（vLLM） → expert 集合 A
+训练 forward    → expert 集合 B（可能不同）
+                → train/infer logits 发散
 ```
 
-## How it works
+**启用 Routing Replay：**
 
-1. Start the inference engine with `--enable-return-routed-experts`.
-2. During each MoE layer forward, Ascend captures per-token `topk_ids`.
-3. When the request finishes, vLLM returns a 3-D expert-ID tensor with the
-   completion output.
-4. The trainer concatenates / reshapes that tensor to the contract expected by
-   the training stack (for example Megatron
-   `rollout_routed_experts`), then forces those expert indices during the
-   training forward.
+```text
+Rollout（vLLM） → expert 集合 A，并返回 routed_experts
+训练 forward    → 强制使用 expert 集合 A
+                → train/infer 路由对齐
+```
+
+## 工作流程
+
+1. 推理引擎启动时打开 `--enable-return-routed-experts`。
+2. 每一层 MoE forward 中，Ascend 捕获该层每个 token 的 `topk_ids`。
+3. 请求完成后，vLLM 在 completion 结果中返回三维 expert ID 张量。
+4. 训练侧按约定拼接/重塑张量（例如 Megatron 的
+   `rollout_routed_experts`），并在训练 forward 中强制使用这些 expert 索引。
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant T as Trainer / RL Client
+    participant T as 训练侧 / RL Client
     participant S as vLLM Server<br/>Ascend Worker
     participant M as MoE Layers
     participant A as Completions / Generate API
@@ -76,27 +69,27 @@ sequenceDiagram
     T->>S: GET /health
     S-->>T: 200 OK
 
-    T->>A: inference / rollout request
-    A->>S: schedule generate
-    loop each MoE layer
+    T->>A: 推理 / rollout 请求
+    A->>S: 调度 generate
+    loop 每一层 MoE
         S->>M: select_experts → topk_ids
         M->>S: RoutedExpertsCapturer.capture(layer_id, topk_ids)
     end
-    S->>S: pack prompt + decode routing
-    A-->>T: text + routed_experts<br/>(shape [seq, layers, top_k])
+    S->>S: 打包 prompt + decode 路由
+    A-->>T: text + routed_experts<br/>shape [seq, layers, top_k]
 
-    T->>T: validate shape / dtype<br/>build rollout_routed_experts
-    T->>T: training forward<br/>replay captured expert IDs
+    T->>T: 校验 shape / dtype<br/>构造 rollout_routed_experts
+    T->>T: 训练 forward<br/>回放捕获的 expert IDs
     T-->>T: ROUTING_REPLAY=PASS
 ```
 
-On Ascend, capture is hooked from the Ascend fused-MoE path and patched into
-upstream `RoutedExpertsCapturer.capture` so DP/EP/SP token layouts are sliced
-correctly before writing the device buffer.
+在 Ascend 上，采集挂接在 Ascend fused-MoE 路径中，并通过 patch 上游
+`RoutedExpertsCapturer.capture`，在写入 device buffer 前正确处理
+DP/EP/SP 下的 token 布局切片。
 
-## Enabling Routing Replay
+## 如何启用
 
-### Online serving
+### 在线服务
 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B \
@@ -106,8 +99,8 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --async-scheduling false
 ```
 
-Then call the OpenAI-compatible Completions API. When the feature is enabled,
-each finished choice includes `routed_experts` as base64-encoded NumPy bytes:
+然后调用 OpenAI 兼容的 Completions API。功能开启后，已完成请求的每个
+choice 会携带 base64 编码的 NumPy `routed_experts`：
 
 ```python
 import io
@@ -131,7 +124,7 @@ routed_experts = np.load(io.BytesIO(base64.b64decode(payload)))
 print(routed_experts.shape, routed_experts.dtype)
 ```
 
-### Offline / in-process API
+### 离线 / 进程内 API
 
 ```python
 from vllm import LLM, SamplingParams
@@ -154,77 +147,72 @@ assert routed is not None and routed.size > 0
 print(routed.shape)  # [seq_len, num_moe_layers, top_k]
 ```
 
-## Response contract
+## 返回约定
 
-| Field | Where | Meaning |
+| 字段 | 位置 | 含义 |
 | --- | --- | --- |
-| `routed_experts` | `CompletionOutput` / `choices[].routed_experts` | Expert IDs used for the request tokens |
+| `routed_experts` | `CompletionOutput` / `choices[].routed_experts` | 请求 token 使用的 expert ID |
 
-Tensor contract:
+张量约定：
 
-| Property | Value |
+| 属性 | 值 |
 | --- | --- |
 | Shape | `[num_tokens, num_moe_layers, top_k]` |
-| Typical length | `prompt_len + generated_len - 1` (next-token aligned) |
-| Dtype (engine buffer) | `int32` on worker transit buffers |
-| HTTP encoding | base64-encoded `.npy` bytes |
-| Valid IDs | `[0, num_experts)` (prefix-cache sentinel may use `-1` when applicable) |
+| 典型长度 | `prompt_len + generated_len - 1`（按 next-token 对齐） |
+| Dtype（引擎缓冲） | worker 传输缓冲使用 `int32` |
+| HTTP 编码 | base64 编码的 `.npy` 字节 |
+| 合法 ID | `[0, num_experts)`（prefix cache 场景可能使用 `-1` 哨兵值） |
 
-For RL trainers that expect a single Megatron-facing buffer
-(`rollout_routed_experts`), decode the response tensor and assign it after
-shape validation:
+若训练框架期望单个 Megatron 侧缓冲（`rollout_routed_experts`），请先解码响应
+张量，再校验 shape 后赋值：
 
 ```text
 rollout_routed_experts.shape == (len(tokens) - 1, num_layers, moe_router_topk)
 ```
 
-Example for Qwen3-30B-A3B: `(seq_len - 1, 48, 8)`.
+以 Qwen3-30B-A3B 为例：`(seq_len - 1, 48, 8)`。
 
-## Ascend implementation notes
+## Ascend 实现说明
 
-vLLM Ascend does **not** reimplement the full RL trainer replay kernel. It
-implements the inference-side capture path required by upstream vLLM:
+vLLM Ascend **不会**重写完整的训练侧 replay kernel，而是实现上游 vLLM 所需的
+推理侧采集路径：
 
-| Component | Role |
+| 组件 | 作用 |
 | --- | --- |
-| `vllm_ascend/ops/fused_moe/fused_moe.py` | After `select_experts`, call capturer with `topk_ids` |
-| `vllm_ascend/patch/worker/patch_routed_experts_capture.py` | Patch `RoutedExpertsCapturer.capture` for Ascend DP/SP/AlltoAll/MC2 layouts |
-| `NPUModelRunner.init_routed_experts_capturer` | Allocate buffers and bind capturer onto Ascend MoE runners |
+| `vllm_ascend/ops/fused_moe/fused_moe.py` | 在 `select_experts` 后调用 capturer，传入 `topk_ids` |
+| `vllm_ascend/patch/worker/patch_routed_experts_capture.py` | patch `RoutedExpertsCapturer.capture`，适配 Ascend DP/SP/AlltoAll/MC2 布局 |
+| `NPUModelRunner.init_routed_experts_capturer` | 分配缓冲，并把 capturer 绑定到 Ascend MoE runner |
 
-Supported parallel paths covered by the Ascend capturer patch include:
+Ascend capturer patch 覆盖的并行路径包括：
 
-- single-DP and multi-DP token ownership slicing
-- padded all-gather layouts
-- sequence-parallel shards with TP all-gather reconstruction
-- AlltoAll and MC2 MoE communication types
+- 单 DP / 多 DP 的 token 归属切片
+- padded all-gather 布局
+- sequence parallel 分片后的 TP all-gather 重建
+- AlltoAll 与 MC2 MoE 通信类型
 
-## Limitations
+## 限制
 
-- **MoE only.** Dense models have no routed experts to capture.
-- **Prefer `async_scheduling=False`** for routing-replay validation. Some
-  vLLM versions treat routed-experts capture as incompatible with async
-  scheduling.
-- **Finished requests only.** `routed_experts` is assembled when the request
-  completes; streaming chunks do not each carry a full routing tensor.
-- **Trainer integration required.** Returning expert IDs is necessary but not
-  sufficient: the training stack must force those IDs during its MoE forward
-  (for example via `--use-rollout-routing-replay` in frameworks that support R3).
+- **仅支持 MoE。** Dense 模型没有可采集的 routed experts。
+- **建议关闭 async scheduling（`async_scheduling=False`）。**
+  部分 vLLM 版本将 routed-experts 采集与 async scheduling 视为不兼容。
+- **仅在请求完成后返回完整张量。** `routed_experts` 在请求 finish 时组装；
+  流式分片不会各自携带完整路由张量。
+- **需要训练侧接入。** 仅返回 expert ID 不够，训练栈必须在 MoE forward 中
+  强制使用这些 ID（例如支持 R3 的框架中的 `--use-rollout-routing-replay`）。
 
-## Tested models
+## 已验证模型
 
-CI coverage currently includes:
+当前 CI 覆盖：
 
 - `Qwen/Qwen3-30B-A3B`
 - `Qwen/Qwen3.5-35B-A3B`
 
-See `tests/e2e/pull_request/two_card/test_moe_routing_replay.py`.
+参见 `tests/e2e/pull_request/two_card/test_moe_routing_replay.py`。
 
-## Related features
+## 相关功能
 
-- [Batch Invariance](batch_invariance.md): reduces non-determinism in kernels;
-  complementary to routing replay for RL stability.
-- [Sleep Mode](sleep_mode.md): memory offload between rollout and training
-  phases in colocated RL setups.
-- Weight transfer examples under `examples/rl/` (`rlhf_http_npu_ipc.py`,
-  `rlhf_http_hccl.py`) for synchronizing updated policy weights into the
-  inference engine.
+- [Batch Invariance](batch_invariance.md)：降低算子非确定性，可与 routing replay
+  互补，提升 RL 稳定性。
+- [Sleep Mode](sleep_mode.md)：同卡 RL 场景下，在 rollout 与训练阶段之间做显存卸载。
+- 权重同步示例见 `examples/rl/`（`rlhf_http_npu_ipc.py`、`rlhf_http_hccl.py`），
+  用于把更新后的策略权重同步到推理引擎。

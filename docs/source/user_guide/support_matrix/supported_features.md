@@ -4,7 +4,7 @@ The feature support principle of vLLM Ascend is: **aligned with vLLM**. We are a
 
 Tool calling: [vLLM documentation](https://docs.vllm.ai/en/latest/features/tool_calling/)
 
-Routing Replay (MoE RL routed-experts capture): [Routing Replay][routing_replay]
+Routing Replay（MoE RL 路由回放 / routed-experts capture）：[Routing Replay][routing_replay]
 
 You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is the feature support status of vLLM Ascend:
 
