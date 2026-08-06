@@ -4,6 +4,8 @@ The feature support principle of vLLM Ascend is: **aligned with vLLM**. We are a
 
 Tool calling: [vLLM documentation](https://docs.vllm.ai/en/latest/features/tool_calling/)
 
+Routing Replay (MoE RL routed-experts capture): [Routing Replay][routing_replay]
+
 You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is the feature support status of vLLM Ascend:
 
 | Feature                       |      Status    | Next Step                                                              |
@@ -29,6 +31,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Graph Mode                    | 🟢 Functional    | Functional, see detailed note: [Graph Mode][graph_mode]                 |
 | Sleep Mode                    | 🟢 Functional    | Functional, see detailed note: [Sleep Mode][sleep_mode]                 |
 | Context Parallel              | 🟢 Functional    | Functional, see detailed note: [Context Parallel][context_parallel]     |
+| Routing Replay                | 🔵 Experimental  | Functional, see detailed note: [Routing Replay][routing_replay]         |
 
 - 🟢 Functional: Fully operational, with ongoing optimizations.
 - 🔵 Experimental: Experimental support, interfaces and functions may change.
@@ -46,3 +49,4 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 [1P1D]: https://github.com/vllm-project/vllm-ascend/pull/950
 [context_parallel]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html
 [sleep_mode]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/sleep_mode.html
+[routing_replay]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/routing_replay.html
