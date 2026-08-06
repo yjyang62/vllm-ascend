@@ -178,6 +178,7 @@ TITLES = {
     "user_guide/feature_guide/Ai_QoS_introduction_en.md": {"en": "AI QoS", "zh": "AI QoS"},
     "user_guide/feature_guide/Fine_grained_TP.md": {"en": "Fine-grained TP", "zh": "细粒度 TP"},
     "user_guide/feature_guide/batch_invariance.md": {"en": "Batch Invariance", "zh": "批次不变性"},
+    "user_guide/feature_guide/routing_replay.md": {"en": "Routing Replay", "zh": "路由回放"},
     "user_guide/feature_guide/context_parallel.md": {"en": "Context Parallel", "zh": "上下文并行"},
     "user_guide/feature_guide/cpu_binding.md": {"en": "CPU Binding", "zh": "CPU 绑定"},
     "user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md": {
@@ -190,6 +191,7 @@ TITLES = {
         "zh": "专家并行负载均衡",
     },
     "user_guide/feature_guide/external_dp.md": {"en": "External DP", "zh": "外部数据并行"},
+    "user_guide/feature_guide/dp_router.md": {"en": "DP Router", "zh": "DP 路由"},
     "user_guide/feature_guide/flash_attention.md": {"en": "Flash Attention", "zh": "Flash 注意力"},
     "user_guide/feature_guide/graph_mode.md": {"en": "Graph Mode", "zh": "图模式"},
     "user_guide/feature_guide/kv_cache_cpu_offload.md": {"en": "KV Cache CPU Offload", "zh": "KV Cache CPU 卸载"},
