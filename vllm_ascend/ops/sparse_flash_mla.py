@@ -11,32 +11,19 @@ import torch_npu
 
 @lru_cache
 def _get_sparse_flash_mla_ops() -> tuple[Callable, Callable]:
-    """Load SparseFlashMla ops from torch_npu, else cann_ops_transformer."""
-    attention_op = getattr(torch_npu, "npu_sparse_flash_mla", None)
-    metadata_op = getattr(torch_npu, "npu_sparse_flash_mla_metadata", None)
-    if attention_op is not None and metadata_op is not None:
-        return attention_op, metadata_op
-
+    """Load SparseFlashMla operators exposed by torch_npu/op-plugin."""
     try:
-        import cann_ops_transformer  # noqa: F401
-    except ImportError as exc:
-        raise RuntimeError(
-            "DeepSeek-V4 BF16 KV on Ascend A5 requires SparseFlashMla. "
-            "Neither torch_npu.npu_sparse_flash_mla nor cann_ops_transformer "
-            "is available. Install a torch_npu/op-plugin build that exposes "
-            "npu_sparse_flash_mla*, or install cann_ops_transformer with an "
-            "Ascend950 SparseFlashMla OPP (ASCEND_CUSTOM_OPP_PATH)."
-        ) from exc
-
-    namespace = torch.ops.cann_ops_transformer
-    try:
-        return namespace.sparse_flash_mla, namespace.sparse_flash_mla_metadata
+        attention_op = torch_npu.npu_sparse_flash_mla
+        metadata_op = torch_npu.npu_sparse_flash_mla_metadata
     except AttributeError as exc:
         raise RuntimeError(
-            "SparseFlashMla is not exposed by torch_npu, and the installed "
-            "cann_ops_transformer package does not provide sparse_flash_mla / "
-            "sparse_flash_mla_metadata."
+            "DeepSeek-V4 BF16 KV on Ascend A5 requires torch_npu APIs "
+            "npu_sparse_flash_mla and npu_sparse_flash_mla_metadata. "
+            "Install a torch_npu/op-plugin build that exposes these operators, "
+            "and ensure the Ascend950 SparseFlashMla OPP is available "
+            "(toolkit built-in or ASCEND_CUSTOM_OPP_PATH)."
         ) from exc
+    return attention_op, metadata_op
 
 
 def _add_compressed_kv_lengths(kwargs: dict[str, Any]) -> None:
