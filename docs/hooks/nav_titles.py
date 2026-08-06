@@ -192,6 +192,10 @@ TITLES = {
     },
     "user_guide/feature_guide/external_dp.md": {"en": "External DP", "zh": "外部数据并行"},
     "user_guide/feature_guide/dp_router.md": {"en": "DP Router", "zh": "DP 路由"},
+    "user_guide/feature_guide/token_in_token_out.md": {
+        "en": "Token In / Token Out",
+        "zh": "Token In / Token Out",
+    },
     "user_guide/feature_guide/flash_attention.md": {"en": "Flash Attention", "zh": "Flash 注意力"},
     "user_guide/feature_guide/graph_mode.md": {"en": "Graph Mode", "zh": "图模式"},
     "user_guide/feature_guide/kv_cache_cpu_offload.md": {"en": "KV Cache CPU Offload", "zh": "KV Cache CPU 卸载"},
