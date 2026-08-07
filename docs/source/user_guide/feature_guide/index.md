@@ -10,6 +10,7 @@ cpu_binding
 Ai_QoS_introduction_en
 quantization
 sleep_mode
+sleep_wakeup
 structured_output
 lora
 expert_parallelism_load_balancer

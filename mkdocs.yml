@@ -248,6 +248,7 @@ nav:
         - user_guide/feature_guide/Ai_QoS_introduction_en.md
         - user_guide/feature_guide/quantization.md
         - user_guide/feature_guide/sleep_mode.md
+        - user_guide/feature_guide/sleep_wakeup.md
         - user_guide/feature_guide/structured_output.md
         - user_guide/feature_guide/lora.md
         - user_guide/feature_guide/expert_parallelism_load_balancer.md

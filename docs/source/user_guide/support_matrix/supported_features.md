@@ -10,6 +10,8 @@ DP Router（External DP 外部负载均衡路由）：[DP Router][dp_router]
 
 Token In / Token Out（`/inference/v1/generate`）：[Token In / Token Out][token_in_token_out]
 
+Sleep / Wakeup（RL 分阶段休眠唤醒流程）：[Sleep / Wakeup][sleep_wakeup]
+
 You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is the feature support status of vLLM Ascend:
 
 | Feature                       |      Status    | Next Step                                                              |
@@ -34,6 +36,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Quantization                  | 🟢 Functional    | W8A8 available; working on more quantization method support (W4A8, etc.) |
 | Graph Mode                    | 🟢 Functional    | Functional, see detailed note: [Graph Mode][graph_mode]                 |
 | Sleep Mode                    | 🟢 Functional    | Functional, see detailed note: [Sleep Mode][sleep_mode]                 |
+| Sleep / Wakeup (RL flow)      | 🟢 Functional    | Functional, see detailed note: [Sleep / Wakeup][sleep_wakeup]           |
 | Context Parallel              | 🟢 Functional    | Functional, see detailed note: [Context Parallel][context_parallel]     |
 | Routing Replay                | 🔵 Experimental  | Functional, see detailed note: [Routing Replay][routing_replay]         |
 | DP Router                     | 🔵 Experimental  | Functional, see detailed note: [DP Router][dp_router]                   |
