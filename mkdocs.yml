@@ -248,6 +248,7 @@ nav:
         - user_guide/feature_guide/Ai_QoS_introduction_en.md
         - user_guide/feature_guide/quantization.md
         - user_guide/feature_guide/sleep_mode.md
+        - user_guide/feature_guide/sleep_wakeup.md
         - user_guide/feature_guide/structured_output.md
         - user_guide/feature_guide/lora.md
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
@@ -258,6 +259,8 @@ nav:
         - user_guide/feature_guide/kv_cache_cpu_offload.md
         - user_guide/feature_guide/recompute_cpu_offload.md
         - user_guide/feature_guide/external_dp.md
+        - user_guide/feature_guide/dp_router.md
+        - user_guide/feature_guide/token_in_token_out.md
         - user_guide/feature_guide/large_scale_ep.md
         - user_guide/feature_guide/ucm_deployment.md
         - user_guide/feature_guide/Fine_grained_TP.md
@@ -265,6 +268,7 @@ nav:
         - user_guide/feature_guide/context_parallel.md
         - user_guide/feature_guide/sequence_parallelism.md
         - user_guide/feature_guide/batch_invariance.md
+        - user_guide/feature_guide/routing_replay.md
         - user_guide/feature_guide/lmcache_ascend_deployment.md
         - user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md
         - user_guide/feature_guide/short_request_first.md

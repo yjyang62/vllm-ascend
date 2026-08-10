@@ -10,6 +10,7 @@ cpu_binding
 Ai_QoS_introduction_en
 quantization
 sleep_mode
+sleep_wakeup
 structured_output
 lora
 expert_parallelism_load_balancer
@@ -21,6 +22,8 @@ kv_pool
 layerwise_kv_pool
 kv_cache_cpu_offload
 external_dp
+dp_router
+token_in_token_out
 large_scale_ep
 ucm_deployment
 Fine_grained_TP
@@ -30,6 +33,7 @@ context_parallel
 weight_prefetch
 sequence_parallelism
 batch_invariance
+routing_replay
 lmcache_ascend_deployment
 dynamic_chunk_pipeline_parallel
 flash_attention
