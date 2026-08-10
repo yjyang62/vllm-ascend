@@ -265,8 +265,21 @@ def test_a5_bf16_dsa_scatter_uses_block_offset_mapping():
     )
     slot_mapping = torch.tensor([[0, 1], [2, 3], [1, 0]], dtype=torch.int32)
 
-    A5DeviceAdaptor.dsa_kv_compress_scatter(cache, updates, slot_mapping)
+    def _fake_scatter_nd_update(var, indices, updates_tensor):
+        # CPU stand-in for torch_npu.npu_scatter_nd_update_.
+        var[indices[:, 0], indices[:, 1]] = updates_tensor
 
+    with mock.patch(
+        "vllm_ascend.device.device_op.torch_npu.npu_scatter_nd_update_",
+        side_effect=_fake_scatter_nd_update,
+    ) as scatter_mock:
+        A5DeviceAdaptor.dsa_kv_compress_scatter(cache, updates, slot_mapping)
+
+    scatter_mock.assert_called_once()
+    call_args = scatter_mock.call_args.args
+    assert call_args[0] is cache
+    assert call_args[1].dtype == torch.int64
+    assert call_args[1].shape == slot_mapping.shape
     torch.testing.assert_close(cache[0, 1], updates[0])
     torch.testing.assert_close(cache[2, 3], updates[1])
     torch.testing.assert_close(cache[1, 0], updates[2])

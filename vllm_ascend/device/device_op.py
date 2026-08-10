@@ -1496,10 +1496,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                     "SparseFlashMla BF16 slot_mapping must have shape "
                     f"[num_tokens, 2], got {tuple(slot_mapping.shape)}."
                 )
-            block_indices = slot_mapping[:, 0].to(torch.int64).clamp(min=0)
-            block_offsets = slot_mapping[:, 1].to(torch.int64).clamp(min=0)
-            update_shape = (slot_mapping.shape[0],) + tuple(cache.shape[2:])
-            cache[block_indices, block_offsets] = x.reshape(update_shape)
+            # Use an NPU scatter op instead of PyTorch advanced indexing so the
+            # write is properly ordered on the current NPU stream. Advanced
+            # indexing is unreliable under multistream_dsv4_dsa_overlap
+            # (aux-stream KV write vs main-stream SparseFlashMla read).
+            indices = slot_mapping.to(dtype=torch.int64).clamp(min=0).contiguous()
+            updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:])).contiguous()
+            torch_npu.npu_scatter_nd_update_(cache, indices, updates)
             return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),

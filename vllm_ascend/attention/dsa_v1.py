@@ -1468,8 +1468,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
         )
-        if get_ascend_device_type() == AscendDeviceType.A5 and self.kv_cache_dtype == torch.bfloat16:
-            self.multistream_dsv4_dsa_overlap = False
 
         # indexer param
         if self.indexer is not None:
