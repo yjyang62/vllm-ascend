@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -20,7 +20,6 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.utils import (
@@ -119,7 +118,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         ):
             cache_config.enable_prefix_caching = False
 
-        impl_cls = cast(type[DSAAttentionImpl], self.attn_backend.get_impl_cls())
+        impl_cls = cast(type[Any], self.attn_backend.get_impl_cls())
         self.impl = impl_cls(
             dim=self.dim,
             n_heads=self.n_heads,
@@ -176,19 +175,20 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        use_bf16 = get_ascend_device_type() == AscendDeviceType.A5 and kv_cache_dtype == torch.bfloat16
+        if get_ascend_device_type() == AscendDeviceType.A5 and not use_bf16:
             kv_cache_dtype = torch.float8_e4m3fn
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
         cached_head_size = (
-            (self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
+            self.head_size + 128 if get_ascend_device_type() == AscendDeviceType.A5 and not use_bf16 else self.head_size
         )
+        block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
-            block_size=DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0],
+            block_size=block_size,
             num_kv_heads=1,
             head_size=cached_head_size,
             dtype=kv_cache_dtype,
             model_version="deepseek_v4",
             compress_ratio=self.compress_ratio,
-            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            cache_dtype_str=str(kv_cache_dtype).replace("torch.", ""),
         )
