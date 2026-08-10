@@ -194,14 +194,17 @@ def test_a5_dsa_sparse_attention_selects_ops_by_kv_dtype():
     assert A5DeviceAdaptor.get_dsa_kv_layout(torch.float8_e4m3fn) == "PA_ND"
 
 
-def test_sparse_flash_mla_requires_cann92_torch_npu_apis(monkeypatch):
+def test_sparse_flash_mla_requires_cann_ops_transformer():
+    import sys
+
     import vllm_ascend.ops.sparse_flash_mla as sparse_flash_mla_mod
 
     sparse_flash_mla_mod._get_sparse_flash_mla_ops.cache_clear()
-    monkeypatch.delattr(sparse_flash_mla_mod.torch_npu, "npu_sparse_flash_mla", raising=False)
-    monkeypatch.delattr(sparse_flash_mla_mod.torch_npu, "npu_sparse_flash_mla_metadata", raising=False)
-
-    with pytest.raises(RuntimeError, match="matching CANN 9.2"):
+    # sys.modules[name] = None makes `import name` raise ImportError.
+    with (
+        mock.patch.dict(sys.modules, {"cann_ops_transformer": None}),
+        pytest.raises(RuntimeError, match="cann_ops_transformer package"),
+    ):
         sparse_flash_mla_mod._get_sparse_flash_mla_ops()
 
     sparse_flash_mla_mod._get_sparse_flash_mla_ops.cache_clear()
