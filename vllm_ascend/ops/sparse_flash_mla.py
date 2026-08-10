@@ -12,7 +12,7 @@ import torch
 def _get_sparse_flash_mla_ops() -> tuple[Callable, Callable]:
     """Load the SparseFlashMla torch operators shipped by ops-transformer."""
     try:
-        import cann_ops_transformer  # noqa: F401
+        import cann_ops_transformer  # noqa: F401  # type: ignore[import-not-found]
     except ImportError as exc:
         raise RuntimeError(
             "DeepSeek-V4 BF16 KV on Ascend A5 requires the "
