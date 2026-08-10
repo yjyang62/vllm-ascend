@@ -6,20 +6,29 @@ from functools import lru_cache
 from typing import Any
 
 import torch
-import torch_npu
 
 
 @lru_cache
 def _get_sparse_flash_mla_ops() -> tuple[Callable, Callable]:
-    """Load SparseFlashMla operators exposed by torch_npu/op-plugin."""
+    """Load the SparseFlashMla torch operators shipped by ops-transformer."""
     try:
-        attention_op = torch_npu.npu_sparse_flash_mla
-        metadata_op = torch_npu.npu_sparse_flash_mla_metadata
+        import cann_ops_transformer  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "DeepSeek-V4 BF16 KV on Ascend A5 requires the "
+            "cann_ops_transformer package that provides sparse_flash_mla and "
+            "sparse_flash_mla_metadata."
+        ) from exc
+
+    namespace = torch.ops.cann_ops_transformer
+    try:
+        attention_op = namespace.sparse_flash_mla
+        metadata_op = namespace.sparse_flash_mla_metadata
     except AttributeError as exc:
         raise RuntimeError(
-            "DeepSeek-V4 BF16 KV on Ascend A5 requires torch_npu APIs "
-            "npu_sparse_flash_mla and npu_sparse_flash_mla_metadata from a "
-            "matching CANN 9.2 toolkit and torch_npu/op-plugin build."
+            "The installed cann_ops_transformer package does not provide "
+            "sparse_flash_mla and sparse_flash_mla_metadata. Install a version "
+            "matched to the CANN toolkit that contains these operators."
         ) from exc
     return attention_op, metadata_op
 
