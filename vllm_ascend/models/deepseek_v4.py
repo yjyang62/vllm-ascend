@@ -75,6 +75,7 @@ from vllm.models.deepseek_v4.compressor import CompressorStateCache  # type: ign
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
@@ -105,6 +106,10 @@ def _dsv4_block_sizes():
     from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
     return DSV4_BLOCK_SIZES
+
+
+def _dsv4_kv_cache_dtype(vllm_config: VllmConfig) -> torch.dtype:
+    return kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
 
 
 class AscendCompressorStateCache(CompressorStateCache):
@@ -154,18 +159,18 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if get_ascend_device_type() in {AscendDeviceType.A5}:
             self.dtype = torch.float8_e4m3fn
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
+        block_size = _dsv4_block_sizes()[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
-            block_size=_dsv4_block_sizes()[vllm_config.cache_config.block_size][0][0],
+            block_size=block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             model_version="deepseek_v4",
             compress_ratio=self.compress_ratio,
-            cache_dtype_str=self.cache_config.cache_dtype,
+            cache_dtype_str=str(self.dtype).replace("torch.", ""),
             scale_dim=1 if self.head_dim == 128 else 0,
             scale_dtype=torch.float if get_ascend_device_type() in {AscendDeviceType.A5} else torch.float16,
         )
@@ -191,17 +196,24 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = _dsv4_block_sizes()[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        requested_dtype = _dsv4_kv_cache_dtype(vllm_config)
+        use_bf16 = get_ascend_device_type() == AscendDeviceType.A5 and requested_dtype == torch.bfloat16
+        if use_bf16:
+            self.dtype = torch.bfloat16
+        elif get_ascend_device_type() == AscendDeviceType.A5:
             self.dtype = torch.float8_e4m3fn
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-        cached_head_size = self.head_dim + 128 if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_dim
+        cached_head_size = (
+            self.head_dim
+            if use_bf16
+            else (self.head_dim + 128 if get_ascend_device_type() == AscendDeviceType.A5 else self.head_dim)
+        )
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=cached_head_size,
             dtype=self.dtype,
             sliding_window=self.window_size,
-            cache_dtype_str=self.cache_config.cache_dtype,
+            cache_dtype_str=str(self.dtype).replace("torch.", ""),
             model_version="deepseek_v4",
             alignment=None,
         )
@@ -441,9 +453,6 @@ class DeepseekV4MoE(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
-            use_grouped_topk=True,
-            num_expert_group=getattr(config, "n_group", 1),
-            topk_group=getattr(config, "topk_group", 1),
             prefix=f"{prefix}.experts",
             scoring_func=getattr(config, "scoring_func", "softmax"),
             # Keep scaling outside the router path so the order matches
@@ -455,11 +464,17 @@ class DeepseekV4MoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=config.n_shared_experts if self.is_fusion_moe_shared_experts_enabled else 0,
-            hash=layer_idx < config.num_hash_layers and not is_draft_layer,
-            tid2eid=self.gate.tid2eid,
+            hash_indices_table=self.gate.tid2eid,
         )
 
-    def forward(self, hidden_states: torch.Tensor, input_ids=None) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.gate.tid2eid is not None and input_ids is None:
+            raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
+
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -472,11 +487,19 @@ class DeepseekV4MoE(nn.Module):
 
         if self.experts.is_internal_router:
             # In this case, the gate/router runs inside the FusedMoE class
-            fused_moe_out = self.experts(hidden_states=hidden_states, router_logits=hidden_states)
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states,
+                router_logits=hidden_states,
+                input_ids=input_ids,
+            )
         else:
             # router_logits: (num_tokens, n_experts)
             router_logits = F.linear(hidden_states.float(), self.gate.weight)
-            fused_moe_out = self.experts(hidden_states=hidden_states, router_logits=router_logits)
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                input_ids=input_ids,
+            )
 
         fused_moe_out_is_tuple = isinstance(fused_moe_out, tuple)
         if fused_moe_out_is_tuple:
@@ -853,7 +876,14 @@ class DeepseekV4Attention(nn.Module):
                     skip_topk = pattern[indexer_seq_idx] == "S"
 
         ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
+        requested_kv_dtype = _dsv4_kv_cache_dtype(vllm_config)
+        k_dtype = (
+            requested_kv_dtype
+            if ascend_device_type == AscendDeviceType.A5 and requested_kv_dtype == torch.bfloat16
+            else torch.float8_e4m3fn
+            if ascend_device_type == AscendDeviceType.A5
+            else torch.bfloat16
+        )
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -987,6 +1017,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
@@ -997,7 +1028,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, input_ids)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
         return hidden_states, residual
@@ -1107,6 +1138,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1134,7 +1167,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
         aux_hidden_states: list[torch.Tensor] = []
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                llama_4_scaling,
+                input_ids=input_ids,
+            )
             if layer.layer_idx + 1 in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states.mean(dim=1))
 
@@ -1145,12 +1184,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # MTP layers receive the full token set — otherwise only rank 0's
         # partition is valid and the rest of the buffer holds stale data,
         # leading to NaN values and low acceptance rate.
-        from vllm_ascend.ascend_forward_context import get_forward_context
-
-        forward_ctx = get_forward_context()
-        if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
+        if _EXTRA_CTX.flash_comm_v1_enabled:
             h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
-            pad_size = forward_ctx.pad_size
+            pad_size = _EXTRA_CTX.pad_size
             if pad_size > 0:
                 h_states_flat = h_states_flat[:-pad_size]
             num_tokens = h_states_flat.shape[0]

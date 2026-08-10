@@ -41,6 +41,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
+from vllm_ascend.quantization.tp_weight_switch import TPWeightGatherSpec, TPWeightSwitchMixin
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -80,8 +81,12 @@ def _should_keep_nd_for_310p_weight(weight: torch.Tensor) -> bool:
     return is_310p() and weight.ndim >= 2 and (weight.shape[-1] == 1 or weight.shape[-2] == 1)
 
 
-class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
+class AscendUnquantizedLinearMethod(TPWeightSwitchMixin, UnquantizedLinearMethod):
     """Linear method without quantization"""
+
+    tp_weight_gather_specs = (TPWeightGatherSpec("weight", gather_dim=1),)
+    tp_weight_output_gather_specs = (TPWeightGatherSpec("weight"),)
+    supports_tp_weight_switch = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
@@ -465,7 +470,13 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        if "wo_a" in self.prefix and get_ascend_device_type() != AscendDeviceType.A5:
+        # A5 quantized wo_a is reshaped to 3D in FP8 process_weights_after_loading.
+        # Non-quant A5 BF16 wo_a needs the same [G, D, R] layout as A2/A3 for
+        # npu_transpose_batchmatmul.
+        skip_wo_a_reshape = (
+            "wo_a" in self.prefix and get_ascend_device_type() == AscendDeviceType.A5 and self.quant_config is not None
+        )
+        if "wo_a" in self.prefix and not skip_wo_a_reshape:
             if self.weight.ndim == 2:
                 super().weight_loader(param, loaded_weight)
                 self.weight.data = (
