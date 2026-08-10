@@ -228,6 +228,43 @@ with httpx.stream("POST", GEN_ENDPOINT, json=payload, timeout=600) as resp:
 | 多模态 | 内嵌在 chat 请求 | 通常先 `/render`，再 generate |
 | 典型用途 | 应用层对话 API | 分离式 Serving、RL、基础设施编排 |
 
+## Model Runner V1 / V2 差异
+
+Token In / Token Out 的 **HTTP 契约不变**（仍是
+`POST /inference/v1/generate`）。差异在后端 Model Runner：
+
+| 维度 | Model Runner V1（默认） | Model Runner V2（实验性） |
+| --- | --- | --- |
+| 启用方式 | 不设 env，或 `VLLM_USE_V2_MODEL_RUNNER=0` | `export VLLM_USE_V2_MODEL_RUNNER=1` |
+| 入口实现 | `NPUModelRunner`（`worker/model_runner_v1.py`） | `NPUModelRunner`（`worker/v2/model_runner.py`） |
+| HTTP API | 相同 | 相同 |
+| 纯文本 token 推理 | 成熟 | 可用（建议验证日志无 V1 fallback） |
+| 多模态 `features` / render→generate | 较完整 | 仍在补齐（见 [MRv2 RFC](https://github.com/vllm-project/vllm-ascend/issues/5208)） |
+| logprobs / penalties / async scheduling | 支持 | 已支持 |
+| PD / `kv_transfer_params` | 更完整 | 仍在推进 |
+| 状态 | 默认、生产常用 | Experimental，部分特性未就绪 |
+
+Ascend 上 V2 开关只认环境变量（不再走上游按模型架构的白名单）：
+
+```bash
+export VLLM_USE_V2_MODEL_RUNNER=1
+vllm serve Qwen/Qwen3-0.6B --host 0.0.0.0 --port 8000
+```
+
+启动后请确认日志出现 V2 / `npu model runner v2` 相关提示，且**没有回退到
+V1 runner**。Worker 在启用 V2 时会打印：
+
+```text
+npu model runner v2 is in developing, some features doesn't work for now.
+```
+
+选型建议：
+
+- **RL / 纯文本 token-in-token-out**：V1 最稳；V2 可用于验证与跟进上游演进。
+- **多模态 render→generate / PD 分离**：优先 V1，直到 MRv2 对应项闭合。
+- **需要 Routing Replay**：两端 API 字段相同；后端 capturer 路径随 runner
+  实现而异，上线前用目标 runner 做一次 shape 校验。
+
 ## 限制
 
 - **Client 需保证 token 合法。** 负值 `token_ids` 会被拒绝；词表越界会导致
@@ -245,6 +282,8 @@ with httpx.stream("POST", GEN_ENDPOINT, json=payload, timeout=600) as resp:
 - [Routing Replay](routing_replay.md)：可在同一 generate 响应中返回
   `routed_experts`，供 MoE RL 训练回放。
 - [DP Router](dp_router.md)：External DP 下可把
-  `/inference/v1/generate` 作为后端 API，由外部 Router 做负载均衡。
+  `/inference/v1/generate` 作为后端 API，由外部 Router 做负载均衡；注意 V1/V2
+  后端不要混部。
 - Prefill/Decode 分离相关文档：`kv_transfer_params` 可挂到 generate 请求，
   用于跨实例 KV 传输。
+- Model Runner V2 跟踪：[Issue #5208](https://github.com/vllm-project/vllm-ascend/issues/5208)。

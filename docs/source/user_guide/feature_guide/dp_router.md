@@ -203,6 +203,52 @@ python hybrid_proxy_server.py \
 
 建议：短序列组可配更小的 `max-model-len` / KV cache，长序列组配更大资源，以提升整体吞吐。
 
+## Model Runner V1 / V2 差异
+
+DP Router **本身是进程外 HTTP 代理**，不区分 V1/V2。差异在于每个后端
+`vllm serve` 实例使用的 Model Runner，以及 Internal DP 与 External DP 的组合方式。
+
+| 维度 | Model Runner V1（默认） | Model Runner V2（实验性） |
+| --- | --- | --- |
+| Router 代理 | 相同（`dp_load_balance_proxy_server.py`） | 相同 |
+| 启用后端 V2 | 不设 / `VLLM_USE_V2_MODEL_RUNNER=0` | 每个 DP 实例设 `VLLM_USE_V2_MODEL_RUNNER=1` |
+| External DP（每 rank 独立 endpoint） | 成熟，示例与 CI 主路径 | 可用：Router 仍按 host/port 转发；需确认每实例真正跑在 V2 |
+| Internal DP（进程组内 DP） | 成熟 | 已有 e2e（如 `tests/.../model_runner_v2/test_data_parallel.py`），仍属实验范围 |
+| EP / MoE + DP | 常用组合 | 需额外关注 DP 间 MoE comm 一致性 |
+| 尚未支持 / 受限 | — | Context Parallel、dynamic EPLB 等在 MRv2 上 `NotImplemented` |
+| Sequence Parallel / FlashComm1 | V1 路径更完整 | MRv2 仍在补齐 |
+| 状态 | 默认推荐 | Experimental |
+
+在 External DP 模板中为每个 rank 打开 V2：
+
+```bash
+# run_dp_template.sh / 各节点环境
+export VLLM_USE_V2_MODEL_RUNNER=1
+
+vllm serve model_path \
+  --host 0.0.0.0 \
+  --port $PORT \
+  --data-parallel-size $DP_SIZE \
+  --data-parallel-rank $DP_RANK \
+  ...
+```
+
+校验建议（与 RL 侧“确认 V2 生效、无 V1 fallback”一致）：
+
+1. 每个后端日志出现 `npu model runner v2 is in developing...`。
+2. 未出现回退到 `model_runner_v1` / V1 runner 的路径。
+3. Router 的 `--dp-hosts` / `--dp-ports` 指向的全部是同一 runner 代际实例，
+   避免 V1/V2 混部导致行为不一致。
+
+选型建议：
+
+- **生产 External DP + DP Router**：默认用 **V1 后端**。
+- **验证 MRv2 + External DP**：后端统一 `VLLM_USE_V2_MODEL_RUNNER=1`，Router
+  配置不变；先从文本 Completions/Chat 打通，再扩展到
+  [Token In / Token Out](token_in_token_out.md)。
+- **Internal DP**：V2 已有基础 DP e2e，但大规模 EP/DP、FlashComm、EPLB 等组合
+  仍以 V1 更稳；跟踪 [MRv2 RFC](https://github.com/vllm-project/vllm-ascend/issues/5208)。
+
 ## 限制
 
 - **至少 2 个后端才有意义。** 单实例时 Router 只会直转，没有负载均衡效果。
@@ -212,10 +258,14 @@ python hybrid_proxy_server.py \
   EOS 影响，极端长尾请求仍可能造成瞬时不均。
 - **与 Internal DP 调度不同。** External DP + DP Router 把路由放在进程外；
   不要与“单进程内 DP 自动调度”混为一谈。
+- **勿混部 V1/V2 后端。** 同一 Router 后的 DP 实例应使用同一 Model Runner 代际。
 
 ## 相关功能
 
 - [External DP](external_dp.md)：External DP 启动与代理的基础教程。
+- [Token In / Token Out](token_in_token_out.md)：可将 generate API 作为 DP 后端；
+  同样需关注 V1/V2 差异。
 - [Large Scale EP](large_scale_ep.md)：大规模专家并行部署中可与 External DP 组合。
 - [Short Request First](short_request_first.md)：调度侧对短请求的优先策略，可与
   外部长度感知路由互补。
+- Model Runner V2 跟踪：[Issue #5208](https://github.com/vllm-project/vllm-ascend/issues/5208)。
