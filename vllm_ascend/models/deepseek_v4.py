@@ -75,7 +75,6 @@ from vllm.models.deepseek_v4.compressor import CompressorStateCache  # type: ign
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
@@ -108,8 +107,16 @@ def _dsv4_block_sizes():
     return DSV4_BLOCK_SIZES
 
 
-def _dsv4_kv_cache_dtype(vllm_config: VllmConfig) -> torch.dtype:
-    return kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+def _dsv4_resolve_attn_kv_dtype(vllm_config: VllmConfig, non_a5_dtype: torch.dtype) -> torch.dtype:
+    from vllm_ascend.models.layer.attention.layer import dsv4_resolve_attn_kv_dtype
+
+    return dsv4_resolve_attn_kv_dtype(vllm_config, non_a5_dtype)
+
+
+def _dsv4_indexer_kv_dtype() -> torch.dtype:
+    from vllm_ascend.models.layer.attention.layer import dsv4_indexer_kv_dtype
+
+    return dsv4_indexer_kv_dtype()
 
 
 class AscendCompressorStateCache(CompressorStateCache):
@@ -157,8 +164,10 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            self.dtype = torch.float8_e4m3fn
+        # Indexer cache stays quantized on A5 even when attention KV is BF16.
+        # Do not rewrite vllm_config.cache_config.cache_dtype here — that would
+        # poison the BF16 SparseFlashMla attention path.
+        self.dtype = _dsv4_indexer_kv_dtype()
 
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
@@ -196,12 +205,8 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = _dsv4_block_sizes()[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        requested_dtype = _dsv4_kv_cache_dtype(vllm_config)
-        use_bf16 = get_ascend_device_type() == AscendDeviceType.A5 and requested_dtype == torch.bfloat16
-        if use_bf16:
-            self.dtype = torch.bfloat16
-        elif get_ascend_device_type() == AscendDeviceType.A5:
-            self.dtype = torch.float8_e4m3fn
+        self.dtype = _dsv4_resolve_attn_kv_dtype(vllm_config, self.dtype)
+        use_bf16 = get_ascend_device_type() == AscendDeviceType.A5 and self.dtype == torch.bfloat16
         cached_head_size = (
             self.head_dim
             if use_bf16
@@ -589,11 +594,11 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
-        ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.int8
+        k_dtype = _dsv4_indexer_kv_dtype()
 
         if self.compress_ratio == 4:
-            # TODO(cmq): change the dtype of cache
+            # Indexer cache remains quantized on A5; attention KV dtype is
+            # resolved separately (may be BF16 SparseFlashMla).
             self.k_cache = AscendDeepseekV4IndexerCache(
                 head_dim=self.head_dim,
                 dtype=k_dtype,
@@ -875,15 +880,7 @@ class DeepseekV4Attention(nn.Module):
                 if 0 <= indexer_seq_idx < len(pattern):
                     skip_topk = pattern[indexer_seq_idx] == "S"
 
-        ascend_device_type = get_ascend_device_type()
-        requested_kv_dtype = _dsv4_kv_cache_dtype(vllm_config)
-        k_dtype = (
-            requested_kv_dtype
-            if ascend_device_type == AscendDeviceType.A5 and requested_kv_dtype == torch.bfloat16
-            else torch.float8_e4m3fn
-            if ascend_device_type == AscendDeviceType.A5
-            else torch.bfloat16
-        )
+        k_dtype = _dsv4_resolve_attn_kv_dtype(vllm_config, torch.bfloat16)
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,

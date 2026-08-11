@@ -49,6 +49,41 @@ def get_dsv4_block_sizes():
 DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
 
 
+def dsv4_requested_kv_cache_dtype(vllm_config: VllmConfig) -> torch.dtype:
+    """Resolve the user/model-requested KV cache dtype from cache config."""
+    return kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+
+
+def dsv4_uses_a5_bf16_kv(vllm_config: VllmConfig) -> bool:
+    """Whether A5 should keep BF16 attention KV (SparseFlashMla path)."""
+    return (
+        get_ascend_device_type() == AscendDeviceType.A5
+        and dsv4_requested_kv_cache_dtype(vllm_config) == torch.bfloat16
+    )
+
+
+def dsv4_resolve_attn_kv_dtype(vllm_config: VllmConfig, non_a5_dtype: torch.dtype) -> torch.dtype:
+    """Resolve SWA/compress attention KV dtype.
+
+    On A5, honor requested BF16 instead of unconditionally forcing FP8.
+    Never mutate ``vllm_config.cache_config.cache_dtype`` here.
+    """
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        return non_a5_dtype
+    return torch.bfloat16 if dsv4_uses_a5_bf16_kv(vllm_config) else torch.float8_e4m3fn
+
+
+def dsv4_indexer_kv_dtype() -> torch.dtype:
+    """Lightning-indexer cache dtype.
+
+    Always quantized on A5 (FP8), independent of attention KV dtype. Callers
+    must not rewrite ``cache_config.cache_dtype`` when applying this.
+    """
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        return torch.float8_e4m3fn
+    return torch.int8
+
+
 class DSAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -174,10 +209,11 @@ class DSAAttention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
-        kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
+        requested_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
+        # Prefer the live cache_config request so BF16 SparseFlashMla is not
+        # forced to FP8 just because the device is A5.
+        kv_cache_dtype = dsv4_resolve_attn_kv_dtype(vllm_config, requested_dtype)
         use_bf16 = get_ascend_device_type() == AscendDeviceType.A5 and kv_cache_dtype == torch.bfloat16
-        if get_ascend_device_type() == AscendDeviceType.A5 and not use_bf16:
-            kv_cache_dtype = torch.float8_e4m3fn
 
         cached_head_size = (
             self.head_size + 128 if get_ascend_device_type() == AscendDeviceType.A5 and not use_bf16 else self.head_size
