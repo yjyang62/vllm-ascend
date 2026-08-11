@@ -1379,8 +1379,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                     o_proj_input = self.wo_a(o_proj_input)
                 else:
                     # A2/A3 and A5 BF16 (no weight_scale / MX path) share the same
-                    # npu_transpose_batchmatmul o_proj kernel. _get_batched_wo_a_weight
-                    # reshapes unquantized 2D A5 BF16 wo_a to [G, D, R].
+                    # npu_transpose_batchmatmul o_proj kernel. wo_a is already
+                    # [G, D, R] after AscendColumnParallelLinear.weight_loader;
+                    # _get_batched_wo_a_weight only selects/aligns the group axis.
                     o_proj_input = torch_npu.npu_transpose_batchmatmul(
                         o_proj_input,
                         self._get_batched_wo_a_weight(o_proj_groups),

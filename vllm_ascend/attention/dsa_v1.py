@@ -126,25 +126,6 @@ def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
 
 
-def _wo_a_weight_for_transpose_batchmatmul(
-    weight: torch.Tensor,
-    n_local_groups: int,
-    o_lora_rank: int,
-) -> torch.Tensor:
-    """Return ``wo_a`` in ``[G, D, R]`` for ``npu_transpose_batchmatmul``.
-
-    A2/A3 load-time reshape already stores 3D weights. A5 BF16 may still be a
-    2D ``[G * R, D]`` ColumnParallelLinear weight; reshape + transpose to
-    ``[G, D, R]``. A plain ``view(G, R, D)`` is the wrong layout and triggers
-    ACLNN_ERR_PARAM_INVALID (161002) on A5.
-    """
-    if weight.ndim == 3:
-        return weight
-    if weight.ndim != 2:
-        raise ValueError(f"DSA wo_a weight must be 2D or 3D, got shape {tuple(weight.shape)}.")
-    return weight.view(n_local_groups, o_lora_rank, -1).transpose(1, 2).contiguous()
-
-
 def _is_w8a8_dynamic(linear) -> bool:
     """True iff ``linear`` is wired up with ``AscendW8A8DynamicLinearMethod``."""
     qm = getattr(linear, "quant_method", None)
@@ -1664,7 +1645,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             o_proj_input = recv.view(oproj_tp_size * exchange_num_tokens, groups_per_rank, group_hidden_dim)
             o_proj_input = torch_npu.npu_transpose_batchmatmul(
                 o_proj_input,
-                _wo_a_weight_for_transpose_batchmatmul(self.wo_a.weight, groups_per_rank, self.o_lora_rank),
+                self.wo_a.weight,
                 bias=None,
                 scale=None,
                 perm_x1=(1, 0, 2),
@@ -1692,11 +1673,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             output[...] = self.wo_b(o_proj_input)
         else:
             # A2/A3 and A5 BF16 (no weight_scale / MX path) share the same
-            # npu_transpose_batchmatmul o_proj kernel. A5 BF16 wo_a may still
-            # be 2D and must be reshaped to [G, D, R] first.
+            # npu_transpose_batchmatmul o_proj kernel. wo_a is already [G, D, R]
+            # after AscendColumnParallelLinear.weight_loader.
             o_proj_input = torch_npu.npu_transpose_batchmatmul(
                 o_proj_input,
-                _wo_a_weight_for_transpose_batchmatmul(self.wo_a.weight, self.n_local_groups, self.o_lora_rank),
+                self.wo_a.weight,
                 bias=None,
                 scale=None,
                 perm_x1=(1, 0, 2),
