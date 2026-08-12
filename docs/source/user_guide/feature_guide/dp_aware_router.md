@@ -2,60 +2,80 @@
 
 !!! note
 
-    DP Router（数据并行感知路由）是 **vLLM Router** 中用于将请求**精确路由到
-    某个 vLLM 实例内部具体 DP rank** 的机制。能力由上游 vLLM API Server
-    （`X-data-parallel-rank`）与 [vllm-router](https://github.com/vllm-project/router)
-    提供；vLLM Ascend 作为推理后端**直接复用**该路径，无额外开关。
+    DP Router（数据并行感知路由）是 **vLLM Router** 中用于将请求精确路由到
+    某个 vLLM 实例内部具体 DP rank 的机制。
 
-    本文聚焦 **vLLM Ascend 推理侧**：如何拉起带 Internal DP 的 `vllm serve`，
-    以及如何与 vllm-router 对接。训练过程、reward 计算和模型参数更新不在本文范围。
+    在 RL 编排（以 Vime 为例）中：Vime 使用 **vllm-router** 作为 vLLM rollout
+    的 HTTP 网关；Router 维护 worker 列表、选择后端并转发推理请求；训练、
+    reward、参数更新仍由 Vime / 训练后端负责。
+
+    **本文写 vLLM Ascend 推理侧**：Engine 如何作为 Router 后端被访问、如何按
+    DP rank 承接请求，以及权重同步为何绕过 Router。RL 侧接入（RolloutManager
+    打 Router、`x-session-id` 等）见编排框架文档；此处只给出与推理侧对齐的
+    调用关系与启用方式。
+
+上游参考：
+
+- [vllm-project/router](https://github.com/vllm-project/router)
+- DP-aware API：[vllm#24945](https://github.com/vllm-project/vllm/pull/24945)
+- Token I/O：[Token In / Token Out](token_in_token_out.md)
 
 ## 1. 原理
 
-在 RL / 大规模 Serving 中，常见分工如下（以 Vime 类编排为例）：
+### 1.1 角色分工
 
 | 组件 | 职责 |
 | --- | --- |
-| Vime / 训练后端 | 训练过程、reward 计算、模型参数更新 |
-| vllm-router | HTTP 网关：维护 vLLM worker 列表、选择后端 worker、转发推理请求；在 DP 感知模式下把请求打到指定 DP rank |
-| vLLM Ascend（`vllm serve`） | Internal DP 多 engine；按请求携带的 DP rank 把推理调度到对应 EngineCore |
+| 训练（Megatron Actor / Critic 等） | 参数更新、组训练 batch；权重同步直连 Engine |
+| RolloutManager | 编排 rollout、发起 generate、样本 / reward 转换 |
+| vllm-router | HTTP 路由 / 负载均衡；维护 worker；把请求打到具体 Worker（及 DP rank） |
+| vLLM Ascend Engine 集群 | 执行推理；按 `X-data-parallel-rank`（或等价字段）落到对应 DP EngineCore |
 
-**没有 DP 感知路由：**
+核心边界：
 
-```text
-Client / Trainer → 某个 vLLM HTTP 入口
-                 → API Server 自行（或随机/默认）选 DP engine
-                 → 难以做 cache 亲和 / 精确负载控制
+- **推理数据面**：`RolloutManager → vllm-router → vLLM Ascend Engine`
+- **训练参数面**：`Trainer → vLLM Engine`（如 `/update_weights`、IPC / HCCL），
+  **权重同步不经过 Router**
+
+### 1.2 vllm-router 与训练 / 推理 Manager 的调用关系
+
+```mermaid
+flowchart LR
+    T["训练<br/>Megatron Actor / Critic"]
+    RM["RolloutManager<br/>编排与数据转换"]
+    R["vllm-router<br/>HTTP 路由 / 负载均衡"]
+    V["vLLM Ascend Engine 集群"]
+    D["Rollout 数据<br/>tokens / reward / logprobs"]
+
+    T -->|"1. 训练参数更新"| T
+    T -->|"2. 权重同步<br/>IPC / NCCL / HCCL<br/>不经过 Router"| V
+
+    RM -->|"3. 发起 rollout"| R
+    R -->|"4. 路由请求"| V
+    V -->|"5. 生成结果"| R
+    R -->|"6. 返回结果"| RM
+
+    RM -->|"7. reward + 样本转换"| D
+    D -->|"8. 训练 batch"| T
+
+    classDef train fill:#e8f1ff,stroke:#4b83d8,color:#17365d
+    classDef router fill:#fff3d6,stroke:#d99a00,color:#5c4300
+    classDef infer fill:#e9f7ef,stroke:#45a36b,color:#174d2a
+    classDef data fill:#f2eafa,stroke:#8a63b8,color:#45265f
+
+    class T train
+    class R router
+    class V infer
+    class RM,D data
 ```
 
-**启用 DP 感知路由：**
+对 Ascend 推理侧意味着：
 
-```text
-Client / Trainer → vllm-router（统一入口）
-                 → 选 worker，并指定 data_parallel_rank
-                 → vLLM Ascend API Server 按 X-data-parallel-rank
-                   把请求派发到对应 DP EngineCore
-```
-
-推理侧关键约定：
-
-1. Ascend 上以 **Internal DP** 拉起：`--data-parallel-size N`，同一 HTTP
-   endpoint 后挂多个 DP engine。
-2. Router 将逻辑后端表示为 `http://host:port@rank`（例如
-   `http://0.0.0.0:8000@4`）。
-3. 转发时注入请求头 **`X-data-parallel-rank: <rank>`**（或上游等价字段）。
-4. 上游 OpenAI Serving 解析该头，engine 派发到对应 DP rank；未携带时行为与
-   普通请求一致（由服务端默认调度）。
-
-!!! warning
-
-    不要与下列能力混淆：
-
-    - [DP Router / External DP 代理](dp_router.md)：按 host:port 分发到**各自独立
-      endpoint** 的 External DP 实例（`dp_load_balance_proxy_server.py`），
-      **不**注入 `X-data-parallel-rank`。
-    - [Routing Replay](routing_replay.md)：MoE expert 路由采集与训练回放，
-      与 HTTP 选 DP rank **无关**。
+1. **Rollout 流量只从 Router 进来**（Client 不直连某个 Engine 做日常 generate）。
+2. **Engine 需可被 Router 发现 / 注册**（例如 `POST /workers` 或静态
+   `--worker-urls`，以所用 vllm-router 版本为准）。
+3. **权重面直连 Engine**（`examples/rl/rlhf_http_hccl.py` /
+   `rlhf_http_npu_ipc.py` 中的 `/update_weights` 等），避免 Router 成为参数面瓶颈或状态错位。
 
 ## 5. 特性工作流
 
@@ -64,35 +84,67 @@ Client / Trainer → vllm-router（统一入口）
 ```mermaid
 sequenceDiagram
     autonumber
-    participant T as Client / Trainer<br/>（如 Vime rollout）
-    participant R as vllm-router<br/>DP 感知网关
-    participant S as vLLM Ascend<br/>API Server :8000
-    participant E0 as EngineCore DP0
-    participant E1 as EngineCore DP1
+    participant RM as RolloutManager
+    participant R as vllm-router
+    participant E as vLLM Ascend Engine<br/>（含多 DP EngineCore）
+    participant T as Trainer
 
-    Note over S,E1: vllm serve MODEL<br/>--data-parallel-size 2
+    RM->>R: 启动 Router
+    RM->>E: 启动 vLLM Ascend<br/>vllm serve ... --data-parallel-size N
+    E->>R: POST /workers 注册自身地址<br/>（或由编排写入 worker-urls）
 
-    T->>R: POST /v1/completions<br/>或 /v1/chat/completions
-    R->>R: 维护 worker 列表<br/>按 policy 选择后端
-    R->>R: 选定逻辑 worker<br/>http://host:8000@rank
-    alt 选中 DP0
-        R->>S: 转发请求<br/>X-data-parallel-rank: 0
-        S->>E0: 派发到 EngineCore DP0
-        E0-->>S: 流式 / 完整响应
-    else 选中 DP1
-        R->>S: 转发请求<br/>X-data-parallel-rank: 1
-        S->>E1: 派发到 EngineCore DP1
-        E1-->>S: 流式 / 完整响应
-    end
-    S-->>R: 回传响应
-    R-->>T: 回传响应
+    RM->>R: POST /inference/v1/generate<br/>（可带 x-session-id）
+    R->>R: 按 policy 选 Worker / DP rank<br/>random / round_robin / cache_aware / ...
+    R->>E: 转发 + X-data-parallel-rank
+    E->>E: API Server 派发到对应 DP EngineCore
+    E-->>R: token_ids / logprobs / ...
+    R-->>RM: 返回生成结果
+
+    T->>E: /update_weights 或 IPC/HCCL
+    Note over T,E: 权重同步绕过 Router
 ```
 
-## 如何启用（推理侧）
+### 5.4 使用说明
 
-### 1. 拉起 vLLM Ascend（Internal DP）
+#### 5.4.1 RL 端（摘要）
 
-单机示例（DP=2，TP=1）：
+RL / Vime 侧要点（推理代码应对齐，细节以编排框架为准）：
+
+- 推理 Client **不直连**某个 Engine，而是访问 Router：
+
+```python
+base = f"http://{args.vllm_router_ip}:{args.vllm_router_port}"
+url = f"{base}/inference/v1/generate"
+```
+
+- 普通文本（Token In / Token Out）大致为：
+
+```python
+payload = {
+    "model": args.hf_checkpoint,
+    "token_ids": prompt_ids,
+    "sampling_params": inference_sampling_params,
+}
+output = await post(
+    f"{base}/inference/v1/generate",
+    payload,
+    headers=headers,
+)
+```
+
+- Router 按策略选 Worker，例如：`random`、`round_robin`、`cache_aware`、
+  `poweroftwo`、`consistent_hash`。
+- 多轮请求可设 `x-session-id: <sample.session_id>`；在 `consistent_hash` 下
+  尽量打到同一 Worker，便于复用 prefix / KV cache。
+- 多模态：先 `/v1/chat/completions/render`，再 `/inference/v1/generate`，
+  **都走同一 Router 地址**。
+
+#### 5.4.2 推理端（vLLM Ascend）
+
+**拓扑要求：Internal DP**
+
+Ascend 侧需以 Internal DP 暴露可被 Router 感知的多 rank Engine（同一
+`host:port` 后挂多个 EngineCore）：
 
 ```bash
 vllm serve Qwen/Qwen3-0.6B \
@@ -102,32 +154,20 @@ vllm serve Qwen/Qwen3-0.6B \
   --tensor-parallel-size 1
 ```
 
-多节点 Internal DP 时，按上游约定补充本地 rank 与 RPC，例如：
+多节点时补充 `--data-parallel-size-local`、`--data-parallel-start-rank`、
+`--data-parallel-address`、`--data-parallel-rpc-port` 等（见上游
+[Data Parallel Deployment](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/)）。
 
-```bash
-# 示意：本节点负责一部分 DP rank
-vllm serve MODEL \
-  --host 0.0.0.0 --port 8000 \
-  --data-parallel-size $DP_SIZE \
-  --data-parallel-size-local $DP_SIZE_LOCAL \
-  --data-parallel-start-rank $DP_START_RANK \
-  --data-parallel-address $DP_MASTER_ADDR \
-  --data-parallel-rpc-port $DP_RPC_PORT \
-  ...
-```
+MoE + EP 场景通常加 `--enable-expert-parallel`，并保证各 DP rank 通信配置一致。
 
-MoE + EP 时通常还需 `--enable-expert-parallel`，并保证各 DP rank 的通信地址
-一致；具体组合以目标模型与 [Data Parallel Deployment](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/) 为准。
+**对接 Router**
 
-### 2. 启动 vllm-router（DP 感知）
-
-Router **不属于** vllm-ascend 仓库；需单独安装
-[vllm-router](https://github.com/vllm-project/router)：
+Router 不在 vllm-ascend 仓库内，需单独安装
+[vllm-router](https://github.com/vllm-project/router)。示意：
 
 ```bash
 pip install vllm-router
 
-# 将单个 Ascend 服务的每个 DP rank 视为可调度后端
 vllm-router \
   --worker-urls http://127.0.0.1:8000 \
   --intra-node-data-parallel-size 2 \
@@ -136,94 +176,82 @@ vllm-router \
   --port 30000
 ```
 
-说明：
+- `--intra-node-data-parallel-size` 需与后端 `--data-parallel-size` 对齐。
+- Router 将逻辑后端展开为 `http://host:port@rank`，转发时注入
+  `X-data-parallel-rank`。
+- Ascend **无额外 env 开关**；打开 Internal DP 并被 Router 注册即可。
 
-- `--intra-node-data-parallel-size`（或文档/版本中的等价 DP 感知参数）需与
-  后端 `--data-parallel-size` 对齐。
-- Router 会展开为逻辑 worker：`http://127.0.0.1:8000@0`、
-  `http://127.0.0.1:8000@1`，转发时带上对应 `X-data-parallel-rank`。
-- `--policy` 可选 `round_robin`、`consistent_hash`、`cache_aware` 等，用于
-  **选哪个 rank**；Ascend 侧只负责按头字段执行派发。
+**Engine 侧请求落点**
 
-多 worker URL 时：
+1. Router 选定 Worker / rank 后转发到 Ascend API Server。
+2. Serving 解析 `X-data-parallel-rank`，将请求派发到对应 DP EngineCore。
+3. 未携带该头时，行为与普通请求一致（服务端默认调度）。
+4. Rollout 常用路径为 `POST /inference/v1/generate`（见
+   [Token In / Token Out](token_in_token_out.md)）；Chat/Completions /
+   render 同样可经 Router 转发。
 
-```bash
-vllm-router \
-  --worker-urls http://worker1:8000 http://worker2:8000 \
-  --intra-node-data-parallel-size 8 \
-  --policy consistent_hash \
-  --port 30000
-```
-
-### 3. 向 Router 发请求
-
-训练 / rollout Client（如 Vime）只打 Router 入口即可：
+调试时可直连 Engine 并手动指定 rank：
 
 ```bash
-curl http://127.0.0.1:30000/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "prompt": "Hello",
-    "max_tokens": 32,
-    "temperature": 0
-  }'
-```
-
-调试时可直连 Ascend API Server 并手动指定 rank：
-
-```bash
-curl http://127.0.0.1:8000/v1/completions \
+curl http://127.0.0.1:8000/inference/v1/generate \
   -H "Content-Type: application/json" \
   -H "X-data-parallel-rank: 1" \
   -d '{
     "model": "Qwen/Qwen3-0.6B",
-    "prompt": "Hello",
-    "max_tokens": 16
+    "token_ids": [1, 2, 3],
+    "sampling_params": {"max_tokens": 16, "temperature": 0.0}
   }'
 ```
 
-非法或越界的 rank 通常被忽略并回退为默认调度（以当前上游实现为准）；上线前请用
-目标 vLLM 版本做一次联调确认。
+**权重同步（绕过 Router）**
 
-### 与 Vime / 训练侧的边界
+训练侧应直连 Engine 做参数面操作，例如：
 
-| 层级 | 负责方 | 说明 |
+```bash
+# 启动时按需打开开发态权重传输（示例）
+VLLM_SERVER_DEV_MODE=1 vllm serve MODEL \
+  --weight-transfer-config '{"backend": "hccl"}' \
+  ...
+```
+
+Trainer → `http://<engine>/update_weights`（或 IPC / HCCL 数据面），**不要**
+经 `vllm-router`。参考：
+
+- `examples/rl/rlhf_http_hccl.py`
+- `examples/rl/rlhf_http_npu_ipc.py`
+- [Sleep / Wakeup](sleep_wakeup.md)
+
+## 5.3 版本区别 / 支持情况
+
+| 维度 | Model Runner V1 | Model Runner V2 |
 | --- | --- | --- |
-| Rollout HTTP 入口 | vllm-router | 维护 worker、选后端、注入 DP rank、转发 |
-| 推理执行 | vLLM Ascend | Internal DP EngineCore 按 rank 执行 generate |
-| 训练 / reward / 权重更新 | Vime 及训练后端 | **不**经 Router；权重回写推理实例见 Sleep/Wake、weight transfer 等文档 |
+| DP 感知路由（API 派发） | 支持 | 支持 |
+| 经 Router 的 `/inference/v1/generate` | 支持 | 支持 |
+| Ascend 额外开关 | 无 | 无（`VLLM_USE_V2_MODEL_RUNNER=1` 只切 runner） |
 
-## Model Runner V1 / V2
+结论：**V1 / V2 均已支持** DP 感知路由语义（请求落到指定 DP rank）。差异在
+runner 能力本身（多模态、PD 等），不在「能否被 Router 按 rank 点名」。
 
-DP 感知路由发生在 **API Server → Engine 派发** 层，与 Model Runner V1/V2
-的 HTTP 契约相同：均消费 `X-data-parallel-rank`（由上游 Serving 解析）。
-
-| 维度 | 说明 |
-| --- | --- |
-| 推理侧开关 | 无需 Ascend 专用 env；开 Internal DP + 对接 router 即可 |
-| V1 / V2 | 路由语义等价；后端不要混部不同 runner 代际 |
-| 建议 | 生产先用 V1；V2 跟进 [MRv2 RFC](https://github.com/vllm-project/vllm-ascend/issues/5208) |
+同一 Router 后的 Engine 不要混部 V1/V2。生产建议默认 V1；V2 跟踪
+[MRv2 RFC](https://github.com/vllm-project/vllm-ascend/issues/5208)。
 
 ## 限制
 
-- **依赖 Internal DP 拓扑。** 同一 `host:port` 后需有多个 DP EngineCore；纯
-  External DP（每 rank 独立 port）应使用 [External DP](external_dp.md) /
-  [DP Router 代理](dp_router.md)，而不是本机制。
-- **Router 与 Ascend 版本需匹配。** `X-data-parallel-rank` 与
-  `--intra-node-data-parallel-size` 以所安装的上游 vLLM / vllm-router 为准。
-- **Ascend 不实现 Router 本身。** worker 发现、policy、重试、熔断见
-  vllm-router 文档。
-- **MoE 跨 DP 同步仍在。** 即使请求打到某一 rank，MoE/EP 下其它 rank 仍可能
-  参与通信；DP 感知路由解决的是**请求落点**，不是取消 DP 集合通信。
-- **与 Routing Replay 无关。** 需要 expert 回放时另开
-  `--enable-return-routed-experts`，见 [Routing Replay](routing_replay.md)。
+- **依赖 Internal DP。** 每 rank 独立 port 的 External DP 应按 host:port 做
+  外部均衡，见 [External DP](external_dp.md) / [DP Router 代理](dp_router.md)，
+  与本文「单入口 + `X-data-parallel-rank`」不同。
+- **Router 实现不在 Ascend 内。** 发现、policy、重试、熔断以 vllm-router 为准。
+- **MoE 集合通信仍在。** 指定 rank 只决定请求落点，不取消跨 DP 的 MoE/EP 同步。
+- **参数面与数据面分离。** 权重更新必须直连 Engine；误走 Router 可能导致错误
+  后端或状态不一致。
+- **与 Routing Replay 无关。** Expert 回放见 [Routing Replay](routing_replay.md)。
 
 ## 相关功能
 
-- 上游 Data Parallel：[Data Parallel Deployment](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/)
-- 上游 Router：[vllm-project/router](https://github.com/vllm-project/router)
-- 上游 API 支持：[vllm#24945](https://github.com/vllm-project/vllm/pull/24945)
-- [External DP](external_dp.md) / [DP Router](dp_router.md)：每 rank 独立
-  endpoint 的负载均衡（不同机制）
+- [Token In / Token Out](token_in_token_out.md)：RL rollout 常用
+  `/inference/v1/generate`
+- [External DP](external_dp.md) / [DP Router](dp_router.md)：External DP
+  按 endpoint 分发（不同机制）
+- [Sleep / Wakeup](sleep_wakeup.md)、`examples/rl/`：权重同步与分阶段 RL
 - [Routing Replay](routing_replay.md)：MoE routed-experts 采集（不同机制）
+- 上游：[Data Parallel Deployment](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/)
