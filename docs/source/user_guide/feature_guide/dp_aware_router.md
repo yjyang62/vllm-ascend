@@ -5,10 +5,8 @@
     DP Router（数据并行感知路由）由上游 **vLLM Router + API Server** 提供：
     将请求精确路由到某个 vLLM 实例内部的具体 DP rank。
 
-    **本文只写 vLLM Ascend 推理侧原理与启用**：Internal DP Engine 如何承接
-    `X-data-parallel-rank`、以及权重同步为何直连 Engine。RL / Vime 侧编排
-    （RolloutManager、Router policy、`x-session-id` 等）见 5.4.1 摘要及编排
-    框架文档。
+    本文先给 **整体原理**（DP Router 做什么），再写 Ascend 如何承接
+    `X-data-parallel-rank` 与启用方式。RL / Vime 编排细节见 5.4.1。
 
 上游参考：
 
