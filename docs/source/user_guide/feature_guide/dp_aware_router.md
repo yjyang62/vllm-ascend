@@ -18,33 +18,34 @@
 
 ### 1.1 整体原理：DP Router 对 RL 的作用
 
-RL（如 Vime + Megatron）里，rollout 要高频打 vLLM，训练还要周期性灌权重。
-Internal DP 下同一实例有多个 DP rank：若 rollout 不能**感知并选定**落点，
-会出现负载不均、多轮样本 KV 复用差、数据面与参数面缠在一起等问题。
+RL rollout 里，同一条样本的多轮 generate、续写、或依赖同一 prefix/KV 的
+请求，往往必须落在**同一个 DP rank** 上。Internal DP 下多个 EngineCore
+共享入口：若不能感知并指定 DP，请求可能被打散到不同 rank——KV / prefix
+对不上，多轮行为也不稳定。
 
-**DP Router 的作用（面向 RL）**：作为 rollout 的 HTTP 网关，把
-`/inference/v1/generate` 等请求**精确路由到某个 DP rank**，同时让训练侧
-权重同步**绕过 Router、直连 Engine**——数据面可调度，参数面不绕弯。
+**DP Router 的核心作用**：让 RL 侧可以**稳定地使用同一个 DP**（精确路由到
+指定 `data_parallel_rank`）。例如带 `x-session-id` 时，用
+`consistent_hash` / `cache_aware` 把同一 session 一直打到同一 Worker/rank，
+从而复用该 rank 上的 prefix cache 与 KV。
 
 ```text
-  Trainer ──权重同步（IPC/HCCL /update_weights）──► Engine（不经 Router）
-                                                      ▲
-  RolloutManager ──generate──► vllm-router ──指定 DP rank──┘
-                               选 rank / session 亲和
+  同一样本 / 同一 session 的多次 generate
+        │
+        ▼
+  vllm-router  ──►  始终落到同一 DP rank（如 DP2）
+                        EngineCore DP2 上的 KV / prefix 可复用
 ```
 
-对 RL 的具体价值：
+对 RL 而言，这比“把流量均匀撒开”更关键：
 
-| RL 诉求 | DP Router 如何满足 |
+| 没有 DP 感知 | 有 DP Router |
 | --- | --- |
-| 大规模并行 rollout | 在多个 DP rank 间负载均衡（round_robin / poweroftwo 等），抬吞吐 |
-| 多轮 / 同 session 生成 | `x-session-id` + consistent_hash / cache_aware，绑同一 rank，复用 prefix/KV |
-| Token 级 rollout | 统一入口转发 `/inference/v1/generate`，Client 不直连某个 Engine |
-| 训练与推理解耦 | 只代理推理数据面；`/update_weights` 等参数面直连 Engine，避免灌权走错后端 |
-| 编排简单 | RolloutManager 只认 Router 地址；DP 落点由 Router 策略决定 |
+| 同一样本可能落到不同 DP | 可绑定**同一个 DP** |
+| 多轮续写难吃到已有 KV | 同 rank 上复用 prefix / KV |
+| session 亲和做不稳 | `x-session-id` + hash/cache 策略固定落点 |
 
-没有 DP Router 时：RolloutManager 要么自己选 Engine/rank，要么任由服务端
-默认调度——难做亲和与外置负载策略，也容易和权重更新入口搅在一起。
+附带能力：仍可在多个 DP 间做负载均衡；权重同步（`/update_weights`、
+IPC / HCCL）走参数面、**不经 Router**，与“指定同一 DP 做 rollout”互不干扰。
 
 ### 1.2 Ascend 推理侧如何承接
 
