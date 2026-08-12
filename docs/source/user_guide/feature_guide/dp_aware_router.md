@@ -95,7 +95,46 @@ sequenceDiagram
 
 ## 如何启用
 
-DP 感知切片随 Routing Replay 一并生效，无需单独开关：
+### 开关说明
+
+Routing Replay / DP 感知采集的**总开关**是上游 vLLM 的：
+
+| 入口 | 开关 | 类型 | 默认 |
+| --- | --- | --- | --- |
+| CLI（`vllm serve`） | `--enable-return-routed-experts` | store_true 布尔旗标 | 关闭 |
+| Python（`LLM(...)`） | `enable_return_routed_experts=True` | `ModelConfig` 字段 | `False` |
+
+**没有单独的「DP 感知」开关。** 打开上述旗标后：
+
+1. `NPUModelRunner` 调用 `init_routed_experts_capturer()`，分配
+   `device_buffer`，并把 capturer 绑定到各层 `AscendMoERunner`。
+2. 每层 `select_experts` 之后，若
+   `model_config.enable_return_routed_experts` 为真，则调用
+   `capturer.capture(layer_id, topk_ids)`。
+3. Ascend patch 在 `capture` 内按 `dp_rank` 切片（DP 感知）。
+4. 请求完成后，结果写入 `CompletionOutput.routed_experts`（HTTP 为
+   base64 `.npy`）。
+
+关闭时：不分配 capturer、不采集、不返回 `routed_experts`；DP 感知切片
+逻辑也不会执行。
+
+**配套约束（推理侧）：**
+
+| 项 | 说明 |
+| --- | --- |
+| MoE 模型 | Dense 无 routed experts，开了也无有效数据 |
+| Expert Parallel | 大规模 MoE 常与 `--enable-expert-parallel` 同开 |
+| Async scheduling | **不兼容**；须 `async_scheduling=False` / `--async-scheduling false`。部分上游版本在配置阶段直接拒绝「开 routed-experts + async」 |
+| 返回时机 | 完整张量在请求 **finish** 时组装；流式分片通常不携带完整路由 |
+
+**训练侧开关（不在 vLLM Ascend 内）：**
+
+推理侧只负责**捕获并返回** expert ID。训练框架还需打开自己的 replay
+开关，在 MoE forward 中强制使用这些 ID，例如支持 R3 的框架中的
+`--use-rollout-routing-replay`。仅开 `--enable-return-routed-experts`
+而不开训练侧 replay，只能拿到路由数据，不会自动对齐 train/infer。
+
+示例启动：
 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B \
