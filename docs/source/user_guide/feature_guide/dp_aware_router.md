@@ -109,6 +109,23 @@ vllm serve Qwen/Qwen3-30B-A3B \
 启用后，每个已完成请求的 `routed_experts` 只包含**该请求所在 DP** 的
 token 路由。完整返回字段与训练侧接入见 [Routing Replay](routing_replay.md)。
 
+## 测试
+
+| 类型 | 路径 | 覆盖内容 |
+| --- | --- | --- |
+| UT | `tests/ut/patch/worker/test_patch_routed_experts_capture.py` | 单 DP；多 DP naive concat / modular-kernel / padded all-gather；SP + AlltoAll / MC2 分片重建 |
+| E2E | `tests/e2e/pull_request/two_card/test_moe_routing_replay.py` | 开启 `--enable-return-routed-experts` 的 MoE Routing Replay 端到端 |
+
+本地可跑：
+
+```bash
+# DP 感知切片单测
+pytest -sv tests/ut/patch/worker/test_patch_routed_experts_capture.py
+
+# Routing Replay e2e（需 NPU / 两卡环境）
+pytest -sv tests/e2e/pull_request/two_card/test_moe_routing_replay.py
+```
+
 ## 限制
 
 - **依赖 Routing Replay 总开关。** 未开 `--enable-return-routed-experts` 时
@@ -122,5 +139,3 @@ token 路由。完整返回字段与训练侧接入见 [Routing Replay](routing_
 
 - [Routing Replay](routing_replay.md)：采集与返回 `routed_experts`、训练侧回放。
 - [DP Router](dp_router.md)：External DP 的 prompt 负载均衡代理（不同特性）。
-- 单测：`tests/ut/patch/worker/test_patch_routed_experts_capture.py`
-- e2e：`tests/e2e/pull_request/two_card/test_moe_routing_replay.py`
