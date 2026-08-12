@@ -14,22 +14,31 @@
 
 ### 6.1 原理
 
-Token In / Token Out 以**原始 token ID** 作为输入，并返回**原始 token ID**
-作为输出。它绕过 OpenAI Chat/Completions 接口中的 chat template 渲染与默认
-文本编解码，适合做分离式 Serving、RL rollout，以及对 token 级控制有要求的
-基础设施链路。
+vLLM Ascend **不单独实现** Token In / Token Out 协议，而是复用上游
+`POST /inference/v1/generate`。推理侧只做「吃 `token_ids`、在 NPU 上跑
+generate、吐 `token_ids`」，不在该路径上做 chat template / tokenize /
+默认 detokenize。
 
-OpenAI 兼容接口面向“文本进 / 文本出”：服务端负责 tokenize、套 chat template、
-detokenize。Token In / Token Out 则把这些职责外置，让引擎更接近
-`EngineCore` 的原始输入输出。
+Ascend 侧链路：
 
-典型分工：
+```text
+HTTP /inference/v1/generate
+  → EngineCore（调度）
+  → NPUModelRunner（V1：worker/model_runner_v1.py
+                    或 V2：worker/v2/model_runner.py）
+  → NPU forward / sample
+  → choices[].token_ids（+ 可选 logprobs / routed_experts 等）
+```
 
-1. **Renderer / Coordinator**：负责 chat template、多模态预处理，产出
-   `token_ids`（以及可选的 `features`）。
-2. **Generate 实例**：只做推理，吃 token、吐 token；可再配合
-   `kv_transfer_params` 做 PD 分离。
-3. **下游**：自行 detokenize，或继续把 token 交给训练 / 下一跳服务。
+要点：
+
+1. **入口无 Ascend 专用开关。** 普通 `vllm serve` 即暴露该接口；
+   `--tokens-only` / `--skip-tokenizer-init` 仅用于 tokenizer-free 部署。
+2. **Runner 吃的是 token，不是文本。** V1 / V2 均按 `token_ids`（及可选
+   `features`、`kv_transfer_params`）组织 batch 与 forward。
+3. **返回仍以 token 为主。** 默认不产出自然语言；若开
+   `--enable-return-routed-experts`，可在同响应附带本请求的
+   `routed_experts`（见 [Routing Replay](routing_replay.md)）。
 
 ### 6.2 特性工作流图
 
