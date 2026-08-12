@@ -6,7 +6,7 @@ Tool calling: [vLLM documentation](https://docs.vllm.ai/en/latest/features/tool_
 
 Routing Replay（MoE RL 路由回放 / routed-experts capture）：[Routing Replay][routing_replay]
 
-DP Router（数据并行感知路由 / vllm-router → 指定 DP rank）：[DP Router（感知路由）][dp_aware_router]
+DP Router（数据并行感知路由；Vime/vllm-router → Ascend DP rank）：[DP Router（感知路由）][dp_aware_router]
 
 DP Router（External DP 外部负载均衡路由）：[DP Router][dp_router]
 
