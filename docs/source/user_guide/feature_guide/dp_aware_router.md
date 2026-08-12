@@ -18,32 +18,60 @@
 
 ## 1. 原理
 
-vLLM Ascend **不实现** vllm-router 本身，而是作为 Router 后端的推理 Engine：
-在 Internal DP 拓扑下，同一 API Server 后挂多个 DP EngineCore；收到带
-`X-data-parallel-rank` 的请求后，把 generate 派发到对应 rank 的 NPU 进程。
+### 1.1 整体原理：DP Router 的作用
 
-Ascend 侧链路：
+在 Internal DP 部署里，一个 vLLM 实例背后有多个 **DP rank（EngineCore）**，
+共享同一 HTTP 入口。若没有 DP 感知路由，请求只能由服务端默认调度，Caller
+无法稳定指定「这次 generate 落在哪一个 DP」，也难以做 session 亲和或按
+rank 控负载。
+
+**DP Router（数据并行感知路由）的作用**就是补上这一层：在 Router 侧选定
+目标 DP rank，再通过 `X-data-parallel-rank` 把请求**精确打进**该 rank。
 
 ```text
-HTTP 请求（可经 vllm-router 转发）
-  → Ascend API Server 解析 X-data-parallel-rank
-  → 派发到指定 DP EngineCore
-  → NPUWorker / NPUModelRunner（V1 或 V2）执行 forward / sample
-  → 返回 token_ids / logprobs / ...
+                    ┌──────────────────────────────────────┐
+                    │  vLLM 实例（Internal DP）              │
+ Client/            │   API Server                         │
+ Rollout ──► vllm-  │      ├─ EngineCore DP0 ── NPU …      │
+ Manager     router │      ├─ EngineCore DP1 ── NPU …      │
+                    │      └─ EngineCore DPn ── NPU …      │
+                    └──────────────────────────────────────┘
+         选 Worker / DP rank
+         注入 X-data-parallel-rank
 ```
 
-要点：
+它解决的问题：
 
-1. **拓扑是 Internal DP。** `--data-parallel-size N` 时，一个 `host:port`
-   对应 N 个 EngineCore；Router 才能用 `http://host:port@rank` 点名某一 rank。
-2. **落点由请求头决定。** 上游 Serving 读 `X-data-parallel-rank`；Ascend
-   无额外 env。未带头时走服务端默认调度。
-3. **Runner 不感知 Router。** V1（`worker/model_runner_v1.py`）与 V2
-   （`worker/v2/model_runner.py`）只执行已被派发到本 rank 的 batch；选 rank
-   的策略在 Router 侧。
-4. **参数面直连本机 Engine。** `/update_weights`、IPC / HCCL 权重同步打到
-   Ascend server 自身，不经过 Router（见 `examples/rl/`、
-   `NPUWorker.update_weights`）。
+| 没有 DP Router | 有 DP Router |
+| --- | --- |
+| 只能打到实例入口，落点不透明 | 可指定落到 `DP0 / DP1 / …` |
+| 多轮请求难绑定同一 rank | 可用 session / consistent_hash 亲和，利于 prefix/KV 复用 |
+| 负载与 cache 策略难外置 | Router 用 random / round_robin / cache_aware 等策略选 rank |
+
+边界（很重要）：
+
+- **推理数据面**走 Router：`… → vllm-router → 指定 DP rank → generate`
+- **训练参数面不走 Router**：权重同步（`/update_weights`、IPC / HCCL）直连
+  Engine
+
+### 1.2 Ascend 推理侧如何承接
+
+vLLM Ascend **不实现** vllm-router，而是作为后端 Engine：拉起 Internal DP，
+解析 `X-data-parallel-rank`，把请求派发到对应 EngineCore / NPUModelRunner。
+
+```text
+HTTP（Router 转发）
+  → Ascend API Server 解析 X-data-parallel-rank
+  → 指定 DP EngineCore
+  → NPUWorker / NPUModelRunner（V1 或 V2）forward / sample
+  → 返回 token_ids / logprobs / …
+```
+
+1. **拓扑**：`--data-parallel-size N` → 一个 `host:port` 对应 N 个
+   EngineCore，Router 才能用 `http://host:port@rank` 点名。
+2. **落点**：由请求头决定；Ascend 无额外 env；未带头则默认调度。
+3. **Runner**：不感知 Router，只跑已被派发到本 rank 的 batch。
+4. **权重**：`/update_weights` 等直连本机 Engine（见 `examples/rl/`）。
 
 ## 5. 特性工作流
 
