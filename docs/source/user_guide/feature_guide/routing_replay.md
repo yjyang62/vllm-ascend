@@ -183,9 +183,6 @@ vLLM Ascend **不会**重写完整的训练侧 replay kernel，而是实现上�
 | `vllm_ascend/patch/worker/patch_routed_experts_capture.py` | patch `RoutedExpertsCapturer.capture`，适配 Ascend DP/SP/AlltoAll/MC2 布局 |
 | `NPUModelRunner.init_routed_experts_capturer` | 分配缓冲，并把 capturer 绑定到 Ascend MoE runner |
 
-多 DP 下如何按 `dp_rank` 切片、识别 naive / modular / padded / SP 布局，见
-[DP 感知 Router](dp_aware_router.md)。
-
 Ascend capturer patch 覆盖的并行路径包括：
 
 - 单 DP / 多 DP 的 token 归属切片
@@ -214,10 +211,10 @@ Ascend capturer patch 覆盖的并行路径包括：
 
 ## 相关功能
 
-- [DP 感知 Router](dp_aware_router.md)：多 DP 下按 `dp_rank` 采集本 rank 的
-  MoE 路由（与 External DP 的 prompt 分发代理不是同一特性）。
 - [Batch Invariance](batch_invariance.md)：降低算子非确定性，可与 routing replay
   互补，提升 RL 稳定性。
+- [DP 感知 Router](dp_aware_router.md)：External DP 下按负载选择哪一个 DP 实例
+  （与本页 MoE routed-experts 采集不同）。
 - [Sleep Mode](sleep_mode.md)：同卡 RL 场景下，在 rollout 与训练阶段之间做显存卸载。
 - 权重同步示例见 `examples/rl/`（`rlhf_http_npu_ipc.py`、`rlhf_http_hccl.py`），
   用于把更新后的策略权重同步到推理引擎。
