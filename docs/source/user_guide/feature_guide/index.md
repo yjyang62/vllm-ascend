@@ -23,6 +23,7 @@ layerwise_kv_pool
 kv_cache_cpu_offload
 external_dp
 dp_router
+dp_aware_router
 token_in_token_out
 large_scale_ep
 ucm_deployment
