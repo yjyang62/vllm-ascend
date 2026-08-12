@@ -16,41 +16,35 @@
 
 ## 1. 原理
 
-### 1.1 整体原理：DP Router 的作用
+### 1.1 整体原理：DP Router 对 RL 的作用
 
-在 Internal DP 部署里，一个 vLLM 实例背后有多个 **DP rank（EngineCore）**，
-共享同一 HTTP 入口。若没有 DP 感知路由，请求只能由服务端默认调度，Caller
-无法稳定指定「这次 generate 落在哪一个 DP」，也难以做 session 亲和或按
-rank 控负载。
+RL（如 Vime + Megatron）里，rollout 要高频打 vLLM，训练还要周期性灌权重。
+Internal DP 下同一实例有多个 DP rank：若 rollout 不能**感知并选定**落点，
+会出现负载不均、多轮样本 KV 复用差、数据面与参数面缠在一起等问题。
 
-**DP Router（数据并行感知路由）的作用**就是补上这一层：在 Router 侧选定
-目标 DP rank，再通过 `X-data-parallel-rank` 把请求**精确打进**该 rank。
+**DP Router 的作用（面向 RL）**：作为 rollout 的 HTTP 网关，把
+`/inference/v1/generate` 等请求**精确路由到某个 DP rank**，同时让训练侧
+权重同步**绕过 Router、直连 Engine**——数据面可调度，参数面不绕弯。
 
 ```text
-                    ┌──────────────────────────────────────┐
-                    │  vLLM 实例（Internal DP）              │
- Client/            │   API Server                         │
- Rollout ──► vllm-  │      ├─ EngineCore DP0 ── NPU …      │
- Manager     router │      ├─ EngineCore DP1 ── NPU …      │
-                    │      └─ EngineCore DPn ── NPU …      │
-                    └──────────────────────────────────────┘
-         选 Worker / DP rank
-         注入 X-data-parallel-rank
+  Trainer ──权重同步（IPC/HCCL /update_weights）──► Engine（不经 Router）
+                                                      ▲
+  RolloutManager ──generate──► vllm-router ──指定 DP rank──┘
+                               选 rank / session 亲和
 ```
 
-它解决的问题：
+对 RL 的具体价值：
 
-| 没有 DP Router | 有 DP Router |
+| RL 诉求 | DP Router 如何满足 |
 | --- | --- |
-| 只能打到实例入口，落点不透明 | 可指定落到 `DP0 / DP1 / …` |
-| 多轮请求难绑定同一 rank | 可用 session / consistent_hash 亲和，利于 prefix/KV 复用 |
-| 负载与 cache 策略难外置 | Router 用 random / round_robin / cache_aware 等策略选 rank |
+| 大规模并行 rollout | 在多个 DP rank 间负载均衡（round_robin / poweroftwo 等），抬吞吐 |
+| 多轮 / 同 session 生成 | `x-session-id` + consistent_hash / cache_aware，绑同一 rank，复用 prefix/KV |
+| Token 级 rollout | 统一入口转发 `/inference/v1/generate`，Client 不直连某个 Engine |
+| 训练与推理解耦 | 只代理推理数据面；`/update_weights` 等参数面直连 Engine，避免灌权走错后端 |
+| 编排简单 | RolloutManager 只认 Router 地址；DP 落点由 Router 策略决定 |
 
-边界（很重要）：
-
-- **推理数据面**走 Router：`… → vllm-router → 指定 DP rank → generate`
-- **训练参数面不走 Router**：权重同步（`/update_weights`、IPC / HCCL）直连
-  Engine
+没有 DP Router 时：RolloutManager 要么自己选 Engine/rank，要么任由服务端
+默认调度——难做亲和与外置负载策略，也容易和权重更新入口搅在一起。
 
 ### 1.2 Ascend 推理侧如何承接
 
