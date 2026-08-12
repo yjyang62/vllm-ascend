@@ -104,12 +104,16 @@ vllm serve Qwen/Qwen3-0.6B \
   --max-model-len 4096
 ```
 
-**可选**：`--tokens-only`（或 `--skip-tokenizer-init`）只用于
-tokenizer-free / Disaggregated Everything——服务端不初始化 tokenizer，
-并不等于「打开 Token I/O」；不加也能用 generate 接口。
+**关于 `--tokens-only`（可选，不是开启 Token I/O 的开关）**
+
+- **不开 `--tokens-only`**：`/v1/completions` 等标准接口正常暴露，且这些
+  接口本身就允许 `prompt` 传 token id 列表；同时
+  `/inference/v1/generate` 也可用。
+- **开 `--tokens-only`**：只暴露专门的 tokens-in/out 接口
+  （`ServingTokens`），标准 `/v1/chat/completions` 等被隐藏。
 
 ```bash
-# 可选：仅当 Generate 实例不需要服务端 tokenizer 时
+# 可选：仅暴露 tokens-in/out，隐藏标准 Chat/Completions
 vllm serve /path/to/model \
   --tokens-only \
   --max-model-len 2048
