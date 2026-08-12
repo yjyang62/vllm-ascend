@@ -284,11 +284,9 @@ npu model runner v2 is in developing, some features doesn't work for now.
 
 ## 相关功能
 
-- [Routing Replay](routing_replay.md)：可在同一 generate 响应中返回
-  `routed_experts`，供 MoE RL 训练回放。
-- [DP Router](dp_router.md)：External DP 下可把
-  `/inference/v1/generate` 作为后端 API，由外部 Router 做负载均衡；注意 V1/V2
-  后端不要混部。
+- [Routing Replay](routing_replay.md)：DP 感知 MoE Router 采集；可在同一
+  generate 响应中返回本 DP 归属的 `routed_experts`，供 MoE RL 训练回放。
+  详见该文档第 6 节与 Token I/O 的组合说明。
 - Prefill/Decode 分离相关文档：`kv_transfer_params` 可挂到 generate 请求，
   用于跨实例 KV 传输。
 - Model Runner V2 跟踪：[Issue #5208](https://github.com/vllm-project/vllm-ascend/issues/5208)。
