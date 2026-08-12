@@ -256,9 +256,10 @@ Router 点名。
 ## 相关功能
 
 - [Token In / Token Out](token_in_token_out.md)：RL rollout 常用
-  `/inference/v1/generate`
-- [External DP](external_dp.md) / [DP Router](dp_router.md)：External DP
-  按 endpoint 分发（不同机制）
+  `/inference/v1/generate`（经 Router 且固定同一 DP）
+- [Routing Replay](routing_replay.md)：MoE expert 级训推对齐（与「固定 DP」
+  互补，不是同一层）
 - [Sleep / Wakeup](sleep_wakeup.md)、`examples/rl/`：权重同步与分阶段 RL
-- [Routing Replay](routing_replay.md)：MoE routed-experts 采集（不同机制）
+- [External DP](external_dp.md) / [DP Router](dp_router.md)：按 endpoint
+  分发（不同机制）
 - 上游：[Data Parallel Deployment](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/)
