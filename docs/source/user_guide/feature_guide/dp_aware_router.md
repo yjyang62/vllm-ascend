@@ -2,17 +2,13 @@
 
 !!! note
 
-    DP Router（数据并行感知路由）是 **vLLM Router** 中用于将请求精确路由到
-    某个 vLLM 实例内部具体 DP rank 的机制。
+    DP Router（数据并行感知路由）由上游 **vLLM Router + API Server** 提供：
+    将请求精确路由到某个 vLLM 实例内部的具体 DP rank。
 
-    在 RL 编排（以 Vime 为例）中：Vime 使用 **vllm-router** 作为 vLLM rollout
-    的 HTTP 网关；Router 维护 worker 列表、选择后端并转发推理请求；训练、
-    reward、参数更新仍由 Vime / 训练后端负责。
-
-    **本文写 vLLM Ascend 推理侧**：Engine 如何作为 Router 后端被访问、如何按
-    DP rank 承接请求，以及权重同步为何绕过 Router。RL 侧接入（RolloutManager
-    打 Router、`x-session-id` 等）见编排框架文档；此处只给出与推理侧对齐的
-    调用关系与启用方式。
+    **本文只写 vLLM Ascend 推理侧原理与启用**：Internal DP Engine 如何承接
+    `X-data-parallel-rank`、以及权重同步为何直连 Engine。RL / Vime 侧编排
+    （RolloutManager、Router policy、`x-session-id` 等）见 5.4.1 摘要及编排
+    框架文档。
 
 上游参考：
 
