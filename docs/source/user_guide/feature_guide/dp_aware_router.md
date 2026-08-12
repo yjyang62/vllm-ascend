@@ -18,34 +18,31 @@
 
 ### 1.1 整体原理：DP Router 对 RL 的作用
 
-RL rollout 里，同一条样本的多轮 generate、续写、或依赖同一 prefix/KV 的
-请求，往往必须落在**同一个 DP rank** 上。Internal DP 下多个 EngineCore
-共享入口：若不能感知并指定 DP，请求可能被打散到不同 rank——KV / prefix
-对不上，多轮行为也不稳定。
+RL 要的是 **训推一致**：rollout（推理）产出的 token / logprobs 等，必须能
+被训练侧在同一设定下复现或对齐。Internal DP 下若同一样本的 generate 落在
+不同 DP rank，计算路径与数值环境可能分叉，训推更容易漂。
 
-**DP Router 的核心作用**：让 RL 侧可以**稳定地使用同一个 DP**（精确路由到
-指定 `data_parallel_rank`）。例如带 `x-session-id` 时，用
-`consistent_hash` / `cache_aware` 把同一 session 一直打到同一 Worker/rank，
-从而复用该 rank 上的 prefix cache 与 KV。
+**DP Router 的核心作用**：让 RL 把相关请求**固定到同一个 DP rank**（感知并
+指定 `data_parallel_rank`），从而保证这条样本在推理侧始终走同一 EngineCore，
+支撑训推一致；而不是把流量随便打散到各个 DP。
 
 ```text
-  同一样本 / 同一 session 的多次 generate
+  同一样本的 rollout generate（可多次）
         │
         ▼
-  vllm-router  ──►  始终落到同一 DP rank（如 DP2）
-                        EngineCore DP2 上的 KV / prefix 可复用
+  vllm-router  ──►  固定落到同一 DP rank
+                        推理路径稳定 → 便于与训练对齐（训推一致）
 ```
-
-对 RL 而言，这比“把流量均匀撒开”更关键：
 
 | 没有 DP 感知 | 有 DP Router |
 | --- | --- |
 | 同一样本可能落到不同 DP | 可绑定**同一个 DP** |
-| 多轮续写难吃到已有 KV | 同 rank 上复用 prefix / KV |
-| session 亲和做不稳 | `x-session-id` + hash/cache 策略固定落点 |
+| 推理路径不稳定，训推易不一致 | 同 rank 上路径固定，利于训推一致 |
+| session / 样本级落点不可控 | `x-session-id` + consistent_hash 等固定落点 |
 
-附带能力：仍可在多个 DP 间做负载均衡；权重同步（`/update_weights`、
-IPC / HCCL）走参数面、**不经 Router**，与“指定同一 DP 做 rollout”互不干扰。
+手段：Router 注入 `X-data-parallel-rank`（或等价字段），Ascend Internal DP
+Engine 按该 rank 派发。权重同步仍走参数面、**不经 Router**
+（`/update_weights`、IPC / HCCL），与“固定同一 DP 做 rollout”分开。
 
 ### 1.2 Ascend 推理侧如何承接
 
