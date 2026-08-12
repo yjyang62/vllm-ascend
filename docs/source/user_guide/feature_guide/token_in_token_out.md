@@ -112,20 +112,24 @@ vllm serve Qwen/Qwen3-0.6B \
   --max-model-len 4096
 ```
 
-若 Generate 实例只做 token 推理、不需要服务端 tokenizer，可配合：
+**开关：`--tokens-only`**
+
+Generate 实例若只做 token 推理、不需要服务端 tokenizer，可加
+`--tokens-only`（便于 Disaggregated Everything）。也可显式使用
+`--skip-tokenizer-init`：
 
 ```bash
 vllm serve /path/to/model \
-  --skip-tokenizer-init \
+  --tokens-only \
   --load-format dummy \
   --max-model-len 2048
 ```
 
 !!! note
 
-    `--skip-tokenizer-init` 时，服务端不再负责文本编解码；Client 必须自行
-    提供合法 `token_ids`，并在本地 decode。dummy 权重仅用于链路验证，
-    不代表真实生成质量。
+    `--tokens-only` / `--skip-tokenizer-init` 时，服务端不再负责文本编解码；
+    Client 必须自行提供合法 `token_ids`，并在本地 decode。dummy 权重仅用于
+    链路验证，不代表真实生成质量。
 
 ### 基本请求
 
@@ -230,8 +234,9 @@ with httpx.stream("POST", GEN_ENDPOINT, json=payload, timeout=600) as resp:
 
 ## Model Runner V1 / V2 差异
 
-Token In / Token Out 的 **HTTP 契约不变**（仍是
-`POST /inference/v1/generate`）。差异在后端 Model Runner：
+Token In / Token Out 在 Model Runner V1 与 V2 下是**等价的**，不需要单独适配：
+**HTTP 契约不变**（仍是 `POST /inference/v1/generate`）。下表仅说明后端
+runner 能力边界，便于选型：
 
 | 维度 | Model Runner V1（默认） | Model Runner V2（实验性） |
 | --- | --- | --- |
