@@ -32,8 +32,8 @@ HTTP /inference/v1/generate
 
 要点：
 
-1. **入口无 Ascend 专用开关。** 普通 `vllm serve` 即暴露该接口；
-   `--tokens-only` / `--skip-tokenizer-init` 仅用于 tokenizer-free 部署。
+1. **无需额外开关即可使用。** 普通 `vllm serve` 即暴露
+   `/inference/v1/generate`，**不必**开 `--tokens-only`。
 2. **Runner 吃的是 token，不是文本。** V1 / V2 均按 `token_ids`（及可选
    `features`、`kv_transfer_params`）组织 batch 与 forward。
 3. **返回仍以 token 为主。** 默认不产出自然语言；若开
@@ -93,22 +93,23 @@ HTTP 契约均为 `POST /inference/v1/generate`。后端 runner 在多模态
 
 #### 6.4.1 推理端
 
-**开关**
+**如何开启**
 
-```text
---tokens-only
-```
-
-普通 `vllm serve` 即可暴露 `/inference/v1/generate`（与 OpenAI 入口共存）。
-Generate 实例若只做 token 推理、不需要服务端 tokenizer，可加
-`--tokens-only`；也可显式使用 `--skip-tokenizer-init`：
+Token In / Token Out **没有单独的必开开关**。普通启动即可，与 OpenAI 兼容
+入口共存；直接打 `POST /inference/v1/generate`：
 
 ```bash
 vllm serve Qwen/Qwen3-0.6B \
   --host 0.0.0.0 --port 8000 \
   --max-model-len 4096
+```
 
-# tokenizer-free / Disaggregated Everything 场景
+**可选**：`--tokens-only`（或 `--skip-tokenizer-init`）只用于
+tokenizer-free / Disaggregated Everything——服务端不初始化 tokenizer，
+并不等于「打开 Token I/O」；不加也能用 generate 接口。
+
+```bash
+# 可选：仅当 Generate 实例不需要服务端 tokenizer 时
 vllm serve /path/to/model \
   --tokens-only \
   --max-model-len 2048
