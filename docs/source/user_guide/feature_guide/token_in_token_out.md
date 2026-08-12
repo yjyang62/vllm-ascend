@@ -112,24 +112,20 @@ vllm serve Qwen/Qwen3-0.6B \
   --max-model-len 4096
 ```
 
-**开关：`--tokens-only`**
-
-Generate 实例若只做 token 推理、不需要服务端 tokenizer，可加
-`--tokens-only`（便于 Disaggregated Everything）。也可显式使用
-`--skip-tokenizer-init`：
+若 Generate 实例只做 token 推理、不需要服务端 tokenizer，可配合：
 
 ```bash
 vllm serve /path/to/model \
-  --tokens-only \
+  --skip-tokenizer-init \
   --load-format dummy \
   --max-model-len 2048
 ```
 
 !!! note
 
-    `--tokens-only` / `--skip-tokenizer-init` 时，服务端不再负责文本编解码；
-    Client 必须自行提供合法 `token_ids`，并在本地 decode。dummy 权重仅用于
-    链路验证，不代表真实生成质量。
+    `--skip-tokenizer-init` 时，服务端不再负责文本编解码；Client 必须自行
+    提供合法 `token_ids`，并在本地 decode。dummy 权重仅用于链路验证，
+    不代表真实生成质量。
 
 ### 基本请求
 
@@ -234,9 +230,8 @@ with httpx.stream("POST", GEN_ENDPOINT, json=payload, timeout=600) as resp:
 
 ## Model Runner V1 / V2 差异
 
-Token In / Token Out 在 Model Runner V1 与 V2 下是**等价的**，不需要单独适配：
-**HTTP 契约不变**（仍是 `POST /inference/v1/generate`）。下表仅说明后端
-runner 能力边界，便于选型：
+Token In / Token Out 的 **HTTP 契约不变**（仍是
+`POST /inference/v1/generate`）。差异在后端 Model Runner：
 
 | 维度 | Model Runner V1（默认） | Model Runner V2（实验性） |
 | --- | --- | --- |
@@ -284,9 +279,11 @@ npu model runner v2 is in developing, some features doesn't work for now.
 
 ## 相关功能
 
-- [Routing Replay](routing_replay.md)：DP 感知 MoE Router 采集；可在同一
-  generate 响应中返回本 DP 归属的 `routed_experts`，供 MoE RL 训练回放。
-  详见该文档第 6 节与 Token I/O 的组合说明。
+- [Routing Replay](routing_replay.md)：可在同一 generate 响应中返回
+  `routed_experts`，供 MoE RL 训练回放。
+- [DP Router](dp_router.md)：External DP 下可把
+  `/inference/v1/generate` 作为后端 API，由外部 Router 做负载均衡；注意 V1/V2
+  后端不要混部。
 - Prefill/Decode 分离相关文档：`kv_transfer_params` 可挂到 generate 请求，
   用于跨实例 KV 传输。
 - Model Runner V2 跟踪：[Issue #5208](https://github.com/vllm-project/vllm-ascend/issues/5208)。
