@@ -22,60 +22,32 @@
 
 ## 1. 原理
 
-### 1.1 角色分工
+vLLM Ascend **不实现** vllm-router 本身，而是作为 Router 后端的推理 Engine：
+在 Internal DP 拓扑下，同一 API Server 后挂多个 DP EngineCore；收到带
+`X-data-parallel-rank` 的请求后，把 generate 派发到对应 rank 的 NPU 进程。
 
-| 组件 | 职责 |
-| --- | --- |
-| 训练（Megatron Actor / Critic 等） | 参数更新、组训练 batch；权重同步直连 Engine |
-| RolloutManager | 编排 rollout、发起 generate、样本 / reward 转换 |
-| vllm-router | HTTP 路由 / 负载均衡；维护 worker；把请求打到具体 Worker（及 DP rank） |
-| vLLM Ascend Engine 集群 | 执行推理；按 `X-data-parallel-rank`（或等价字段）落到对应 DP EngineCore |
+Ascend 侧链路：
 
-核心边界：
-
-- **推理数据面**：`RolloutManager → vllm-router → vLLM Ascend Engine`
-- **训练参数面**：`Trainer → vLLM Engine`（如 `/update_weights`、IPC / HCCL），
-  **权重同步不经过 Router**
-
-### 1.2 vllm-router 与训练 / 推理 Manager 的调用关系
-
-```mermaid
-flowchart LR
-    T["训练<br/>Megatron Actor / Critic"]
-    RM["RolloutManager<br/>编排与数据转换"]
-    R["vllm-router<br/>HTTP 路由 / 负载均衡"]
-    V["vLLM Ascend Engine 集群"]
-    D["Rollout 数据<br/>tokens / reward / logprobs"]
-
-    T -->|"1. 训练参数更新"| T
-    T -->|"2. 权重同步<br/>IPC / NCCL / HCCL<br/>不经过 Router"| V
-
-    RM -->|"3. 发起 rollout"| R
-    R -->|"4. 路由请求"| V
-    V -->|"5. 生成结果"| R
-    R -->|"6. 返回结果"| RM
-
-    RM -->|"7. reward + 样本转换"| D
-    D -->|"8. 训练 batch"| T
-
-    classDef train fill:#e8f1ff,stroke:#4b83d8,color:#17365d
-    classDef router fill:#fff3d6,stroke:#d99a00,color:#5c4300
-    classDef infer fill:#e9f7ef,stroke:#45a36b,color:#174d2a
-    classDef data fill:#f2eafa,stroke:#8a63b8,color:#45265f
-
-    class T train
-    class R router
-    class V infer
-    class RM,D data
+```text
+HTTP 请求（可经 vllm-router 转发）
+  → Ascend API Server 解析 X-data-parallel-rank
+  → 派发到指定 DP EngineCore
+  → NPUWorker / NPUModelRunner（V1 或 V2）执行 forward / sample
+  → 返回 token_ids / logprobs / ...
 ```
 
-对 Ascend 推理侧意味着：
+要点：
 
-1. **Rollout 流量只从 Router 进来**（Client 不直连某个 Engine 做日常 generate）。
-2. **Engine 需可被 Router 发现 / 注册**（例如 `POST /workers` 或静态
-   `--worker-urls`，以所用 vllm-router 版本为准）。
-3. **权重面直连 Engine**（`examples/rl/rlhf_http_hccl.py` /
-   `rlhf_http_npu_ipc.py` 中的 `/update_weights` 等），避免 Router 成为参数面瓶颈或状态错位。
+1. **拓扑是 Internal DP。** `--data-parallel-size N` 时，一个 `host:port`
+   对应 N 个 EngineCore；Router 才能用 `http://host:port@rank` 点名某一 rank。
+2. **落点由请求头决定。** 上游 Serving 读 `X-data-parallel-rank`；Ascend
+   无额外 env。未带头时走服务端默认调度。
+3. **Runner 不感知 Router。** V1（`worker/model_runner_v1.py`）与 V2
+   （`worker/v2/model_runner.py`）只执行已被派发到本 rank 的 batch；选 rank
+   的策略在 Router 侧。
+4. **参数面直连本机 Engine。** `/update_weights`、IPC / HCCL 权重同步打到
+   Ascend server 自身，不经过 Router（见 `examples/rl/`、
+   `NPUWorker.update_weights`）。
 
 ## 5. 特性工作流
 
