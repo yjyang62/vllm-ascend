@@ -107,7 +107,112 @@ vllm serve Qwen/Qwen3-30B-A3B \
 ```
 
 启用后，每个已完成请求的 `routed_experts` 只包含**该请求所在 DP** 的
-token 路由。完整返回字段与训练侧接入见 [Routing Replay](routing_replay.md)。
+token 路由。
+
+### 在线服务（Completions）
+
+功能开启后，已完成请求的每个 choice 会携带 base64 编码的 NumPy
+`routed_experts`：
+
+```python
+import io
+import base64
+
+import numpy as np
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+resp = client.completions.create(
+    model="Qwen/Qwen3-30B-A3B",
+    prompt="Hello, please introduce yourself.",
+    max_tokens=32,
+    temperature=0.0,
+    extra_body={"return_token_ids": True},
+)
+
+payload = resp.model_dump()["choices"][0]["routed_experts"]
+routed_experts = np.load(io.BytesIO(base64.b64decode(payload)))
+# routed_experts.shape == [num_tokens, num_moe_layers, top_k]
+print(routed_experts.shape, routed_experts.dtype)
+```
+
+### 离线 / 进程内 API
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model="Qwen/Qwen3-30B-A3B",
+    tensor_parallel_size=2,
+    data_parallel_size=2,
+    enable_expert_parallel=True,
+    enable_return_routed_experts=True,
+    async_scheduling=False,
+)
+
+outputs = llm.generate(
+    ["Hello, please introduce yourself."],
+    SamplingParams(max_tokens=32, temperature=0.0),
+)
+
+routed = outputs[0].outputs[0].routed_experts
+assert routed is not None and routed.size > 0
+print(routed.shape)  # [seq_len, num_moe_layers, top_k]
+```
+
+## 返回约定
+
+| 字段 | 位置 | 含义 |
+| --- | --- | --- |
+| `routed_experts` | `CompletionOutput` / `choices[].routed_experts` | 请求 token 使用的 expert ID；多 DP 下仅为**本 DP** 归属的切片 |
+
+张量约定：
+
+| 属性 | 值 |
+| --- | --- |
+| Shape | `[num_tokens, num_moe_layers, top_k]` |
+| 典型长度 | `prompt_len + generated_len - 1`（按 next-token 对齐） |
+| Dtype（引擎缓冲） | worker 传输缓冲使用 `int32` |
+| HTTP 编码 | base64 编码的 `.npy` 字节 |
+| 合法 ID | `[0, num_experts)`（prefix cache 场景可能使用 `-1` 哨兵值） |
+
+`num_tokens` 与本请求（本 DP）的 token 对齐；不要把其它 DP rank 的路由拼进
+同一缓冲。
+
+## 训练侧接入
+
+仅拿到 `routed_experts` 不够，训练栈必须在 MoE forward 中**强制使用**这些
+expert ID（Routing Replay / R3）。
+
+若训练框架期望单个 Megatron 侧缓冲（`rollout_routed_experts`），请先解码
+响应张量，再校验 shape 后赋值：
+
+```text
+rollout_routed_experts.shape == (len(tokens) - 1, num_layers, moe_router_topk)
+```
+
+以 Qwen3-30B-A3B 为例：`(seq_len - 1, 48, 8)`。
+
+典型步骤：
+
+1. 推理侧开启 `--enable-return-routed-experts`，完成 rollout。
+2. 从 Completions / 离线 API 取出 `routed_experts`（HTTP 需 base64 → `.npy`
+   解码）。
+3. 校验 dtype / shape，与训练侧 `tokens`、层数、`top_k` 对齐。
+4. 写入训练框架约定字段（如 `rollout_routed_experts`），并打开训练侧
+   replay 开关（例如支持 R3 的框架中的 `--use-rollout-routing-replay`）。
+5. 训练 forward 不再重新 `select_experts`，而是回放推理捕获的 expert ID，
+   使 train/infer 路由一致。
+
+多 DP 时：每个 DP 实例各自返回本 rank 的 `routed_experts`；训练侧应按
+rollout 时的 DP 归属拼接或分片消费，避免跨 DP 错位。
+
+上游参考：
+
+- [Stabilizing MoE Reinforcement Learning by Aligning Training and Inference Routers](https://arxiv.org/abs/2510.11370)
+- 上游示例：[`examples/rl/routed_experts_e2e.py`](https://github.com/vllm-project/vllm/blob/main/examples/rl/routed_experts_e2e.py)
+
+更完整的 Routing Replay 产品说明见 [Routing Replay](routing_replay.md)。
 
 ## 测试
 
