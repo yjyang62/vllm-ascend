@@ -265,8 +265,8 @@ vllm serve model_path \
 - [External DP](external_dp.md)：External DP 启动与代理的基础教程。
 - [Token In / Token Out](token_in_token_out.md)：可将 generate API 作为 DP 后端；
   同样需关注 V1/V2 差异。
-- [DP 感知 Router](dp_aware_router.md)：MoE 路由采集时按 `dp_rank` 切片（与本
-  文的 prompt 分发代理不是同一特性）。
+- [DP Router（数据并行感知路由）](dp_aware_router.md)：Internal DP +
+  `X-data-parallel-rank` / vllm-router（与本文 External DP 按 host:port 分发不同）。
 - [Large Scale EP](large_scale_ep.md)：大规模专家并行部署中可与 External DP 组合。
 - [Short Request First](short_request_first.md)：调度侧对短请求的优先策略，可与
   外部长度感知路由互补。

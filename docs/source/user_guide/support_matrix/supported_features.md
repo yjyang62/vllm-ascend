@@ -6,7 +6,7 @@ Tool calling: [vLLM documentation](https://docs.vllm.ai/en/latest/features/tool_
 
 Routing Replay（MoE RL 路由回放 / routed-experts capture）：[Routing Replay][routing_replay]
 
-DP 感知 Router（多 DP 下按 `dp_rank` 采集 MoE 路由）：[DP 感知 Router][dp_aware_router]
+DP Router（数据并行感知路由 / vllm-router → 指定 DP rank）：[DP Router（感知路由）][dp_aware_router]
 
 DP Router（External DP 外部负载均衡路由）：[DP Router][dp_router]
 
@@ -41,7 +41,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Sleep / Wakeup (RL flow)      | 🟢 Functional    | Functional, see detailed note: [Sleep / Wakeup][sleep_wakeup]           |
 | Context Parallel              | 🟢 Functional    | Functional, see detailed note: [Context Parallel][context_parallel]     |
 | Routing Replay                | 🔵 Experimental  | Functional, see detailed note: [Routing Replay][routing_replay]         |
-| DP-Aware Router               | 🔵 Experimental  | Functional, see detailed note: [DP-Aware Router][dp_aware_router]       |
+| DP Router (rank-aware)        | 🔵 Experimental  | Functional, see detailed note: [DP Router (rank-aware)][dp_aware_router] |
 | DP Router                     | 🔵 Experimental  | Functional, see detailed note: [DP Router][dp_router]                   |
 | Token In / Token Out          | 🔵 Experimental  | Functional, see detailed note: [Token In / Token Out][token_in_token_out] |
 
