@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
+    _has_weight_scale,
     build_dspark_swa_indices,
     get_dspark_sparse_sas_window,
 )
@@ -1353,25 +1354,23 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self._switch_o_proj_to_full_weight()
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
-            if self._check_dynamic_quant(self.wo_a):
+            # Match dsa_v1: A5 MX-quantized o_proj only when weight_scale exists.
+            # BF16 A5 falls through to npu_transpose_batchmatmul below.
+            if get_ascend_device_type() == AscendDeviceType.A5 and _has_weight_scale(self.wo_a):
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
-                wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
-                if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
-                    o = torch.bmm(o.transpose(0, 1), self._get_batched_wo_a_weight(o_proj_groups)).transpose(0, 1)
-                else:
-                    o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
-                    o = torch_npu.npu_transpose_quant_batchmatmul(
-                        o,
-                        self._get_batched_wo_a_weight(o_proj_groups),
-                        dtype=torch.bfloat16,
-                        bias=None,
-                        group_sizes=(0, 0, 32),
-                        x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
-                        x2_scale=self._get_batched_wo_a_scale(o_proj_groups).view(torch.float8_e8m0fnu),
-                        perm_x1=(1, 0, 2),
-                        perm_x2=(0, 1, 2),
-                        perm_y=(1, 0, 2),
-                    )
+                o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
+                o = torch_npu.npu_transpose_quant_batchmatmul(
+                    o,
+                    self._get_batched_wo_a_weight(o_proj_groups),
+                    dtype=torch.bfloat16,
+                    bias=None,
+                    group_sizes=(0, 0, 32),
+                    x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
+                    x2_scale=self._get_batched_wo_a_scale(o_proj_groups).view(torch.float8_e8m0fnu),
+                    perm_x1=(1, 0, 2),
+                    perm_x2=(0, 1, 2),
+                    perm_y=(1, 0, 2),
+                )
                 o = o.reshape(num_tokens, -1)
                 output[...] = self._apply_wo_b(o, full_gather_wo_a_enabled)
             else:
