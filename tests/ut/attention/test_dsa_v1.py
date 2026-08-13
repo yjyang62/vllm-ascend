@@ -15,6 +15,7 @@
 
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,8 +27,12 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
+    _has_weight_scale,
+    _is_w8a8_dynamic,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.utils import AscendDeviceType
 
 
 def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
@@ -42,9 +47,11 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
         ),
         enable_sleep_mode=False,
         get_head_size=lambda: 512,
+        dtype=torch.bfloat16,
     )
     vllm_config = SimpleNamespace(
         model_config=model_config,
+        cache_config=SimpleNamespace(cache_dtype="auto"),
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=16,
             max_num_seqs=4,
@@ -53,12 +60,19 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
         parallel_config=SimpleNamespace(tensor_parallel_size=2),
     )
     kv_cache_spec = SimpleNamespace(compress_ratio=compressor_ratio, block_size=128)
-    builder = AscendDSAMetadataBuilder(
-        kv_cache_spec=kv_cache_spec,
-        layer_names=["model.layers.0.self_attn.attn"],
-        vllm_config=vllm_config,
-        device=torch.device("cpu"),
-    )
+    with (
+        patch(
+            "vllm_ascend.attention.dsa_v1.kv_cache_dtype_str_to_dtype",
+            return_value=torch.bfloat16,
+        ),
+        patch.object(DeviceOperator, "get_dsa_kv_layout", return_value="PA_ND"),
+    ):
+        builder = AscendDSAMetadataBuilder(
+            kv_cache_spec=kv_cache_spec,
+            layer_names=["model.layers.0.self_attn.attn"],
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+        )
 
     # These caches are supplied by model_runner through build() in production.
     builder.common_ratio_to_sas_metadata = {}
@@ -162,6 +176,7 @@ def test_build_sas_metadata_parameters_cache_and_builder_buffer(
     assert call_kwargs["cu_seqlens_ori_kv"] is cu_seqlens_ori_kv
     assert call_kwargs["cu_seqlens_cmp_kv"] is cu_seqlens_cmp_kv
     assert call_kwargs["seqused_kv"] is seq_lens
+    assert call_kwargs["layout_kv"] == builder.layout_kv
 
 
 def test_build_qli_metadata_parameters_cache_and_builder_buffer():
@@ -496,8 +511,23 @@ def _make_impl() -> AscendDSAImpl:
         patch(
             "vllm_ascend.attention.dsa_v1.get_current_vllm_config",
             return_value=SimpleNamespace(
-                model_config=SimpleNamespace(hf_config=SimpleNamespace(use_index_cache=False))
+                cache_config=SimpleNamespace(cache_dtype="auto"),
+                model_config=SimpleNamespace(
+                    dtype=torch.bfloat16,
+                    hf_config=SimpleNamespace(use_index_cache=False),
+                ),
             ),
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.kv_cache_dtype_str_to_dtype",
+            return_value=torch.bfloat16,
+        ),
+        patch.object(DeviceOperator, "get_dsa_kv_layout", return_value="PA_ND"),
+        patch.object(DeviceOperator, "get_dsa_sparse_attn_base_kwargs", return_value={}),
+        patch.object(
+            DeviceOperator,
+            "get_dsa_compressor_slot_mapping_format",
+            return_value="v1",
         ),
     ):
         return AscendDSAImpl(
@@ -638,7 +668,11 @@ def test_forward_attention_routes_unified_req_metadata(
     swa_kv_cache = torch.empty(0)
     sparse_attn_op = MagicMock(return_value=(attention_output,))
 
-    def add_extra_kwargs(extra_kwargs: dict[str, Any], **kwargs) -> None:
+    def add_extra_kwargs(
+        extra_kwargs: dict[str, Any],
+        kv_cache_dtype=None,
+        **kwargs,
+    ) -> None:
         extra_kwargs.update(kwargs)
 
     with (
@@ -699,7 +733,86 @@ def test_forward_attention_routes_unified_req_metadata(
     assert sparse_call.kwargs["cu_seqlens_q"] is req_metadata.query_start_loc
     assert sparse_call.kwargs["seqused_kv"] is req_metadata.seq_lens
     assert sparse_call.kwargs["metadata"] is sas_metadata
+    assert sparse_call.kwargs["layout_kv"] == impl.layout_kv
     if num_prefills:
         assert sparse_call.kwargs["cu_seqlens_ori_kv"] is req_metadata.query_start_loc
     else:
         assert "cu_seqlens_ori_kv" not in sparse_call.kwargs
+
+
+def test_is_w8a8_dynamic_detects_method_without_weight_scale():
+    quant_method = AscendW8A8DynamicLinearMethod.__new__(AscendW8A8DynamicLinearMethod)
+    linear = SimpleNamespace(quant_method=SimpleNamespace(quant_method=quant_method))
+
+    assert not _has_weight_scale(linear)
+    assert _is_w8a8_dynamic(linear)
+
+    linear.weight_scale = object()
+
+    assert _has_weight_scale(linear)
+    assert _is_w8a8_dynamic(linear)
+
+
+def test_a5_bf16_o_proj_uses_npu_transpose_batchmatmul_with_gdr_weight():
+    # weight_loader persists wo_a as [G, D, R]; o_proj consumes it directly.
+    weight = torch.arange(24, dtype=torch.float32).reshape(3, 4, 2)
+    impl = SimpleNamespace(
+        n_local_groups=3,
+        o_lora_rank=2,
+        wo_a=SimpleNamespace(weight=weight),
+        wo_b=lambda x: x,
+    )
+    o_proj_input = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    output = torch.empty(2, 6)
+    expected = torch.arange(12, dtype=torch.float32).reshape(2, 6)
+
+    with (
+        mock.patch(
+            "vllm_ascend.attention.dsa_v1.get_ascend_device_type",
+            return_value=AscendDeviceType.A5,
+        ),
+        mock.patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        mock.patch("vllm_ascend.attention.dsa_v1.olora_tp_enable", return_value=False),
+        mock.patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_quant_batchmatmul") as quant_batch_matmul,
+        mock.patch(
+            "vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul",
+            return_value=expected,
+        ) as batch_matmul,
+    ):
+        result = AscendDSAImpl._forward_o_proj(impl, o_proj_input, output)
+
+    quant_batch_matmul.assert_not_called()
+    batch_matmul.assert_called_once()
+    assert batch_matmul.call_args.args[1] is weight
+    torch.testing.assert_close(result, expected)
+
+
+def test_a3_o_proj_keeps_npu_transpose_batchmatmul():
+    weight = torch.arange(24, dtype=torch.float32).reshape(3, 4, 2)
+    impl = SimpleNamespace(
+        n_local_groups=3,
+        o_lora_rank=2,
+        wo_a=SimpleNamespace(weight=weight),
+        wo_b=lambda x: x,
+    )
+    o_proj_input = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    output = torch.empty(2, 6)
+    expected = torch.arange(12, dtype=torch.float32).reshape(2, 6)
+
+    with (
+        mock.patch(
+            "vllm_ascend.attention.dsa_v1.get_ascend_device_type",
+            return_value=AscendDeviceType.A3,
+        ),
+        mock.patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        mock.patch("vllm_ascend.attention.dsa_v1.olora_tp_enable", return_value=False),
+        mock.patch(
+            "vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul",
+            return_value=expected,
+        ) as batch_matmul,
+    ):
+        result = AscendDSAImpl._forward_o_proj(impl, o_proj_input, output)
+
+    batch_matmul.assert_called_once()
+    assert batch_matmul.call_args.args[1] is weight
+    torch.testing.assert_close(result, expected)
