@@ -23,22 +23,18 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
+from vllm_ascend.attention.dsa_attn_kv_plan import (
+    DsaAttnKvPlan,
+    build_a5_dsa_attn_kv_plan,
+    build_base_dsa_attn_kv_plan,
+)
 from vllm_ascend.device import utils as device_utils
-from vllm_ascend.ops.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, SCALE_DTYPES
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
-DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
-
-
-def _uses_bf16_sparse_flash_mla(kv_cache_dtype: torch.dtype | None) -> bool:
-    return kv_cache_dtype == torch.bfloat16
-
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -668,33 +664,38 @@ class BaseDeviceAdaptor:
     # ===== Sparse Attention Metadata & Op Selectors =====
 
     @staticmethod
-    def get_dsa_sparse_attn_metadata_op(kv_cache_dtype: torch.dtype | None = None):
+    def build_dsa_attn_kv_plan(kv_cache_dtype: torch.dtype | None = None) -> DsaAttnKvPlan:
+        """A2/A3: sharedkv + PA_ND + block/offset slots (dtype does not switch path)."""
+        return build_base_dsa_attn_kv_plan(kv_cache_dtype)
+
+    @classmethod
+    def get_dsa_sparse_attn_metadata_op(cls, kv_cache_dtype: torch.dtype | None = None):
         """Returns the metadata-building operator for sparse attention."""
-        return torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
+        return cls.build_dsa_attn_kv_plan(kv_cache_dtype).sparse_attn_metadata_op
 
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device, kv_cache_dtype: torch.dtype | None = None):
+    @classmethod
+    def get_dsa_sparse_attn_metadata_kwargs(cls, device, kv_cache_dtype: torch.dtype | None = None):
         """Returns kwargs for sparse attention metadata builder."""
-        return {"device": str(device)}
+        return cls.build_dsa_attn_kv_plan(kv_cache_dtype).metadata_kwargs(device)
 
-    @staticmethod
-    def get_dsa_sparse_attn_op(kv_cache_dtype: torch.dtype | None = None):
+    @classmethod
+    def get_dsa_sparse_attn_op(cls, kv_cache_dtype: torch.dtype | None = None):
         """Returns the sparse attention operator."""
-        return torch.ops._C_ascend.npu_sparse_attn_sharedkv
+        return cls.build_dsa_attn_kv_plan(kv_cache_dtype).sparse_attn_op
 
-    @staticmethod
-    def get_dsa_sparse_attn_base_kwargs(kv_cache_dtype: torch.dtype | None = None):
+    @classmethod
+    def get_dsa_sparse_attn_base_kwargs(cls, kv_cache_dtype: torch.dtype | None = None):
         """Returns base kwargs for sparse attention (extended by caller)."""
-        return {}
+        return dict(cls.build_dsa_attn_kv_plan(kv_cache_dtype).sparse_attn_base_kwargs)
 
-    @staticmethod
-    def get_dsa_kv_layout(kv_cache_dtype: torch.dtype | None = None):
-        return "PA_ND"
+    @classmethod
+    def get_dsa_kv_layout(cls, kv_cache_dtype: torch.dtype | None = None):
+        return cls.build_dsa_attn_kv_plan(kv_cache_dtype).layout_kv
 
-    @staticmethod
-    def get_dsa_compressor_slot_mapping_format(kv_cache_dtype: torch.dtype | None = None):
+    @classmethod
+    def get_dsa_compressor_slot_mapping_format(cls, kv_cache_dtype: torch.dtype | None = None):
         """Slot mapping side output format consumed by the DSA scatter op."""
-        return DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+        return cls.build_dsa_attn_kv_plan(kv_cache_dtype).compressor_slot_mapping_format
 
     # ===== SWA / Compressor KV Scatter =====
 
@@ -1449,39 +1450,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     # ===== Sparse Attention Metadata & Op Selectors =====
 
     @staticmethod
-    def get_dsa_sparse_attn_metadata_op(kv_cache_dtype: torch.dtype | None = None):
-        if _uses_bf16_sparse_flash_mla(kv_cache_dtype):
-            return sparse_flash_mla_metadata
-        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device, kv_cache_dtype: torch.dtype | None = None):
-        if _uses_bf16_sparse_flash_mla(kv_cache_dtype):
-            return {"device": str(device)}
-        return {"kv_quant_mode": 1}
-
-    @staticmethod
-    def get_dsa_sparse_attn_op(kv_cache_dtype: torch.dtype | None = None):
-        if _uses_bf16_sparse_flash_mla(kv_cache_dtype):
-            return sparse_flash_mla
-        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
-
-    @staticmethod
-    def get_dsa_sparse_attn_base_kwargs(kv_cache_dtype: torch.dtype | None = None):
-        if _uses_bf16_sparse_flash_mla(kv_cache_dtype):
-            return {}
-        return {"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64}
-
-    @staticmethod
-    def get_dsa_kv_layout(kv_cache_dtype: torch.dtype | None = None):
-        return "PA_BBND" if _uses_bf16_sparse_flash_mla(kv_cache_dtype) else "PA_ND"
-
-    @staticmethod
-    def get_dsa_compressor_slot_mapping_format(kv_cache_dtype: torch.dtype | None = None):
-        """A5 kv_compress_epilog consumes flat slot ids."""
-        if _uses_bf16_sparse_flash_mla(kv_cache_dtype):
-            return DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
-        return DSA_COMPRESSOR_SLOT_MAPPING_FLAT
+    def build_dsa_attn_kv_plan(kv_cache_dtype: torch.dtype | None = None) -> DsaAttnKvPlan:
+        """A5: BF16 → SparseFlashMla; otherwise KV-quant sharedkv."""
+        return build_a5_dsa_attn_kv_plan(kv_cache_dtype)
 
     # ===== SWA / Compressor KV Scatter =====
 
@@ -1659,7 +1630,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         BF16 invalid slots (``slot < 0``) become ``[-1, -1]`` so scatter can
         skip them. Do not use ``%`` on negatives (yields a fake in-range offset).
         """
-        if not _uses_bf16_sparse_flash_mla(kv_cache_dtype):
+        plan = A5DeviceAdaptor.build_dsa_attn_kv_plan(kv_cache_dtype)
+        if not plan.requires_block_offset_slots:
             return slot_mapping
         valid = slot_mapping >= 0
         invalid = torch.full_like(slot_mapping, -1)
@@ -1674,7 +1646,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, kv_cache_dtype: torch.dtype | None = None, **kwargs_to_add):
-        if _uses_bf16_sparse_flash_mla(kv_cache_dtype):
+        plan = A5DeviceAdaptor.build_dsa_attn_kv_plan(kv_cache_dtype)
+        if plan.uses_sparse_flash_mla:
             extra_kwargs.update(kwargs_to_add)
 
     @staticmethod

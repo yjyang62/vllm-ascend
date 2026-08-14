@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
@@ -191,11 +192,8 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         # Prefer the live cache_config request so BF16 SparseFlashMla is not
         # forced to FP8 just because the device is A5.
         kv_cache_dtype = dsv4_resolve_attn_kv_dtype(vllm_config, requested_dtype)
-        use_bf16 = get_ascend_device_type() == AscendDeviceType.A5 and kv_cache_dtype == torch.bfloat16
-
-        cached_head_size = (
-            self.head_size + 128 if get_ascend_device_type() == AscendDeviceType.A5 and not use_bf16 else self.head_size
-        )
+        attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(kv_cache_dtype)
+        cached_head_size = self.head_size + 128 if attn_kv_plan.pack_kv_head_dim_extra else self.head_size
         block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
             block_size=block_size,
