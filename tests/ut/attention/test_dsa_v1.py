@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest import mock
@@ -30,7 +31,7 @@ from vllm_ascend.attention.dsa_v1 import (
     _has_weight_scale,
     _is_w8a8_dynamic,
 )
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_op import BaseDeviceAdaptor, DeviceOperator
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import AscendDeviceType
 
@@ -65,7 +66,11 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
             "vllm_ascend.attention.dsa_v1.kv_cache_dtype_str_to_dtype",
             return_value=torch.bfloat16,
         ),
-        patch.object(DeviceOperator, "get_dsa_kv_layout", return_value="PA_ND"),
+        patch.object(
+            DeviceOperator,
+            "build_dsa_attn_kv_plan",
+            side_effect=BaseDeviceAdaptor.build_dsa_attn_kv_plan,
+        ),
     ):
         builder = AscendDSAMetadataBuilder(
             kv_cache_spec=kv_cache_spec,
@@ -124,22 +129,11 @@ def test_build_sas_metadata_parameters_cache_and_builder_buffer(
     cu_seqlens_cmp_kv = torch.tensor([0, 2, 4], dtype=torch.int32)
     generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
     metadata_op = MagicMock(return_value=generated_metadata)
+    builder.attn_kv_plan = replace(builder.attn_kv_plan, sparse_attn_metadata_op=metadata_op)
 
-    with (
-        patch(
-            "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
-            return_value=2,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_op",
-            return_value=metadata_op,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_kwargs",
-            return_value={"device": "cpu"},
-        ),
+    with patch(
+        "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
+        return_value=2,
     ):
         result = builder._build_sas_metadata(
             metadata_cache=metadata_cache,
@@ -434,6 +428,7 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
     metadata_op = MagicMock(return_value=generated_metadata)
     cos = torch.ones((3, 1, 1, 2))
     sin = torch.zeros((3, 1, 1, 2))
+    builder.attn_kv_plan = replace(builder.attn_kv_plan, sparse_attn_metadata_op=metadata_op)
 
     with (
         patch.object(
@@ -445,16 +440,6 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
             DeviceOperator,
             "get_dsa_decode_cu_seqlens_cmp_kv",
             return_value=decode_cu_seqlens_cmp_kv,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_op",
-            return_value=metadata_op,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_kwargs",
-            return_value={"device": "cpu"},
         ),
     ):
         metadata = builder.build_req_metadata_for_drafting(
@@ -522,12 +507,10 @@ def _make_impl() -> AscendDSAImpl:
             "vllm_ascend.attention.dsa_v1.kv_cache_dtype_str_to_dtype",
             return_value=torch.bfloat16,
         ),
-        patch.object(DeviceOperator, "get_dsa_kv_layout", return_value="PA_ND"),
-        patch.object(DeviceOperator, "get_dsa_sparse_attn_base_kwargs", return_value={}),
         patch.object(
             DeviceOperator,
-            "get_dsa_compressor_slot_mapping_format",
-            return_value="v1",
+            "build_dsa_attn_kv_plan",
+            side_effect=BaseDeviceAdaptor.build_dsa_attn_kv_plan,
         ),
     ):
         return AscendDSAImpl(
@@ -695,22 +678,13 @@ def test_forward_attention_routes_unified_req_metadata(
         ) as mla_prolog,
         patch.object(
             DeviceOperator,
-            "get_dsa_sparse_attn_op",
-            return_value=sparse_attn_op,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_base_kwargs",
-            return_value={},
-        ),
-        patch.object(
-            DeviceOperator,
             "add_dsa_sparse_attn_extra_kwargs",
             side_effect=add_extra_kwargs,
         ),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
         patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
     ):
+        impl.attn_kv_plan = replace(impl.attn_kv_plan, sparse_attn_op=sparse_attn_op)
         actual = impl._forward_attention(
             layer_name="layer",
             hidden_states=hidden_states,
