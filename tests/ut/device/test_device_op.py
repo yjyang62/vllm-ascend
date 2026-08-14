@@ -185,13 +185,22 @@ def test_a5_npu_flash_attention_uses_python_sequence_lengths():
     assert call_kwargs["actual_seq_kvlen"] is call_kwargs["actual_seq_qlen"]
 
 
-def test_a5_dsa_sparse_attention_selects_ops_by_kv_dtype():
-    assert A5DeviceAdaptor.get_dsa_sparse_attn_op(torch.bfloat16) is sparse_flash_mla
-    assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_op(torch.bfloat16) is sparse_flash_mla_metadata
-    assert A5DeviceAdaptor.get_dsa_kv_layout(torch.bfloat16) == "PA_BBND"
+def test_a5_format_dsa_slot_mapping_depends_on_kv_dtype():
+    flat = torch.tensor([5, 130, 259], dtype=torch.int32)
+    block_size = 128
 
-    assert A5DeviceAdaptor.get_dsa_sparse_attn_op(torch.float8_e4m3fn) is not sparse_flash_mla
-    assert A5DeviceAdaptor.get_dsa_kv_layout(torch.float8_e4m3fn) == "PA_ND"
+    # BF16 SparseFlashMla needs [block_idx, offset].
+    bf16_slots = A5DeviceAdaptor.format_dsa_slot_mapping(flat, block_size, torch.bfloat16)
+    assert bf16_slots.shape == (3, 2)
+    torch.testing.assert_close(
+        bf16_slots,
+        torch.tensor([[0, 5], [1, 2], [2, 3]], dtype=torch.int32),
+    )
+
+    # Quant path keeps flat ids. Omitting dtype must not accidentally BF16-format.
+    assert A5DeviceAdaptor.format_dsa_slot_mapping(flat, block_size, torch.float8_e4m3fn) is flat
+    assert A5DeviceAdaptor.format_dsa_slot_mapping(flat, block_size) is flat
+
 
 
 def test_sparse_flash_mla_requires_cann_9_2():
