@@ -53,15 +53,19 @@ def dsv4_requested_kv_cache_dtype(vllm_config: VllmConfig) -> torch.dtype:
     return kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
 
 
-def dsv4_resolve_attn_kv_dtype(vllm_config: VllmConfig, non_a5_dtype: torch.dtype) -> torch.dtype:
-    """Resolve SWA/compress attention KV dtype.
+def dsv4_resolve_attn_kv_dtype(requested_dtype: torch.dtype) -> torch.dtype:
+    """Map a requested dtype to the SWA/compress attention KV dtype.
 
-    On A5, honor requested BF16 instead of unconditionally forcing FP8.
-    Never mutate ``vllm_config.cache_config.cache_dtype`` here.
+    Callers pass the dtype they already decided is the request (typically from
+    ``dsv4_requested_kv_cache_dtype`` or an init-time snapshot). This helper
+    never reads or mutates ``cache_config.cache_dtype``.
+
+    - Non-A5: return ``requested_dtype`` unchanged.
+    - A5: keep BF16 when requested; otherwise use FP8 for attention KV.
     """
     if get_ascend_device_type() != AscendDeviceType.A5:
-        return non_a5_dtype
-    if dsv4_requested_kv_cache_dtype(vllm_config) == torch.bfloat16:
+        return requested_dtype
+    if requested_dtype == torch.bfloat16:
         return torch.bfloat16
     return torch.float8_e4m3fn
 
@@ -186,10 +190,10 @@ class DSAAttention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
+        # Prefer the init-time snapshot (self.kv_cache_dtype) so a later
+        # rewrite of cache_config cannot flip compress KV off BF16.
         requested_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
-        # Prefer the live cache_config request so BF16 SparseFlashMla is not
-        # forced to FP8 just because the device is A5.
-        kv_cache_dtype = dsv4_resolve_attn_kv_dtype(vllm_config, requested_dtype)
+        kv_cache_dtype = dsv4_resolve_attn_kv_dtype(requested_dtype)
         use_bf16 = get_ascend_device_type() == AscendDeviceType.A5 and kv_cache_dtype == torch.bfloat16
 
         cached_head_size = (
