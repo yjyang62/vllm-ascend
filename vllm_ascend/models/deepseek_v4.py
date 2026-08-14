@@ -107,18 +107,11 @@ def _dsv4_block_sizes():
     return DSV4_BLOCK_SIZES
 
 
-def _dsv4_requested_kv_cache_dtype(vllm_config: VllmConfig) -> torch.dtype:
-    # Lazy import: layer.py must not import deepseek_v4 at module load time.
-    from vllm_ascend.models.layer.attention.layer import dsv4_requested_kv_cache_dtype
-
-    return dsv4_requested_kv_cache_dtype(vllm_config)
-
-
-def _dsv4_resolve_attn_kv_dtype(requested_dtype: torch.dtype) -> torch.dtype:
+def _dsv4_resolve_attn_kv_dtype(vllm_config: VllmConfig, non_a5_dtype: torch.dtype) -> torch.dtype:
     # Lazy import: layer.py must not import deepseek_v4 at module load time.
     from vllm_ascend.models.layer.attention.layer import dsv4_resolve_attn_kv_dtype
 
-    return dsv4_resolve_attn_kv_dtype(requested_dtype)
+    return dsv4_resolve_attn_kv_dtype(vllm_config, non_a5_dtype)
 
 
 def _dsv4_indexer_kv_dtype() -> torch.dtype:
@@ -218,14 +211,7 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = _dsv4_block_sizes()[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # Re-resolve from the live request on A5; non-A5 keeps the init dtype
-        # (DSV4 SWA is BF16). Idempotent if init already resolved correctly.
-        requested = (
-            _dsv4_requested_kv_cache_dtype(vllm_config)
-            if get_ascend_device_type() == AscendDeviceType.A5
-            else self.dtype
-        )
-        self.dtype = _dsv4_resolve_attn_kv_dtype(requested)
+        self.dtype = _dsv4_resolve_attn_kv_dtype(vllm_config, self.dtype)
         use_bf16 = get_ascend_device_type() == AscendDeviceType.A5 and self.dtype == torch.bfloat16
         cached_head_size = (
             self.head_dim
@@ -900,14 +886,7 @@ class DeepseekV4Attention(nn.Module):
                 if 0 <= indexer_seq_idx < len(pattern):
                     skip_topk = pattern[indexer_seq_idx] == "S"
 
-        # A5: honor --kv-cache-dtype (BF16 → SparseFlashMla, else FP8).
-        # Non-A5: DSV4 SWA attention KV stays BF16.
-        requested = (
-            _dsv4_requested_kv_cache_dtype(vllm_config)
-            if get_ascend_device_type() == AscendDeviceType.A5
-            else torch.bfloat16
-        )
-        k_dtype = _dsv4_resolve_attn_kv_dtype(requested)
+        k_dtype = _dsv4_resolve_attn_kv_dtype(vllm_config, torch.bfloat16)
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
