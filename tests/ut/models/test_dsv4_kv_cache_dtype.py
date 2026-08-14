@@ -11,10 +11,7 @@ from vllm_ascend.models.deepseek_v4 import (
     AscendDeepseekV4SWACache,
     _dsv4_indexer_kv_dtype,
 )
-from vllm_ascend.models.layer.attention.layer import (
-    dsv4_requested_kv_cache_dtype,
-    dsv4_resolve_attn_kv_dtype,
-)
+from vllm_ascend.models.layer.attention.layer import dsv4_resolve_attn_kv_dtype
 from vllm_ascend.utils import AscendDeviceType
 
 
@@ -51,14 +48,7 @@ def test_dsv4_a5_attn_kv_dtype_respects_request(
             return_value=device_type,
         ),
     ):
-        # Match SWA construction: A5 reads the cache_config request; non-A5
-        # DSV4 SWA stays BF16.
-        requested = (
-            dsv4_requested_kv_cache_dtype(vllm_config)
-            if device_type == AscendDeviceType.A5
-            else torch.bfloat16
-        )
-        assert dsv4_resolve_attn_kv_dtype(requested) == expected_attn
+        assert dsv4_resolve_attn_kv_dtype(vllm_config, torch.bfloat16) == expected_attn
         assert _dsv4_indexer_kv_dtype() == expected_indexer
 
 
