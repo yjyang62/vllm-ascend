@@ -115,10 +115,11 @@ def _dsv4_resolve_attn_kv_dtype(vllm_config: VllmConfig, non_a5_dtype: torch.dty
 
 
 def _dsv4_indexer_kv_dtype() -> torch.dtype:
-    """Lightning-indexer cache dtype.
+    """Indexer KV dtype (``indexer_kv_dtype``), not attention KV dtype.
 
-    Always quantized on A5 (FP8), independent of attention KV dtype. Callers
-    must not rewrite ``cache_config.cache_dtype`` when applying this.
+    Always quantized on A5 (FP8), independent of ``attn_kv_dtype`` /
+    SparseFlashMla. Callers must not rewrite ``cache_config.cache_dtype``
+    when applying this.
     """
     if get_ascend_device_type() == AscendDeviceType.A5:
         return torch.float8_e4m3fn
