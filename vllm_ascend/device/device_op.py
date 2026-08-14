@@ -1500,8 +1500,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             # write is properly ordered on the current NPU stream. Advanced
             # indexing is unreliable under multistream_dsv4_dsa_overlap
             # (aux-stream KV write vs main-stream SparseFlashMla read).
-            indices = slot_mapping.to(dtype=torch.int64).clamp(min=0).contiguous()
-            updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:])).contiguous()
+            # Do NOT clamp invalid (-1) slots to 0 — that overwrites real cache.
+            indices = slot_mapping.to(dtype=torch.int64)
+            valid = (indices[:, 0] >= 0) & (indices[:, 1] >= 0)
+            if not torch.any(valid):
+                return
+            indices = indices[valid].contiguous()
+            updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:]))[valid].contiguous()
             torch_npu.npu_scatter_nd_update_(cache, indices, updates)
             return
         torch.ops._C_ascend.kv_compress_epilog(
@@ -1649,10 +1654,18 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def format_dsa_slot_mapping(slot_mapping, block_size, kv_cache_dtype: torch.dtype | None = None):
-        """A5 uses block/offset mapping for BF16 and flat ids for quant KV."""
-        if _uses_bf16_sparse_flash_mla(kv_cache_dtype):
-            return BaseDeviceAdaptor.format_dsa_slot_mapping(slot_mapping, block_size, kv_cache_dtype)
-        return slot_mapping
+        """A5 uses block/offset mapping for BF16 and flat ids for quant KV.
+
+        BF16 invalid slots (``slot < 0``) become ``[-1, -1]`` so scatter can
+        skip them. Do not use ``%`` on negatives (yields a fake in-range offset).
+        """
+        if not _uses_bf16_sparse_flash_mla(kv_cache_dtype):
+            return slot_mapping
+        valid = slot_mapping >= 0
+        invalid = torch.full_like(slot_mapping, -1)
+        block_idx = torch.where(valid, torch.div(slot_mapping, block_size, rounding_mode="floor"), invalid)
+        offset = torch.where(valid, slot_mapping % block_size, invalid)
+        return torch.stack([block_idx, offset], dim=-1).to(dtype=torch.int32)
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):

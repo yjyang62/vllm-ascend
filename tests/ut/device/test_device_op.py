@@ -202,6 +202,24 @@ def test_a5_format_dsa_slot_mapping_depends_on_kv_dtype():
     assert A5DeviceAdaptor.format_dsa_slot_mapping(flat, block_size) is flat
 
 
+def test_a5_bf16_format_and_scatter_skip_invalid_slots():
+    flat = torch.tensor([-1, 5, -1], dtype=torch.int32)
+    formatted = A5DeviceAdaptor.format_dsa_slot_mapping(flat, 128, torch.bfloat16)
+    torch.testing.assert_close(
+        formatted,
+        torch.tensor([[-1, -1], [0, 5], [-1, -1]], dtype=torch.int32),
+    )
+
+    cache = torch.zeros((2, 128, 1, 2), dtype=torch.bfloat16)
+    x = torch.tensor([[9.0, 9.0], [1.0, 2.0], [8.0, 8.0]], dtype=torch.bfloat16).view(3, 1, 2)
+    with mock.patch("torch_npu.npu_scatter_nd_update_") as scatter:
+        A5DeviceAdaptor.dsa_kv_compress_scatter(cache, x, formatted)
+    scatter.assert_called_once()
+    indices, updates = scatter.call_args.args[1], scatter.call_args.args[2]
+    torch.testing.assert_close(indices, torch.tensor([[0, 5]], dtype=torch.int64))
+    torch.testing.assert_close(updates, torch.tensor([[[1.0, 2.0]]], dtype=torch.bfloat16))
+
+
 def test_sparse_flash_mla_requires_cann_9_2():
     import sys
 

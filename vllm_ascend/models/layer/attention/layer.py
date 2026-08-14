@@ -54,10 +54,11 @@ def dsv4_requested_kv_cache_dtype(vllm_config: VllmConfig) -> torch.dtype:
 
 
 def dsv4_resolve_attn_kv_dtype(vllm_config: VllmConfig, non_a5_dtype: torch.dtype) -> torch.dtype:
-    """Resolve SWA/compress attention KV dtype.
+    """Resolve SWA/compress attention KV dtype (``attn_kv_dtype``).
 
     On A5, honor requested BF16 instead of unconditionally forcing FP8.
     Never mutate ``vllm_config.cache_config.cache_dtype`` here.
+    Indexer KV is separate — see ``_dsv4_indexer_kv_dtype`` / indexer_kv_dtype.
     """
     if get_ascend_device_type() != AscendDeviceType.A5:
         return non_a5_dtype

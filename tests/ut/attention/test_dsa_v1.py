@@ -59,7 +59,7 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
         speculative_config=None,
         parallel_config=SimpleNamespace(tensor_parallel_size=2),
     )
-    kv_cache_spec = SimpleNamespace(compress_ratio=compressor_ratio, block_size=128)
+    kv_cache_spec = SimpleNamespace(compress_ratio=compressor_ratio, block_size=128, dtype=torch.bfloat16)
     with (
         patch(
             "vllm_ascend.attention.dsa_v1.kv_cache_dtype_str_to_dtype",
