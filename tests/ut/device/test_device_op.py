@@ -202,7 +202,6 @@ def test_a5_format_dsa_slot_mapping_depends_on_kv_dtype():
     assert A5DeviceAdaptor.format_dsa_slot_mapping(flat, block_size) is flat
 
 
-
 def test_sparse_flash_mla_requires_cann_9_2():
     import sys
 
