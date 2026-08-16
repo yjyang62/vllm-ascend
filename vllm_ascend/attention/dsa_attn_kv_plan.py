@@ -61,7 +61,7 @@ def build_base_dsa_attn_kv_plan(kv_cache_dtype: torch.dtype | None = None) -> Ds
 
 
 def build_a5_dsa_attn_kv_plan(kv_cache_dtype: torch.dtype | None = None) -> DsaAttnKvPlan:
-    """A5: BF16 → SparseFlashMla; otherwise KV-quant sharedkv."""
+    """A5: explicit BF16 → SparseFlashMla; otherwise KV-quant sharedkv (default)."""
     if uses_bf16_sparse_flash_mla(kv_cache_dtype):
         return DsaAttnKvPlan(
             attn_kv_dtype=kv_cache_dtype,
