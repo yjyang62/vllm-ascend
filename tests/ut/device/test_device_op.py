@@ -241,21 +241,41 @@ def test_a5_format_dsa_slot_mapping_depends_on_kv_dtype():
 
 
 def test_a5_bf16_format_and_scatter_skip_invalid_slots():
-    flat = torch.tensor([-1, 5, -1], dtype=torch.int32)
+    flat = torch.tensor([5, -1, -1], dtype=torch.int32)
     formatted = A5DeviceAdaptor.format_dsa_slot_mapping(flat, 128, torch.bfloat16)
     torch.testing.assert_close(
         formatted,
-        torch.tensor([[-1, -1], [0, 5], [-1, -1]], dtype=torch.int32),
+        torch.tensor([[0, 5], [-1, -1], [-1, -1]], dtype=torch.int32),
     )
 
     cache = torch.zeros((2, 128, 1, 2), dtype=torch.bfloat16)
-    x = torch.tensor([[9.0, 9.0], [1.0, 2.0], [8.0, 8.0]], dtype=torch.bfloat16).view(3, 1, 2)
-    with mock.patch("torch_npu.npu_scatter_nd_update_") as scatter:
+    x = torch.tensor([[1.0, 2.0], [9.0, 9.0], [8.0, 8.0]], dtype=torch.bfloat16).view(3, 1, 2)
+
+    def _fake_scatter_nd_update(var, indices, updates_tensor):
+        var[indices[:, 0], indices[:, 1]] = updates_tensor
+
+    with mock.patch(
+        "vllm_ascend.device.device_op.torch_npu.npu_scatter_nd_update_",
+        side_effect=_fake_scatter_nd_update,
+        create=True,
+    ) as scatter:
         A5DeviceAdaptor.dsa_kv_compress_scatter(cache, x, formatted)
     scatter.assert_called_once()
     indices, updates = scatter.call_args.args[1], scatter.call_args.args[2]
-    torch.testing.assert_close(indices, torch.tensor([[0, 5]], dtype=torch.int64))
-    torch.testing.assert_close(updates, torch.tensor([[[1.0, 2.0]]], dtype=torch.bfloat16))
+    # Fixed-shape ACLGraph-safe path: invalid rows reuse token-0 index/update.
+    assert indices.shape == (3, 2)
+    assert updates.shape == (3, 1, 2)
+    torch.testing.assert_close(
+        indices,
+        torch.tensor([[0, 5], [0, 5], [0, 5]], dtype=torch.int64),
+    )
+    torch.testing.assert_close(
+        updates,
+        torch.tensor([[[1.0, 2.0]], [[1.0, 2.0]], [[1.0, 2.0]]], dtype=torch.bfloat16),
+    )
+    torch.testing.assert_close(cache[0, 5], x[0])
+    # Invalid rows must not clobber unrelated slots with padding payloads.
+    assert torch.count_nonzero(cache) == 2
 
 
 def test_sparse_flash_mla_requires_cann_9_2():
@@ -336,6 +356,7 @@ def test_a5_bf16_dsa_scatter_uses_block_offset_mapping():
     with mock.patch(
         "vllm_ascend.device.device_op.torch_npu.npu_scatter_nd_update_",
         side_effect=_fake_scatter_nd_update,
+        create=True,
     ) as scatter_mock:
         A5DeviceAdaptor.dsa_kv_compress_scatter(cache, updates, slot_mapping)
 
