@@ -33,10 +33,13 @@ class DsaAttnKvPlan:
     sparse_attn_metadata_op: Callable[..., Any]
     sparse_attn_base_kwargs: dict[str, Any]
     sparse_attn_metadata_extra_kwargs: dict[str, Any]
+    # A2/A3 sharedkv and SparseFlashMla need device=; A5 FP8 quant metadata does not.
+    include_metadata_device: bool
 
     def metadata_kwargs(self, device) -> dict[str, Any]:
         kwargs = dict(self.sparse_attn_metadata_extra_kwargs)
-        kwargs["device"] = str(device)
+        if self.include_metadata_device:
+            kwargs["device"] = str(device)
         return kwargs
 
 
@@ -57,6 +60,7 @@ def build_base_dsa_attn_kv_plan(kv_cache_dtype: torch.dtype | None = None) -> Ds
         sparse_attn_metadata_op=torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata,
         sparse_attn_base_kwargs={},
         sparse_attn_metadata_extra_kwargs={},
+        include_metadata_device=True,
     )
 
 
@@ -74,6 +78,7 @@ def build_a5_dsa_attn_kv_plan(kv_cache_dtype: torch.dtype | None = None) -> DsaA
             sparse_attn_metadata_op=sparse_flash_mla_metadata,
             sparse_attn_base_kwargs={},
             sparse_attn_metadata_extra_kwargs={},
+            include_metadata_device=True,
         )
     return DsaAttnKvPlan(
         attn_kv_dtype=kv_cache_dtype,
@@ -85,5 +90,7 @@ def build_a5_dsa_attn_kv_plan(kv_cache_dtype: torch.dtype | None = None) -> DsaA
         sparse_attn_op=torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv,
         sparse_attn_metadata_op=torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata,
         sparse_attn_base_kwargs={"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64},
+        # Match main A5: quant metadata takes kv_quant_mode only (no device=).
         sparse_attn_metadata_extra_kwargs={"kv_quant_mode": 1},
+        include_metadata_device=False,
     )

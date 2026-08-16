@@ -30,7 +30,8 @@ def test_a5_dsa_attn_kv_plan_centralizes_sparse_flash_mla_choices():
     assert fp8_plan.pack_kv_head_dim_extra is True
     assert fp8_plan.compressor_slot_mapping_format == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
     assert fp8_plan.sparse_attn_base_kwargs["kv_quant_mode"] == 1
-    assert fp8_plan.metadata_kwargs("npu:0") == {"device": "npu:0", "kv_quant_mode": 1}
+    # A5 FP8 quant metadata matches main: kv_quant_mode only, no device=.
+    assert fp8_plan.metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
 
     # Thin wrappers stay consistent with the plan.
     assert A5DeviceAdaptor.get_dsa_kv_layout(torch.bfloat16) == bf16_plan.layout_kv
