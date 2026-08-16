@@ -26,7 +26,9 @@ def _vllm_config(cache_dtype: str, model_dtype: torch.dtype = torch.bfloat16):
     ("device_type", "cache_dtype", "expected_attn", "expected_indexer"),
     [
         (AscendDeviceType.A5, "bfloat16", torch.bfloat16, torch.float8_e4m3fn),
-        (AscendDeviceType.A5, "float8_e4m3fn", torch.float8_e4m3fn, torch.float8_e4m3fn),
+        # CLI / STR_DTYPE uses "fp8" / "fp8_e4m3", not "float8_e4m3fn".
+        (AscendDeviceType.A5, "fp8", torch.float8_e4m3fn, torch.float8_e4m3fn),
+        (AscendDeviceType.A5, "fp8_e4m3", torch.float8_e4m3fn, torch.float8_e4m3fn),
         # A5 "auto" must not follow model BF16 into SparseFlashMla.
         (AscendDeviceType.A5, "auto", torch.float8_e4m3fn, torch.float8_e4m3fn),
         (AscendDeviceType.A2, "bfloat16", torch.bfloat16, torch.int8),
