@@ -975,8 +975,15 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
             else ascend_compilation_config
         )
 
+    # Sparse / DSA models (index_topk): resolve default KV cache dtype.
+    # Do not overwrite an explicit --kv-cache-dtype. On A5, "auto" must stay
+    # on the FP8 quant path; SparseFlashMla is only for explicit BF16.
     if model_config and hasattr(model_config.hf_text_config, "index_topk"):
-        vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
+        if vllm_config.cache_config.cache_dtype == "auto":
+            if get_ascend_device_type() == AscendDeviceType.A5:
+                vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
+            else:
+                vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
 
     # Update compilation mode in some cases
     enforce_eager = getattr(model_config, "enforce_eager", False)
