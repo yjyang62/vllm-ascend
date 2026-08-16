@@ -27,6 +27,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     DsaAttnKvPlan,
     build_a5_dsa_attn_kv_plan,
     build_base_dsa_attn_kv_plan,
+    uses_bf16_sparse_flash_mla,
 )
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
@@ -1471,14 +1472,22 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             # write is properly ordered on the current NPU stream. Advanced
             # indexing is unreliable under multistream_dsv4_dsa_overlap
             # (aux-stream KV write vs main-stream SparseFlashMla read).
-            # Do NOT clamp invalid (-1) slots to 0 — that overwrites real cache.
+            #
+            # ACLGraph capture forbids tensor->Python sync (e.g. torch.any) and
+            # data-dependent boolean gathers (dynamic update count). Keep a
+            # fixed [T, 2] scatter shape: invalid (-1) rows reuse token-0's
+            # index+update so they are redundant writes, not cache clobbers.
+            # Decode/prefill pads put -1 at the suffix, so row 0 stays valid.
             indices = slot_mapping.to(dtype=torch.int64)
+            updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:]))
             valid = (indices[:, 0] >= 0) & (indices[:, 1] >= 0)
-            if not torch.any(valid):
-                return
-            indices = indices[valid].contiguous()
-            updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:]))[valid].contiguous()
-            torch_npu.npu_scatter_nd_update_(cache, indices, updates)
+            anchor_indices = indices[:1].expand_as(indices)
+            anchor_updates = updates[:1].expand_as(updates)
+            valid_idx = valid.view(-1, *([1] * (indices.ndim - 1)))
+            valid_upd = valid.view(-1, *([1] * (updates.ndim - 1)))
+            safe_indices = torch.where(valid_idx, indices, anchor_indices).contiguous()
+            safe_updates = torch.where(valid_upd, updates, anchor_updates).contiguous()
+            torch_npu.npu_scatter_nd_update_(cache, safe_indices, safe_updates)
             return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
@@ -1630,8 +1639,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         BF16 invalid slots (``slot < 0``) become ``[-1, -1]`` so scatter can
         skip them. Do not use ``%`` on negatives (yields a fake in-range offset).
         """
-        plan = A5DeviceAdaptor.build_dsa_attn_kv_plan(kv_cache_dtype)
-        if not plan.requires_block_offset_slots:
+        if not uses_bf16_sparse_flash_mla(kv_cache_dtype):
             return slot_mapping
         valid = slot_mapping >= 0
         invalid = torch.full_like(slot_mapping, -1)
