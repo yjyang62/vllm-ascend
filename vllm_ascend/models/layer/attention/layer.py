@@ -57,12 +57,18 @@ def dsv4_requested_kv_cache_dtype(vllm_config: VllmConfig) -> torch.dtype:
 def dsv4_resolve_attn_kv_dtype(vllm_config: VllmConfig, non_a5_dtype: torch.dtype) -> torch.dtype:
     """Resolve SWA/compress attention KV dtype (``attn_kv_dtype``).
 
-    On A5, honor requested BF16 instead of unconditionally forcing FP8.
+    On A5, SparseFlashMla is used only for an explicit BF16 request
+    (``--kv-cache-dtype bfloat16``). ``auto`` and other values stay on FP8.
     Never mutate ``vllm_config.cache_config.cache_dtype`` here.
     Indexer KV is separate — see ``_dsv4_indexer_kv_dtype`` / indexer_kv_dtype.
     """
     if get_ascend_device_type() != AscendDeviceType.A5:
         return non_a5_dtype
+    raw_cache_dtype = vllm_config.cache_config.cache_dtype
+    # "auto" follows model dtype via kv_cache_dtype_str_to_dtype (usually BF16),
+    # but A5 default attention KV must remain FP8 unless the user opts in.
+    if raw_cache_dtype in (None, "auto"):
+        return torch.float8_e4m3fn
     if dsv4_requested_kv_cache_dtype(vllm_config) == torch.bfloat16:
         return torch.bfloat16
     return torch.float8_e4m3fn

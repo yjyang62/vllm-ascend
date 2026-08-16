@@ -994,9 +994,13 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
         self.vllm_config = get_current_vllm_config()
         # Attention KV dtype for SparseFlashMla / DSA (not indexer_kv_dtype).
-        self.attn_kv_dtype = kv_cache_dtype_str_to_dtype(
+        # Lazy import: layer.py imports AscendDSABackend from this module.
+        from vllm_ascend.models.layer.attention.layer import dsv4_resolve_attn_kv_dtype
+
+        requested_kv_dtype = kv_cache_dtype_str_to_dtype(
             self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
         )
+        self.attn_kv_dtype = dsv4_resolve_attn_kv_dtype(self.vllm_config, requested_kv_dtype)
         # Fixed for the life of the impl: SparseFlashMla vs quant choices.
         self.attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(self.attn_kv_dtype)
         self.layout_kv = self.attn_kv_plan.layout_kv
