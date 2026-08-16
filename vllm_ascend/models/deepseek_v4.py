@@ -326,6 +326,28 @@ def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Con
     return None
 
 
+def _expert_param_name_candidates(name_mapped: str) -> list[str]:
+    """Resolve FusedMoE expert param names across nested vs flat layouts.
+
+    Upstream MoERunner stores weights at ``...experts.routed_experts.w13_weight``,
+    while ``RoutedExperts.get_expert_mapping`` uses an empty
+    ``routed_experts_prefix`` that maps to ``...experts.w13_weight``. Try both.
+    """
+    candidates = [name_mapped]
+    nested = ".experts.routed_experts."
+    if nested in name_mapped:
+        candidates.append(name_mapped.replace(nested, ".experts.", 1))
+    else:
+        for flat_token, nested_token in (
+            (".experts.w13_", ".experts.routed_experts.w13_"),
+            (".experts.w2_", ".experts.routed_experts.w2_"),
+        ):
+            if flat_token in name_mapped:
+                candidates.append(name_mapped.replace(flat_token, nested_token, 1))
+                break
+    return list(dict.fromkeys(candidates))
+
+
 class DeepseekV2MLP(nn.Module):
     def __init__(
         self,
@@ -1417,6 +1439,11 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             if "sink" in name:
                 if is_pp_missing_parameter(name, self):
                     continue
+                if name not in params_dict:
+                    # Layer-count-truncated runs (or remapped names) may keep
+                    # checkpoint keys with no matching parameter. Skip instead
+                    # of KeyError; is_pp_missing_parameter only covers PP.
+                    continue
                 param = params_dict[name]
                 if enable_dsa_cp():
                     param.data.copy_(loaded_weight)
@@ -1458,6 +1485,8 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
                 if is_pp_missing_parameter(name, self):
                     continue
+                if name not in params_dict:
+                    continue
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -1465,6 +1494,14 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 break
             else:
                 is_expert_weight = False
+                # Per-expert ckpt keys (experts.N.gate_proj) are never registered
+                # as parameters under FusedMoE (only fused w13/w2). If mapping
+                # misses them, still treat as expert weights so we skip instead
+                # of KeyError on params_dict[name].
+                if ".mlp.experts." in name and any(
+                    token in name for token in (".gate_proj.", ".up_proj.", ".down_proj.", ".w1.", ".w2.", ".w3.")
+                ):
+                    is_expert_weight = True
 
                 # Special handling: when AITER fusion_shared_experts is enabled,
                 # checkpoints may provide a single widened shared_experts tensor
@@ -1522,7 +1559,18 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                         if is_pp_missing_parameter(name_mapped, self):
                             continue
 
-                        param = params_dict[name_mapped]
+                        # MoERunner nests weights under `.routed_experts.`; some
+                        # builds flatten to `.experts.w13_weight`. Try both.
+                        param = None
+                        resolved_name = name_mapped
+                        for candidate in _expert_param_name_candidates(name_mapped):
+                            if candidate in params_dict:
+                                param = params_dict[candidate]
+                                resolved_name = candidate
+                                break
+                        if param is None:
+                            continue
+
                         # We should ask the weight loader to return success or
                         # not here since otherwise we may skip experts with
                         # other available replicas.
@@ -1530,16 +1578,16 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                         success = weight_loader(
                             param,
                             weight_to_load,
-                            name_mapped,
+                            resolved_name,
                             shard_id=shard_id,
                             expert_id=expert_id,
                             return_success=True,
                         )
                         if success:
                             if not is_fusion_moe_shared_experts_layer:
-                                name = name_mapped
+                                name = resolved_name
                             else:
-                                loaded_params.add(name_mapped)
+                                loaded_params.add(resolved_name)
                             break
                     else:
                         if is_expert_weight:
@@ -1558,6 +1606,8 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                             continue
 
                         if is_pp_missing_parameter(name, self):
+                            continue
+                        if name not in params_dict:
                             continue
 
                         param = params_dict[name]
