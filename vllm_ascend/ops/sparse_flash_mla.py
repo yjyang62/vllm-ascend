@@ -19,7 +19,7 @@ def _get_sparse_flash_mla_ops() -> tuple[Callable, Callable]:
         metadata_op = namespace.sparse_flash_mla_metadata
     except (ImportError, AttributeError) as exc:
         raise RuntimeError(
-            "DeepSeek-V4 BF16 KV on Ascend A5 requires SparseFlashMla from a matching CANN 9.2 toolkit."
+            "DeepSeek-V4 BF16 KV on Ascend A3/A5 requires SparseFlashMla from a matching CANN 9.2 toolkit."
         ) from exc
     return attention_op, metadata_op
 

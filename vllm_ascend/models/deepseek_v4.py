@@ -99,12 +99,12 @@ def _get_ascend_dsa_backend():
     return AscendDSABackend
 
 
-def _dsv4_block_sizes():
+def _dsv4_block_sizes(attn_kv_dtype: torch.dtype | None = None):
     # Lazy import to avoid the circular import chain (layer -> dsa_v1 ->
     # attention_v1 -> device_op) hit during vLLM subprocess model inspection.
-    from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
+    from vllm_ascend.models.layer.attention.layer import get_dsv4_block_sizes
 
-    return DSV4_BLOCK_SIZES
+    return get_dsv4_block_sizes(attn_kv_dtype)
 
 
 def _dsv4_resolve_attn_kv_dtype(vllm_config: VllmConfig, non_a5_dtype: torch.dtype) -> torch.dtype:
@@ -140,7 +140,8 @@ class AscendCompressorStateCache(CompressorStateCache):
         self.block_size = block_size
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        pads = _dsv4_block_sizes()[vllm_config.cache_config.block_size][1]
+        attn_kv_dtype = _dsv4_resolve_attn_kv_dtype(vllm_config, torch.bfloat16)
+        pads = _dsv4_block_sizes(attn_kv_dtype)[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
         return AscendSlidingWindowMLASpec(
@@ -213,10 +214,14 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         self.dtype = _dsv4_resolve_attn_kv_dtype(vllm_config, self.dtype)
-        use_bf16 = get_ascend_device_type() == AscendDeviceType.A5 and self.dtype == torch.bfloat16
+        # BF16 SparseFlashMla (A3/A5) stores unpacked head_dim; A5 FP8 packs +128.
+        use_bf16_sparse_flash_mla = self.dtype == torch.bfloat16 and get_ascend_device_type() in {
+            AscendDeviceType.A3,
+            AscendDeviceType.A5,
+        }
         cached_head_size = (
             self.head_dim
-            if use_bf16
+            if use_bf16_sparse_flash_mla
             else (self.head_dim + 128 if get_ascend_device_type() == AscendDeviceType.A5 else self.head_dim)
         )
         return AscendSlidingWindowMLASpec(

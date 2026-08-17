@@ -9,6 +9,19 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 )
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
 from vllm_ascend.ops.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
+from vllm_ascend.utils import AscendDeviceType
+
+
+def _patch_sharedkv_ops():
+    """UT env may not ship compiled _C_ascend sparse sharedkv ops."""
+    return mock.patch.multiple(
+        torch.ops._C_ascend,
+        npu_kv_quant_sparse_attn_sharedkv=mock.DEFAULT,
+        npu_kv_quant_sparse_attn_sharedkv_metadata=mock.DEFAULT,
+        npu_sparse_attn_sharedkv=mock.DEFAULT,
+        npu_sparse_attn_sharedkv_metadata=mock.DEFAULT,
+        create=True,
+    )
 
 
 def test_a5_dsa_attn_kv_plan_centralizes_sparse_flash_mla_choices():
@@ -23,7 +36,8 @@ def test_a5_dsa_attn_kv_plan_centralizes_sparse_flash_mla_choices():
     assert bf16_plan.sparse_attn_base_kwargs == {}
     assert bf16_plan.metadata_kwargs("npu:0") == {"device": "npu:0"}
 
-    fp8_plan = A5DeviceAdaptor.build_dsa_attn_kv_plan(torch.float8_e4m3fn)
+    with _patch_sharedkv_ops():
+        fp8_plan = A5DeviceAdaptor.build_dsa_attn_kv_plan(torch.float8_e4m3fn)
     assert fp8_plan.uses_sparse_flash_mla is False
     assert fp8_plan.layout_kv == "PA_ND"
     assert fp8_plan.requires_block_offset_slots is False
@@ -37,13 +51,30 @@ def test_a5_dsa_attn_kv_plan_centralizes_sparse_flash_mla_choices():
     assert A5DeviceAdaptor.get_dsa_kv_layout(torch.bfloat16) == bf16_plan.layout_kv
     assert A5DeviceAdaptor.get_dsa_sparse_attn_op(torch.bfloat16) is bf16_plan.sparse_attn_op
 
-    base_plan = BaseDeviceAdaptor.build_dsa_attn_kv_plan(torch.bfloat16)
-    assert base_plan.uses_sparse_flash_mla is False
-    assert base_plan.layout_kv == "PA_ND"
-    assert base_plan.requires_block_offset_slots is True
-    assert base_plan.pack_kv_head_dim_extra is False
-    assert base_plan.compressor_slot_mapping_format == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+    with (
+        mock.patch(
+            "vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type",
+            return_value=AscendDeviceType.A2,
+        ),
+        _patch_sharedkv_ops(),
+    ):
+        a2_plan = BaseDeviceAdaptor.build_dsa_attn_kv_plan(torch.bfloat16)
+    assert a2_plan.uses_sparse_flash_mla is False
+    assert a2_plan.layout_kv == "PA_ND"
+    assert a2_plan.requires_block_offset_slots is True
+    assert a2_plan.pack_kv_head_dim_extra is False
+    assert a2_plan.compressor_slot_mapping_format == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
 
+    with mock.patch(
+        "vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type",
+        return_value=AscendDeviceType.A3,
+    ):
+        a3_plan = BaseDeviceAdaptor.build_dsa_attn_kv_plan(torch.bfloat16)
+    assert a3_plan.uses_sparse_flash_mla is True
+    assert a3_plan.layout_kv == "PA_BBND"
+    assert a3_plan.sparse_attn_op is sparse_flash_mla
+    assert a3_plan.sparse_attn_metadata_op is sparse_flash_mla_metadata
+    assert a3_plan.metadata_kwargs("npu:0") == {"device": "npu:0"}
 
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():
     key = torch.randn(2, 3, 4).transpose(0, 1)
