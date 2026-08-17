@@ -11,7 +11,10 @@ from vllm_ascend.models.deepseek_v4 import (
     AscendDeepseekV4SWACache,
     _dsv4_indexer_kv_dtype,
 )
-from vllm_ascend.models.layer.attention.layer import dsv4_resolve_attn_kv_dtype
+from vllm_ascend.models.layer.attention.layer import (
+    dsv4_resolve_attn_kv_dtype,
+    get_dsv4_block_sizes,
+)
 from vllm_ascend.utils import AscendDeviceType
 
 
@@ -54,6 +57,24 @@ def test_dsv4_a5_attn_kv_dtype_respects_request(
     ):
         assert dsv4_resolve_attn_kv_dtype(vllm_config, torch.bfloat16) == expected_attn
         assert _dsv4_indexer_kv_dtype() == expected_indexer
+
+
+@pytest.mark.parametrize(
+    ("attn_kv_dtype", "expected_pads"),
+    [
+        (torch.float8_e4m3fn, [16896, 81920]),
+        (None, [16896, 81920]),
+        (torch.bfloat16, [16896, 131072]),
+    ],
+)
+def test_a5_block_sizes_bf16_uses_bf16_attn_pad(attn_kv_dtype, expected_pads):
+    with patch(
+        "vllm_ascend.models.layer.attention.layer.get_ascend_device_type",
+        return_value=AscendDeviceType.A5,
+    ):
+        sizes = get_dsv4_block_sizes(attn_kv_dtype)
+    assert sizes[128][0] == [128, 128, 8, 16]
+    assert sizes[128][1] == expected_pads
 
 
 def test_a5_auto_swa_spec_stays_fp8_not_sparse_flash_mla():
@@ -104,7 +125,7 @@ def test_swa_get_kv_cache_spec_keeps_a5_bf16_and_does_not_mutate_cache_config():
         ),
         patch(
             "vllm_ascend.models.deepseek_v4._dsv4_block_sizes",
-            return_value={128: [[128, 128, 8, 16], [16896, 81920]]},
+            return_value={128: [[128, 128, 8, 16], [16896, 131072]]},
         ),
     ):
         spec = swa.get_kv_cache_spec(vllm_config)
@@ -132,7 +153,7 @@ def test_indexer_get_kv_cache_spec_stays_fp8_on_a5_without_mutating_cache_config
         ),
         patch(
             "vllm_ascend.models.deepseek_v4._dsv4_block_sizes",
-            return_value={128: [[128, 128, 8, 16], [16896, 81920]]},
+            return_value={128: [[128, 128, 8, 16], [16896, 131072]]},
         ),
     ):
         spec = indexer.get_kv_cache_spec(vllm_config)
