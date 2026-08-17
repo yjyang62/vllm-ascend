@@ -28,24 +28,33 @@ from vllm_ascend.utils import (
 )
 
 
-def get_dsv4_block_sizes():
+def get_dsv4_block_sizes(attn_kv_dtype: torch.dtype | None = None):
     # cache_config.block_size: [mla, swa, c4 state, c128 state], [page_size_padded_t1, page_size_padded_t2]
+    # A5 pad_t2: FP8 packed 128*640=81920; BF16 SparseFlashMla 128*512*2=131072
     _DSV4_BLOCK_SIZES = {
         128: [[128, 128, 8, 32], [16640, 131072]],
         64: [[64, 64, 4, 16], [8320, 65536]],
         32: [[32, 32, 2, 8], [4160, 32768]],
     }
-    _DSV4_BLOCK_SIZES_A5 = {
+    _DSV4_BLOCK_SIZES_A5_FP8 = {
         128: [[128, 128, 8, 16], [16896, 81920]],
         64: [[64, 64, 4, 8], [8448, 40960]],
         32: [[32, 32, 2, 4], [4224, 20480]],
     }
+    _DSV4_BLOCK_SIZES_A5_BF16 = {
+        128: [[128, 128, 8, 16], [16896, 131072]],
+        64: [[64, 64, 4, 8], [8448, 65536]],
+        32: [[32, 32, 2, 4], [4224, 32768]],
+    }
     if get_ascend_device_type() in {AscendDeviceType.A5}:
-        return _DSV4_BLOCK_SIZES_A5
-    else:
-        return _DSV4_BLOCK_SIZES
+        if attn_kv_dtype == torch.bfloat16:
+            return _DSV4_BLOCK_SIZES_A5_BF16
+        return _DSV4_BLOCK_SIZES_A5_FP8
+    return _DSV4_BLOCK_SIZES
 
 
+# Device-default table (A5 → FP8 pads). Prefer get_dsv4_block_sizes(attn_kv_dtype)
+# when A5 BF16 SparseFlashMla needs pad_t2=131072.
 DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
 
 
