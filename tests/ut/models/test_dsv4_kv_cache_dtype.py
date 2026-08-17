@@ -66,9 +66,10 @@ def test_dsv4_a5_attn_kv_dtype_respects_request(
     [
         (AscendDeviceType.A5, torch.float8_e4m3fn, [128, 128, 8, 16], [16896, 81920]),
         (AscendDeviceType.A5, torch.bfloat16, [128, 128, 8, 16], [16896, 131072]),
-        # A3 BF16 SparseFlashMla adopts the same geometry; pad_t2 is BF16 page size.
-        (AscendDeviceType.A3, torch.bfloat16, [128, 128, 8, 16], [16896, 131072]),
-        (AscendDeviceType.A3, None, [128, 128, 8, 16], [16896, 131072]),
+        # A3 BF16 SparseFlashMla keeps A3 compressor/indexer geometry; pad_t2
+        # was already the BF16 attn page size.
+        (AscendDeviceType.A3, torch.bfloat16, [128, 128, 8, 32], [16640, 131072]),
+        (AscendDeviceType.A3, None, [128, 128, 8, 32], [16640, 131072]),
         (AscendDeviceType.A2, torch.bfloat16, [128, 128, 8, 32], [16640, 131072]),
     ],
 )
@@ -161,7 +162,7 @@ def test_swa_get_kv_cache_spec_keeps_a3_bf16_unpacked_head():
         ),
         patch(
             "vllm_ascend.models.deepseek_v4._dsv4_block_sizes",
-            return_value={128: [[128, 128, 8, 16], [16896, 131072]]},
+            return_value={128: [[128, 128, 8, 32], [16640, 131072]]},
         ),
     ):
         spec = swa.get_kv_cache_spec(vllm_config)
