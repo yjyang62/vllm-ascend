@@ -62,24 +62,26 @@ def test_dsv4_a5_attn_kv_dtype_respects_request(
 
 
 @pytest.mark.parametrize(
-    ("device_type", "attn_kv_dtype", "expected_pads"),
+    ("device_type", "attn_kv_dtype", "expected_blocks", "expected_pads"),
     [
-        (AscendDeviceType.A5, torch.float8_e4m3fn, [16896, 81920]),
-        (AscendDeviceType.A5, torch.bfloat16, [16896, 131072]),
-        (AscendDeviceType.A3, torch.bfloat16, [16640, 131072]),
-        (AscendDeviceType.A2, torch.bfloat16, [16640, 131072]),
+        (AscendDeviceType.A5, torch.float8_e4m3fn, [128, 128, 8, 16], [16896, 81920]),
+        (AscendDeviceType.A5, torch.bfloat16, [128, 128, 8, 16], [16896, 131072]),
+        # A3 BF16 SparseFlashMla adopts the same geometry; pad_t2 is BF16 page size.
+        (AscendDeviceType.A3, torch.bfloat16, [128, 128, 8, 16], [16896, 131072]),
+        (AscendDeviceType.A3, None, [128, 128, 8, 16], [16896, 131072]),
+        (AscendDeviceType.A2, torch.bfloat16, [128, 128, 8, 32], [16640, 131072]),
     ],
 )
-def test_dsv4_block_sizes_pad_t2_matches_attn_dtype(device_type, attn_kv_dtype, expected_pads):
+def test_dsv4_block_sizes_pad_t2_matches_attn_dtype(
+    device_type, attn_kv_dtype, expected_blocks, expected_pads
+):
     with patch(
         "vllm_ascend.models.layer.attention.layer.get_ascend_device_type",
         return_value=device_type,
     ):
         sizes = get_dsv4_block_sizes(attn_kv_dtype)
-    assert sizes[128][0][:2] == [128, 128]
+    assert sizes[128][0] == expected_blocks
     assert sizes[128][1] == expected_pads
-    if device_type == AscendDeviceType.A5:
-        assert sizes[128][0] == [128, 128, 8, 16]
 
 
 def test_a5_auto_swa_spec_stays_fp8_not_sparse_flash_mla():
@@ -159,7 +161,7 @@ def test_swa_get_kv_cache_spec_keeps_a3_bf16_unpacked_head():
         ),
         patch(
             "vllm_ascend.models.deepseek_v4._dsv4_block_sizes",
-            return_value={128: [[128, 128, 8, 32], [16640, 131072]]},
+            return_value={128: [[128, 128, 8, 16], [16896, 131072]]},
         ),
     ):
         spec = swa.get_kv_cache_spec(vllm_config)

@@ -30,32 +30,39 @@ from vllm_ascend.utils import (
 
 def get_dsv4_block_sizes(attn_kv_dtype: torch.dtype | None = None):
     # cache_config.block_size: [mla, swa, c4 state, c128 state], [page_size_padded_t1, page_size_padded_t2]
-    # pad_t1 = indexer page (FP8+fp32 scale on A5 / int8+fp16 scale on A2/A3)
-    # pad_t2 = attention page: A5 FP8 packed 128*640; BF16 SparseFlashMla 128*512*2
+    # pad_t1 = indexer page (FP8+fp32 scale / aligned SparseFlashMla page)
+    # pad_t2 = attention page: FP8 packed 128*640; BF16 SparseFlashMla 128*512*2
     _DSV4_BLOCK_SIZES = {
         128: [[128, 128, 8, 32], [16640, 131072]],
         64: [[64, 64, 4, 16], [8320, 65536]],
         32: [[32, 32, 2, 8], [4160, 32768]],
     }
-    _DSV4_BLOCK_SIZES_A5_FP8 = {
+    # Shared by A5 FP8 (pad_t2=81920) vs A3/A5 BF16 SparseFlashMla (pad_t2=131072).
+    _DSV4_BLOCK_SIZES_SPARSE_FLASH_MLA = {
         128: [[128, 128, 8, 16], [16896, 81920]],
         64: [[64, 64, 4, 8], [8448, 40960]],
         32: [[32, 32, 2, 4], [4224, 20480]],
     }
-    _DSV4_BLOCK_SIZES_A5_BF16 = {
+    _DSV4_BLOCK_SIZES_SPARSE_FLASH_MLA_BF16 = {
         128: [[128, 128, 8, 16], [16896, 131072]],
         64: [[64, 64, 4, 8], [8448, 65536]],
         32: [[32, 32, 2, 4], [4224, 32768]],
     }
-    if get_ascend_device_type() in {AscendDeviceType.A5}:
-        if attn_kv_dtype == torch.bfloat16:
-            return _DSV4_BLOCK_SIZES_A5_BF16
-        return _DSV4_BLOCK_SIZES_A5_FP8
+    device_type = get_ascend_device_type()
+    # A3/A5 BF16 SparseFlashMla share compressor geometry + BF16 attn page pad.
+    if attn_kv_dtype == torch.bfloat16 and device_type in {AscendDeviceType.A3, AscendDeviceType.A5}:
+        return _DSV4_BLOCK_SIZES_SPARSE_FLASH_MLA_BF16
+    if device_type == AscendDeviceType.A5:
+        return _DSV4_BLOCK_SIZES_SPARSE_FLASH_MLA
+    # A3 without an explicit dtype still defaults to BF16 SparseFlashMla pages:
+    # attn KV on A3 is BF16 and now selects SparseFlashMla.
+    if device_type == AscendDeviceType.A3 and attn_kv_dtype is None:
+        return _DSV4_BLOCK_SIZES_SPARSE_FLASH_MLA_BF16
     return _DSV4_BLOCK_SIZES
 
 
-# Device-default table (A5 → FP8 pads). Prefer get_dsv4_block_sizes(attn_kv_dtype)
-# when pad_t2 must match BF16 SparseFlashMla pages.
+# Device-default table. Prefer get_dsv4_block_sizes(attn_kv_dtype) when pad_t2
+# must match BF16 SparseFlashMla pages.
 DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
 
 
