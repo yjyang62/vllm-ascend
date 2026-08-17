@@ -220,10 +220,10 @@ class NPUWorker(WorkerBase):
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
-        # Save the buffers before level 2 sleep
-        if level == 2:
-            model = self.model_runner.model
-            self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+        # Clone named buffers to CPU before sleep so wake_up can restore them.
+        # Required for both level 1 (weights offload) and level 2 (discard).
+        model = self.model_runner.model
+        self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
         cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
         if cleanup_enabled:
@@ -253,7 +253,7 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
-        # Restore the buffers after level 2 sleep
+        # Restore named buffers saved during sleep (level 1 and level 2).
         if len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
