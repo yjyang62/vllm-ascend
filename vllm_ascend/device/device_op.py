@@ -43,6 +43,42 @@ else:
     triton_q_rms = None  # type: ignore
 
 
+def _dsa_bf16_sparse_flash_mla_scatter(cache, x, slot_mapping):
+    """ACLGraph-safe BF16 KV scatter for SparseFlashMla (A3/A5).
+
+    Invalid (-1) rows reuse token-0's index+update so the scatter keeps a fixed
+    ``[T, 2]`` shape without ``torch.any`` / dynamic gathers.
+    """
+    if slot_mapping.dim() != 2 or slot_mapping.shape[-1] != 2:
+        raise ValueError(
+            "SparseFlashMla BF16 slot_mapping must have shape "
+            f"[num_tokens, 2], got {tuple(slot_mapping.shape)}."
+        )
+    # Use an NPU scatter op instead of PyTorch advanced indexing so the
+    # write is properly ordered on the current NPU stream. Advanced
+    # indexing is unreliable under multistream_dsv4_dsa_overlap
+    # (aux-stream KV write vs main-stream SparseFlashMla read).
+    indices = slot_mapping.to(dtype=torch.int64)
+    updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:]))
+    valid = (indices[:, 0] >= 0) & (indices[:, 1] >= 0)
+    anchor_indices = indices[:1].expand_as(indices)
+    anchor_updates = updates[:1].expand_as(updates)
+    valid_idx = valid.view(-1, *([1] * (indices.ndim - 1)))
+    valid_upd = valid.view(-1, *([1] * (updates.ndim - 1)))
+    safe_indices = torch.where(valid_idx, indices, anchor_indices).contiguous()
+    safe_updates = torch.where(valid_upd, updates, anchor_updates).contiguous()
+    torch_npu.npu_scatter_nd_update_(cache, safe_indices, safe_updates)
+
+
+def _format_bf16_sparse_flash_mla_slot_mapping(slot_mapping, block_size):
+    """Convert flat slots to ``[block_idx, offset]``; invalid slots become ``[-1, -1]``."""
+    valid = slot_mapping >= 0
+    invalid = torch.full_like(slot_mapping, -1)
+    block_idx = torch.where(valid, torch.div(slot_mapping, block_size, rounding_mode="floor"), invalid)
+    offset = torch.where(valid, slot_mapping % block_size, invalid)
+    return torch.stack([block_idx, offset], dim=-1).to(dtype=torch.int32)
+
+
 class BaseDeviceAdaptor:
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
@@ -666,7 +702,7 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def build_dsa_attn_kv_plan(kv_cache_dtype: torch.dtype | None = None) -> DsaAttnKvPlan:
-        """A2/A3: sharedkv + PA_ND + block/offset slots (dtype does not switch path)."""
+        """A2/A3: A3 BF16 → SparseFlashMla; otherwise sharedkv + PA_ND."""
         return build_base_dsa_attn_kv_plan(kv_cache_dtype)
 
     @classmethod
@@ -702,7 +738,10 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def dsa_kv_compress_scatter(cache, x, slot_mapping):
-        """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
+        """Scatter KV into cache. A3 BF16 SparseFlashMla uses ACLGraph-safe path."""
+        if uses_bf16_sparse_flash_mla(cache.dtype):
+            _dsa_bf16_sparse_flash_mla_scatter(cache, x, slot_mapping)
+            return
         torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
 
     # ===== Indexer Quant + Scatter =====
@@ -837,7 +876,12 @@ class BaseDeviceAdaptor:
     @staticmethod
     def format_dsa_slot_mapping(slot_mapping, block_size, kv_cache_dtype: torch.dtype | None = None):
         """Format slot_mapping for metadata storage.
-        Non-A5: 2D [block_idx, offset]; A5: 1D pass-through."""
+
+        A3 BF16 SparseFlashMla uses ``[block_idx, offset]`` with invalid ``[-1, -1]``.
+        Other Base paths keep 2D block/offset mapping.
+        """
+        if uses_bf16_sparse_flash_mla(kv_cache_dtype):
+            return _format_bf16_sparse_flash_mla_slot_mapping(slot_mapping, block_size)
         return torch.stack([slot_mapping // block_size, slot_mapping % block_size], axis=-1)
 
     @staticmethod
@@ -1460,34 +1504,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def dsa_kv_compress_scatter(cache, x, slot_mapping):
         """Scatter KV into cache with fused quantization+compression.
-        A5: kv_compress_epilog handles quant/compress/scatter internally.
+        A5 BF16 SparseFlashMla uses ACLGraph-safe scatter; FP8 uses kv_compress_epilog.
         Input x is unquantized bf16; cache shape is [..., head_dim]."""
-        if cache.dtype == torch.bfloat16:
-            if slot_mapping.dim() != 2 or slot_mapping.shape[-1] != 2:
-                raise ValueError(
-                    "SparseFlashMla BF16 slot_mapping must have shape "
-                    f"[num_tokens, 2], got {tuple(slot_mapping.shape)}."
-                )
-            # Use an NPU scatter op instead of PyTorch advanced indexing so the
-            # write is properly ordered on the current NPU stream. Advanced
-            # indexing is unreliable under multistream_dsv4_dsa_overlap
-            # (aux-stream KV write vs main-stream SparseFlashMla read).
-            #
-            # ACLGraph capture forbids tensor->Python sync (e.g. torch.any) and
-            # data-dependent boolean gathers (dynamic update count). Keep a
-            # fixed [T, 2] scatter shape: invalid (-1) rows reuse token-0's
-            # index+update so they are redundant writes, not cache clobbers.
-            # Decode/prefill pads put -1 at the suffix, so row 0 stays valid.
-            indices = slot_mapping.to(dtype=torch.int64)
-            updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:]))
-            valid = (indices[:, 0] >= 0) & (indices[:, 1] >= 0)
-            anchor_indices = indices[:1].expand_as(indices)
-            anchor_updates = updates[:1].expand_as(updates)
-            valid_idx = valid.view(-1, *([1] * (indices.ndim - 1)))
-            valid_upd = valid.view(-1, *([1] * (updates.ndim - 1)))
-            safe_indices = torch.where(valid_idx, indices, anchor_indices).contiguous()
-            safe_updates = torch.where(valid_upd, updates, anchor_updates).contiguous()
-            torch_npu.npu_scatter_nd_update_(cache, safe_indices, safe_updates)
+        if uses_bf16_sparse_flash_mla(cache.dtype):
+            _dsa_bf16_sparse_flash_mla_scatter(cache, x, slot_mapping)
             return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
@@ -1641,11 +1661,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         """
         if not uses_bf16_sparse_flash_mla(kv_cache_dtype):
             return slot_mapping
-        valid = slot_mapping >= 0
-        invalid = torch.full_like(slot_mapping, -1)
-        block_idx = torch.where(valid, torch.div(slot_mapping, block_size, rounding_mode="floor"), invalid)
-        offset = torch.where(valid, slot_mapping % block_size, invalid)
-        return torch.stack([block_idx, offset], dim=-1).to(dtype=torch.int32)
+        return _format_bf16_sparse_flash_mla_slot_mapping(slot_mapping, block_size)
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
