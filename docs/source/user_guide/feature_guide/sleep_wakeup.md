@@ -18,7 +18,7 @@
 推理侧占着**权重 + KV cache**，训练步要腾显存，训完还要把**新策略权重**灌回引擎。
 
 Sleep Mode 的解法是：**进程不退出**，把可释放分配放进带 tag 的内存池
-（`weights` / `kv_cache`），按级别 sleep、按 tag wake；需要换权重时，
+（`weights` / `kv_cache`），按级别 sleep / wake；需要换权重时，
 再用上游 layerwise 生命周期原地更新，而不是杀进程重建 Engine。
 
 | 组件 | 职责 |
@@ -30,9 +30,34 @@ Sleep Mode 的解法是：**进程不退出**，把可释放分配放进带 tag 
 启用 `enable_sleep_mode` 后，权重与 KV 的分配进入 sleep 池。之后「让出 / 要回」
 显存，本质是对池内 handle 做 **unmap / remap**；Vime 只调上游控制面。
 
-## 2. 整体流程
+### 1.1 Level 1 与 Level 2
 
-以同卡最常见的 **Level 2 + 在线灌权重** 为例：
+引擎提供两级 sleep，差别主要在**权重怎么处理**：
+
+| | Level 1 | Level 2 |
+| --- | --- | --- |
+| **权重** | 拷到 Host 再 unmap（内容可还原） | 直接丢弃内容 |
+| **KV cache** | 丢弃 | 丢弃 |
+| **醒来后权重** | CPU backup 自动还原 | 必须 reload / update |
+| **Host 压力** | 需放下整模权重 | 几乎不备份大权重 |
+| **适用** | 同权重短暂让卡 | **RL 换权重**、Host 紧张 |
+| **唤醒后是否走 layerwise** | 一般不需要 | 需要 `initialize → reload → finalize` |
+
+Ascend：L1 为 `sleep(offload_tags=("weights",))`；L2 为 `sleep(offload_tags=())`。
+Level 1 权重不变时，`wake_up()` 后即可继续推理。
+
+同卡 RL 更新策略时优先 **Level 2**：训练侧本身也吃 Host/Device，L1 再备份一份
+整模权重容易把 Host 打满；且训完本来就要灌**新**权重，旧内容没必要 offload。
+
+因此下文流程图与 layerwise 展开都只画 **Level 2**——这是 Vime 换权路径；
+Level 1 调用见文末示例。
+
+可选 `enable_sleep_mode_extra_cleanup`：sleep 时再拆 HCCL、清 ACLGraph workspace；
+wakeup 更慢（重建通信，并在合适时机 recapture）。
+
+## 2. 整体流程（Level 2）
+
+RL 同卡换权的完整路径：
 
 ```mermaid
 sequenceDiagram
@@ -74,7 +99,7 @@ sequenceDiagram
 一条因果链：
 
 ```text
-sleep 让出显存 → train → wake / 灌权重
+sleep(level=2) 让出显存 → train → wake / 灌权重
   （initialize → reload → finalize）→ 继续 rollout
 ```
 
@@ -92,25 +117,7 @@ Python 侧模型对象，而是：
 layerwise「更新数值、不换锚点」的前提。RoPE 等 `named_buffers` 在 sleep 前
 CPU clone、wake 后写回；个别必须跨 sleep 存活的分配可用 `sleep_persistent`。
 
-### 3.2 Level 1 与 Level 2
-
-| | Level 1 | Level 2 |
-| --- | --- | --- |
-| **权重** | 拷到 Host 再 unmap（可还原） | 直接丢弃内容 |
-| **KV cache** | 丢弃 | 丢弃 |
-| **醒来后权重** | CPU backup 自动还原 | 必须 reload / update |
-| **Host 压力** | 需放下整模权重 | 几乎不备份大权重 |
-| **适用** | 同权重短暂让卡 | **RL 换权重**、Host 紧张 |
-
-Ascend：L1 为 `sleep(offload_tags=("weights",))`；L2 为 `sleep(offload_tags=())`。
-RL 同卡更新策略优先 L2，避免 Host 上再留一份旧权重。
-
-可选 `enable_sleep_mode_extra_cleanup`：sleep 时再拆 HCCL、清 ACLGraph workspace；
-wakeup 更慢（重建通信，并在合适时机 recapture）。
-
-Level 1 若权重不变，`wake_up()` 后即可继续推理，不必走 layerwise。
-
-### 3.3 Level 2 灌权重：`initialize → reload → finalize`
+### 3.2 Level 2 灌权重：`initialize → reload → finalize`
 
 Level 2 丢掉的是**权重内容**，不是 Parameter 对象。若醒来后再普通 `load_model`，
 `process_weights_after_loading` 常会**换掉** Parameter，ACLGraph 仍钉着旧
