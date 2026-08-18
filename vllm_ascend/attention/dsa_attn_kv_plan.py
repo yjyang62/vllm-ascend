@@ -35,6 +35,9 @@ class DsaAttnKvPlan:
     sparse_attn_metadata_extra_kwargs: dict[str, Any]
     # A2/A3 sharedkv and SparseFlashMla need device=; A5 FP8 quant metadata does not.
     include_metadata_device: bool
+    # A2/A3 sharedkv and A5 BF16 SparseFlashMla accept runtime cu_seqlens_* kwargs;
+    # A5 FP8 quant sharedkv ignores them (DeviceOperator historically no-op'd).
+    applies_sparse_attn_runtime_kwargs: bool
 
     def metadata_kwargs(self, device) -> dict[str, Any]:
         kwargs = dict(self.sparse_attn_metadata_extra_kwargs)
@@ -42,9 +45,19 @@ class DsaAttnKvPlan:
             kwargs["device"] = str(device)
         return kwargs
 
+    def sparse_attn_kwargs(self) -> dict[str, Any]:
+        """Copy of base kwargs for a single sparse-attn invocation."""
+        return dict(self.sparse_attn_base_kwargs)
+
 
 def uses_bf16_sparse_flash_mla(kv_cache_dtype: torch.dtype | None) -> bool:
     return kv_cache_dtype == torch.bfloat16
+
+
+def add_sparse_attn_extra_kwargs(plan: DsaAttnKvPlan, extra_kwargs: dict[str, Any], **kwargs_to_add) -> None:
+    """Merge SparseFlashMla / sharedkv runtime kwargs when the plan accepts them."""
+    if plan.applies_sparse_attn_runtime_kwargs:
+        extra_kwargs.update(kwargs_to_add)
 
 
 def build_base_dsa_attn_kv_plan(kv_cache_dtype: torch.dtype | None = None) -> DsaAttnKvPlan:
@@ -61,6 +74,7 @@ def build_base_dsa_attn_kv_plan(kv_cache_dtype: torch.dtype | None = None) -> Ds
         sparse_attn_base_kwargs={},
         sparse_attn_metadata_extra_kwargs={},
         include_metadata_device=True,
+        applies_sparse_attn_runtime_kwargs=True,
     )
 
 
@@ -79,6 +93,7 @@ def build_a5_dsa_attn_kv_plan(kv_cache_dtype: torch.dtype | None = None) -> DsaA
             sparse_attn_base_kwargs={},
             sparse_attn_metadata_extra_kwargs={},
             include_metadata_device=True,
+            applies_sparse_attn_runtime_kwargs=True,
         )
     return DsaAttnKvPlan(
         attn_kv_dtype=kv_cache_dtype,
@@ -93,4 +108,5 @@ def build_a5_dsa_attn_kv_plan(kv_cache_dtype: torch.dtype | None = None) -> DsaA
         # Match main A5: quant metadata takes kv_quant_mode only (no device=).
         sparse_attn_metadata_extra_kwargs={"kv_quant_mode": 1},
         include_metadata_device=False,
+        applies_sparse_attn_runtime_kwargs=False,
     )

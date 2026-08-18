@@ -14,6 +14,7 @@ from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, Att
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_attn_kv_plan import add_sparse_attn_extra_kwargs
 from vllm_ascend.attention.dsa_v1 import (
     _has_weight_scale,
     build_dspark_swa_indices,
@@ -1127,7 +1128,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         # Fixed for the life of the impl: SparseFlashMla vs quant choices.
         self.attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(self.attn_kv_dtype)
         self.layout_kv = self.attn_kv_plan.layout_kv
-        self.sparse_attn_base_kwargs = dict(self.attn_kv_plan.sparse_attn_base_kwargs)
         self.compressor_slot_mapping_format = self.attn_kv_plan.compressor_slot_mapping_format
 
         # indexer param
@@ -1580,11 +1580,11 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         notify_kv_cache_written(layer_name)
         record_attention_compute_start()
         attn_op = self.attn_kv_plan.sparse_attn_op
-        extra_attn_kwargs: dict = dict(self.sparse_attn_base_kwargs)
+        extra_attn_kwargs: dict = self.attn_kv_plan.sparse_attn_kwargs()
         if has_prefill:
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
+            add_sparse_attn_extra_kwargs(
+                self.attn_kv_plan,
                 extra_attn_kwargs,
-                self.attn_kv_dtype,
                 cu_seqlens_ori_kv=local_seq_lengths_query,
             )
         if swa_req_metadata.dspark_swa_indices is not None:
@@ -1617,9 +1617,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             )[0]
         elif self.compress_ratio == 4:
             assert compressor_attn_metadata.req_metadata is not None
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
+            add_sparse_attn_extra_kwargs(
+                self.attn_kv_plan,
                 common_attn_kwargs,
-                self.attn_kv_dtype,
                 cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list,
             )
             attn_output = attn_op(
@@ -1635,9 +1635,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             )[0]
         else:
             assert compressor_attn_metadata.req_metadata is not None
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
+            add_sparse_attn_extra_kwargs(
+                self.attn_kv_plan,
                 common_attn_kwargs,
-                self.attn_kv_dtype,
                 cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list,
             )
             attn_output = attn_op(
