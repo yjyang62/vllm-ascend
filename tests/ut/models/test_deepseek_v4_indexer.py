@@ -149,10 +149,7 @@ class TestIndexerForward:
         indexer._select_topk_serial = serial_select
         indexer._cv_compute_query_and_update_cache_multistream = multistream_compute
         indexer._select_topk_multistream = multistream_select
-        metadata, _cache_cos, _cache_sin = _make_forward_metadata()
-        attention_cos = torch.full((2, 1, 1, 2), 7.0)
-        attention_sin = torch.full((2, 1, 1, 2), -7.0)
-        actual_seq_lengths_query = torch.tensor([0, 2], dtype=torch.int32)
+        metadata, cos, sin = _make_forward_metadata()
         compressed_kv = torch.ones((1, 1, 4))
         slot_mapping = torch.zeros((1, 2), dtype=torch.int32)
 
@@ -179,20 +176,13 @@ class TestIndexerForward:
                 scatter_attention_compressed_kv=scatter_attention_compressed_kv,
                 aux_stream=object() if use_multistream else None,
             ),
-            cos=attention_cos,
-            sin=attention_sin,
-            actual_seq_lengths_query=actual_seq_lengths_query,
         )
 
         assert actual is topk_indices
         indexer_call = multistream_compute.call_args if use_multistream else serial_select.call_args
         assert indexer_call.args[3] is metadata
-        assert torch.equal(indexer_call.args[4], attention_cos)
-        assert torch.equal(indexer_call.args[5], attention_sin)
-        if use_multistream:
-            assert indexer_call.args[7] is actual_seq_lengths_query
-        else:
-            assert indexer_call.args[6] is actual_seq_lengths_query
+        assert torch.equal(indexer_call.args[4], cos)
+        assert torch.equal(indexer_call.args[5], sin)
         if use_multistream:
             assert execution_order == [
                 "compute",
@@ -239,9 +229,6 @@ class TestIndexerForward:
                 scatter_attention_compressed_kv=scatter,
                 aux_stream=object(),
             ),
-            cos=torch.ones((2, 1, 1, 2)),
-            sin=torch.zeros((2, 1, 1, 2)),
-            actual_seq_lengths_query=torch.tensor([0, 2], dtype=torch.int32),
         )
 
         assert torch.equal(actual, topk_indices_buffer[:2].unsqueeze(1))

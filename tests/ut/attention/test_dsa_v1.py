@@ -262,7 +262,7 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
         patch(
             "vllm_ascend.attention.dsa_v1.split_decodes_and_prefills",
             return_value=(2, 0, 3, 0) if num_prefills == 0 else (1, 1, 1, 2),
-        ) as split_op,
+        ),
         patch.object(
             DsaAttnKvPlan,
             "format_slot_mapping",
@@ -299,7 +299,6 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
         )
 
     rope_op.assert_called_once()
-    assert split_op.call_args.kwargs["treat_short_extends_as_decodes"] is False
     assert torch.equal(rope_op.call_args.args[0], input_positions)
     assert rope_op.call_args.kwargs["use_cache"] is (num_prefills == 0)
     assert metadata_cache["cos"] is cos
@@ -342,7 +341,7 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
 
 
 @pytest.mark.parametrize("for_drafting", [False, True])
-def test_build_classifies_short_speculative_extends_as_prefills(
+def test_build_classifies_short_speculative_extends_as_decodes(
     for_drafting: bool,
 ):
     builder = _make_builder(compressor_ratio=1)
@@ -398,9 +397,9 @@ def test_build_classifies_short_speculative_extends_as_prefills(
                 common_ratio_to_sas_metadata={},
             )
 
-    assert metadata.num_decodes == 1
-    assert metadata.num_decode_tokens == 7
-    assert metadata.num_prefills == 1
+    assert metadata.num_decodes == 2
+    assert metadata.num_decode_tokens == 14
+    assert metadata.num_prefills == 0
 
 
 def test_build_req_metadata_preserves_zero_max_sequence_lengths():
@@ -928,13 +927,7 @@ class TestAscendDSACompressedCacheRouting:
         compress_kv_cache = torch.empty(0)
         state_cache = torch.empty(0)
 
-        attention_cos = torch.ones((1, 1, 1, 2))
-        attention_sin = torch.zeros((1, 1, 1, 2))
-        actual_seq_lengths_query = torch.tensor([0, 1], dtype=torch.int32)
-        with (
-            patch.object(DsaAttnKvPlan, "kv_compress_scatter") as scatter,
-            patch.object(DeviceOperator, "dsa_kv_compress_scatter") as device_scatter,
-        ):
+        with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
             actual = impl._update_compressed_caches_and_select_topk(
                 layer_name="model.layers.0.self_attn.attn",
                 hidden_states=hidden_states,
@@ -944,9 +937,6 @@ class TestAscendDSACompressedCacheRouting:
                 qr_pertoken_scale=None,
                 compress_kv_cache=compress_kv_cache,
                 state_cache=state_cache,
-                cos=attention_cos,
-                sin=attention_sin,
-                actual_seq_lengths_query=actual_seq_lengths_query,
             )
             indexer_call = impl.indexer.call_args
             overlap_plan = indexer_call.kwargs["overlap_plan"]
@@ -959,23 +949,18 @@ class TestAscendDSACompressedCacheRouting:
         assert indexer_call.kwargs["qr"] is qr
         assert indexer_call.kwargs["kv_cache"] is kv_cache
         assert indexer_call.kwargs["metadata"] is indexer_metadata
-        assert indexer_call.kwargs["cos"] is attention_cos
-        assert indexer_call.kwargs["sin"] is attention_sin
-        assert indexer_call.kwargs["actual_seq_lengths_query"] is actual_seq_lengths_query
         assert isinstance(overlap_plan, IndexerOverlapPlan)
         assert overlap_plan.aux_stream is None
         impl.compressor.assert_called_once_with(
             hidden_states=hidden_states,
             state_cache=state_cache,
             metadata=compressor_metadata,
-            cu_seqlens=actual_seq_lengths_query,
         )
         scatter.assert_called_once_with(
             compress_kv_cache,
             compressed_kv,
             compress_slot_mapping,
         )
-        device_scatter.assert_not_called()
 
     def test_c128_delegates_directly_to_compressor(self):
         impl = _make_impl()
@@ -996,11 +981,7 @@ class TestAscendDSACompressedCacheRouting:
         state_cache = torch.empty(0)
         compress_kv_cache = torch.empty(0)
 
-        actual_seq_lengths_query = torch.tensor([0, 1], dtype=torch.int32)
-        with (
-            patch.object(DsaAttnKvPlan, "kv_compress_scatter") as scatter,
-            patch.object(DeviceOperator, "dsa_kv_compress_scatter") as device_scatter,
-        ):
+        with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
             actual = impl._update_compressed_caches_and_select_topk(
                 layer_name="layer",
                 hidden_states=hidden_states,
@@ -1010,9 +991,6 @@ class TestAscendDSACompressedCacheRouting:
                 qr_pertoken_scale=None,
                 compress_kv_cache=compress_kv_cache,
                 state_cache=state_cache,
-                cos=torch.ones((1, 1, 1, 2)),
-                sin=torch.zeros((1, 1, 1, 2)),
-                actual_seq_lengths_query=actual_seq_lengths_query,
             )
 
         assert actual is None
@@ -1020,14 +998,12 @@ class TestAscendDSACompressedCacheRouting:
             hidden_states=hidden_states,
             state_cache=state_cache,
             metadata=compressor_metadata,
-            cu_seqlens=actual_seq_lengths_query,
         )
         scatter.assert_called_once_with(
             compress_kv_cache,
             compressed_kv,
             compress_slot_mapping,
         )
-        device_scatter.assert_not_called()
 
 
 @pytest.mark.parametrize("compress_ratio", [4, 128])

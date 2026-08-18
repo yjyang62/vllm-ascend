@@ -122,51 +122,6 @@ class TestCompressorForward:
         assert call.kwargs["cmp_ratio"] == compress_ratio
         assert call.kwargs["coff"] == expected_coff
 
-    def test_override_cu_seqlens_uses_attention_query_start_loc(self):
-        compressor = Compressor.__new__(Compressor)
-        torch.nn.Module.__init__(compressor)
-        compressor.overlap = False
-        compressor.compress_ratio = 4
-        compressor.rope_head_dim = 2
-        compressor.norm_eps = 1e-6
-        compressor.ape = torch.ones((4, 4))
-        compressor.wkv = SimpleNamespace(weight=torch.ones((4, 4)))
-        compressor.wgate = SimpleNamespace(weight=torch.ones((4, 4)))
-        compressor.norm = SimpleNamespace(weight=torch.ones(4))
-        cache_req_metadata = SimpleNamespace(
-            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
-            start_pos=torch.tensor([1], dtype=torch.int32),
-        )
-        attention_query_start_loc = torch.tensor([0, 5], dtype=torch.int32)
-        state_req_metadata = SimpleNamespace(block_table=torch.tensor([[3]], dtype=torch.int32))
-        metadata = AscendCompressorMetadata(
-            cache=SimpleNamespace(req_metadata=cache_req_metadata),
-            state=SimpleNamespace(req_metadata=state_req_metadata),
-        )
-        hidden_states = torch.ones((2, 4))
-        state_cache = torch.ones((1, 2, 1, 4))
-        compress_cos = torch.ones((1, 1, 2))
-        compress_sin = torch.zeros((1, 1, 2))
-        slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
-        compressed_kv = torch.ones((1, 1, 4))
-        compressor._compute_metadata = MagicMock(return_value=(compress_cos, compress_sin, slot_mapping))
-
-        with patch.object(
-            torch.ops._C_ascend,
-            "compressor",
-            create=True,
-            return_value=compressed_kv,
-        ) as compressor_op:
-            compressor(
-                hidden_states=hidden_states,
-                state_cache=state_cache,
-                metadata=metadata,
-                cu_seqlens=attention_query_start_loc,
-            )
-
-        assert compressor_op.call_args.kwargs["cu_seqlens"] is attention_query_start_loc
-        assert compressor_op.call_args.kwargs["start_pos"] is cache_req_metadata.start_pos
-
 
 class TestCompressorStateCache:
     @pytest.mark.parametrize(

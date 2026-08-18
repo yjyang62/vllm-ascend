@@ -474,7 +474,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 split_decodes_and_prefills(
                     common_attn_metadata,
                     decode_threshold=self.decode_threshold,
-                    treat_short_extends_as_decodes=False,
                 )
             )
             self.common_ratio_to_sas_metadata["num_decodes"] = self.num_decodes
@@ -723,7 +722,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
-                treat_short_extends_as_decodes=False,
             )
         )
         num_reqs = common_attn_metadata.num_reqs
@@ -1383,9 +1381,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         qr_pertoken_scale: torch.Tensor | None,
         compress_kv_cache: torch.Tensor,
         state_cache: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        actual_seq_lengths_query: torch.Tensor,
     ) -> torch.Tensor | None:
         """Update compressed caches and return Indexer top-k indices."""
         compressor = self.compressor
@@ -1401,7 +1396,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                     hidden_states=hidden_states,
                     state_cache=state_cache,
                     metadata=layer_metadata.compressor,
-                    cu_seqlens=actual_seq_lengths_query,
                 )
 
             def scatter_attention_compressed_kv(
@@ -1409,11 +1403,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 compress_slot_mapping: torch.Tensor,
             ) -> None:
                 if compressed_kv.shape[0] > 0:
-                    # Use the impl plan, not DeviceOperator.dsa_kv_compress_scatter.
-                    # A5 DeviceOperator rebuilds the plan from cache.dtype; if the
-                    # live tensor is tagged bf16 while auto resolved FP8, that
-                    # skips kv_compress_epilog and the quant kernel reads garbage.
-                    self.attn_kv_plan.kv_compress_scatter(
+                    DeviceOperator.dsa_kv_compress_scatter(
                         compress_kv_cache,
                         compressed_kv,
                         compress_slot_mapping,
@@ -1431,9 +1421,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 metadata=layer_metadata.indexer,
                 overlap_plan=overlap_plan,
                 layer_name=layer_name,
-                cos=cos,
-                sin=sin,
-                actual_seq_lengths_query=actual_seq_lengths_query,
                 qr_pertoken_scale=qr_pertoken_scale,
             )
 
@@ -1441,10 +1428,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             hidden_states=hidden_states,
             state_cache=state_cache,
             metadata=layer_metadata.compressor,
-            cu_seqlens=actual_seq_lengths_query,
         )
         if compressed_kv.shape[0] > 0:
-            self.attn_kv_plan.kv_compress_scatter(
+            DeviceOperator.dsa_kv_compress_scatter(
                 compress_kv_cache,
                 compressed_kv,
                 compress_slot_mapping,
@@ -1515,9 +1501,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 qr_pertoken_scale=qr_pertoken_scale,
                 compress_kv_cache=compress_kv_cache,
                 state_cache=state_cache,
-                cos=cos,
-                sin=sin,
-                actual_seq_lengths_query=actual_seq_lengths_query,
             )
 
         notify_kv_cache_written(layer_name)
