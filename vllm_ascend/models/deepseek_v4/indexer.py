@@ -360,12 +360,16 @@ class DeepseekV4Indexer(nn.Module):
         metadata: AscendIndexerMetadata,
         overlap_plan: IndexerOverlapPlan,
         *,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
         qr_pertoken_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
-        cache_metadata, _ = self._get_indexer_cache_metadata(metadata)
-        cos = cache_metadata.cos[layer_name][:num_tokens]
-        sin = cache_metadata.sin[layer_name][:num_tokens]
+        # 2e944 applied attention RoPE to indexer Q, not the indexer k_cache
+        # builder's cos/sin. Lightning indexer still uses indexer metadata.
+        cos = cos[:num_tokens]
+        sin = sin[:num_tokens]
         aux_stream = overlap_plan.aux_stream
         if self.skip_topk:
             topk_indices = self._get_cached_topk_indices(num_tokens)
@@ -378,6 +382,7 @@ class DeepseekV4Indexer(nn.Module):
                 cos,
                 sin,
                 aux_stream,
+                actual_seq_lengths_query,
                 qr_pertoken_scale,
             )
             compressed_kv, compress_slot_mapping = overlap_plan.compute_attention_compressed_kv()
@@ -400,6 +405,7 @@ class DeepseekV4Indexer(nn.Module):
                 metadata,
                 cos,
                 sin,
+                actual_seq_lengths_query,
                 qr_pertoken_scale,
             )
 
@@ -420,6 +426,7 @@ class DeepseekV4Indexer(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         aux_stream: torch.npu.Stream,
+        actual_seq_lengths_query: torch.Tensor,
         qr_pertoken_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
@@ -450,6 +457,7 @@ class DeepseekV4Indexer(nn.Module):
             hidden_states=hidden_states,
             state_cache=indexer_state_cache,
             metadata=metadata.compressor,
+            cu_seqlens=actual_seq_lengths_query,
         )
         if kv.numel() == 0:
             kv = None
@@ -575,6 +583,7 @@ class DeepseekV4Indexer(nn.Module):
         metadata: AscendIndexerMetadata,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
         qr_pertoken_scale: torch.Tensor | None = None,
     ):
         (indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
@@ -614,6 +623,7 @@ class DeepseekV4Indexer(nn.Module):
             hidden_states=x,
             state_cache=indexer_state_cache,
             metadata=metadata.compressor,
+            cu_seqlens=actual_seq_lengths_query,
         )
         if kv.numel() == 0:
             kv = None
@@ -638,6 +648,7 @@ class DeepseekV4Indexer(nn.Module):
         metadata: AscendIndexerMetadata,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        actual_seq_lengths_query: torch.Tensor,
         qr_pertoken_scale: torch.Tensor | None = None,
     ):
         q, kv, ik, isc, ifc, cache_metadata, indexer_slot_mapping = self._indexer_qkv_prepare(
@@ -647,6 +658,7 @@ class DeepseekV4Indexer(nn.Module):
             metadata,
             cos,
             sin,
+            actual_seq_lengths_query,
             qr_pertoken_scale,
         )
 
