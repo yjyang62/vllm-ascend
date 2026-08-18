@@ -474,7 +474,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 split_decodes_and_prefills(
                     common_attn_metadata,
                     decode_threshold=self.decode_threshold,
-                    treat_short_extends_as_decodes=False,
                 )
             )
             self.common_ratio_to_sas_metadata["num_decodes"] = self.num_decodes
@@ -723,7 +722,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
-                treat_short_extends_as_decodes=False,
             )
         )
         num_reqs = common_attn_metadata.num_reqs
@@ -1405,7 +1403,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 compress_slot_mapping: torch.Tensor,
             ) -> None:
                 if compressed_kv.shape[0] > 0:
-                    self.attn_kv_plan.kv_compress_scatter(
+                    DeviceOperator.dsa_kv_compress_scatter(
                         compress_kv_cache,
                         compressed_kv,
                         compress_slot_mapping,
@@ -1432,7 +1430,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             metadata=layer_metadata.compressor,
         )
         if compressed_kv.shape[0] > 0:
-            self.attn_kv_plan.kv_compress_scatter(
+            DeviceOperator.dsa_kv_compress_scatter(
                 compress_kv_cache,
                 compressed_kv,
                 compress_slot_mapping,
