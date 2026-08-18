@@ -324,10 +324,18 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.metadata_cls = metadata_cls if metadata_cls is not None else AscendDSAMetadata
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        # Attention/SWA/compress KV dtype from the allocated cache spec.
-        # Do not re-read global cache_config.cache_dtype here — indexer KV is
-        # independent (FP8 on A5) and must not drive SparseFlashMla selection.
-        self.attn_kv_dtype = kv_cache_spec.dtype
+        # Match AscendDSAImpl: resolve attn KV dtype from the request/config
+        # (dsv4_resolve_attn_kv_dtype), not kv_cache_spec.dtype.
+        # Using the allocated spec broke TP>1 BF16 SparseFlashMla graph capture
+        # after cfe764c67 (builder plan/layout diverged from the working
+        # cache_config-based path at 1f36603e3). Indexer KV stays independent.
+        # Lazy import: layer.py imports AscendDSABackend from this module.
+        from vllm_ascend.models.layer.attention.layer import dsv4_resolve_attn_kv_dtype
+
+        requested_kv_dtype = kv_cache_dtype_str_to_dtype(
+            vllm_config.cache_config.cache_dtype, vllm_config.model_config
+        )
+        self.attn_kv_dtype = dsv4_resolve_attn_kv_dtype(vllm_config, requested_kv_dtype)
         # Fixed for the life of the builder: SparseFlashMla vs quant choices.
         self.attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(self.attn_kv_dtype)
         self.layout_kv = self.attn_kv_plan.layout_kv
