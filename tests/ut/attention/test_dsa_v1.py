@@ -31,7 +31,7 @@ from vllm_ascend.attention.dsa_v1 import (
     _has_weight_scale,
     _is_w8a8_dynamic,
 )
-from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor, DeviceOperator
+from vllm_ascend.device.device_op import A5DeviceAdaptor, DeviceOperator
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import AscendDeviceType
 
