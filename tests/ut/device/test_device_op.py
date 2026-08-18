@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -9,6 +10,14 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 )
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
 from vllm_ascend.ops.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
+from vllm_ascend.utils import AscendDeviceType
+
+
+def _mock_a5_vllm_config(cache_dtype: str):
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+    )
 
 
 def test_a5_dsa_attn_kv_plan_centralizes_sparse_flash_mla_choices():
@@ -344,11 +353,21 @@ def test_a5_bf16_format_and_scatter_pass_minus1_directly():
             var[indices[valid, 0], indices[valid, 1]] = updates_tensor[valid]
 
     # Lazy import inside plan.kv_compress_scatter uses torch_npu module attribute.
-    with mock.patch(
-        "torch_npu.npu_scatter_nd_update_",
-        side_effect=_fake_scatter_nd_update,
-        create=True,
-    ) as scatter:
+    with (
+        mock.patch(
+            "vllm.config.get_current_vllm_config",
+            return_value=_mock_a5_vllm_config("bfloat16"),
+        ),
+        mock.patch(
+            "vllm_ascend.models.layer.attention.layer.get_ascend_device_type",
+            return_value=AscendDeviceType.A5,
+        ),
+        mock.patch(
+            "torch_npu.npu_scatter_nd_update_",
+            side_effect=_fake_scatter_nd_update,
+            create=True,
+        ) as scatter,
+    ):
         A5DeviceAdaptor.dsa_kv_compress_scatter(cache, x, formatted)
     scatter.assert_called_once()
     assert captured["indices"].shape == (3, 2)
@@ -429,6 +448,53 @@ def test_sparse_flash_mla_wrappers_adapt_dsa_kwargs():
     assert "rope_head_dim" not in attention_kwargs
 
 
+def test_a5_auto_dsa_scatter_uses_fp8_epilog_when_cache_dtype_is_bf16():
+    """A5 auto resolves to FP8; scatter must not follow a stale bf16 cache.dtype."""
+    cache = torch.zeros((2, 128, 1, 2), dtype=torch.bfloat16)
+    updates = torch.tensor([[1.0, 2.0]], dtype=torch.bfloat16).view(1, 1, 2)
+    slot_mapping = torch.tensor([0, 5], dtype=torch.int32)
+    captured: dict[str, object] = {}
+
+    def _fake_kv_compress_epilog(**kwargs):
+        captured["epilog"] = kwargs
+
+    with (
+        mock.patch(
+            "vllm.config.get_current_vllm_config",
+            return_value=_mock_a5_vllm_config("auto"),
+        ),
+        mock.patch(
+            "vllm_ascend.models.layer.attention.layer.get_ascend_device_type",
+            return_value=AscendDeviceType.A5,
+        ),
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_kv_quant_sparse_attn_sharedkv",
+            create=True,
+        ),
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_kv_quant_sparse_attn_sharedkv_metadata",
+            create=True,
+        ),
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "kv_compress_epilog",
+            side_effect=_fake_kv_compress_epilog,
+            create=True,
+        ) as epilog,
+        mock.patch(
+            "torch_npu.npu_scatter_nd_update_",
+            create=True,
+        ) as scatter_nd,
+    ):
+        A5DeviceAdaptor.dsa_kv_compress_scatter(cache, updates, slot_mapping)
+
+    epilog.assert_called_once()
+    scatter_nd.assert_not_called()
+    assert captured["epilog"]["kv_compress_cache"].shape == cache.view(-1, 1, cache.shape[-1]).shape
+
+
 def test_a5_bf16_dsa_scatter_uses_block_offset_mapping():
     cache = torch.zeros(3, 4, 1, 2, dtype=torch.bfloat16)
     updates = torch.tensor(
@@ -441,11 +507,21 @@ def test_a5_bf16_dsa_scatter_uses_block_offset_mapping():
         # CPU stand-in for torch_npu.npu_scatter_nd_update_.
         var[indices[:, 0], indices[:, 1]] = updates_tensor
 
-    with mock.patch(
-        "torch_npu.npu_scatter_nd_update_",
-        side_effect=_fake_scatter_nd_update,
-        create=True,
-    ) as scatter_mock:
+    with (
+        mock.patch(
+            "vllm.config.get_current_vllm_config",
+            return_value=_mock_a5_vllm_config("bfloat16"),
+        ),
+        mock.patch(
+            "vllm_ascend.models.layer.attention.layer.get_ascend_device_type",
+            return_value=AscendDeviceType.A5,
+        ),
+        mock.patch(
+            "torch_npu.npu_scatter_nd_update_",
+            side_effect=_fake_scatter_nd_update,
+            create=True,
+        ) as scatter_mock,
+    ):
         A5DeviceAdaptor.dsa_kv_compress_scatter(cache, updates, slot_mapping)
 
     scatter_mock.assert_called_once()

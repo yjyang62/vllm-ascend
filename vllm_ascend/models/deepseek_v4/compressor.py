@@ -207,12 +207,16 @@ class Compressor(nn.Module):
         hidden_states: torch.Tensor,
         state_cache: torch.Tensor,
         metadata: AscendCompressorMetadata,
+        cu_seqlens: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         compressor_metadata = metadata.cache.req_metadata
         state_metadata = metadata.state.req_metadata
         assert compressor_metadata is not None
         assert state_metadata is not None
         compress_cos, compress_sin, slot_mapping = self._compute_metadata(compressor_metadata)
+        # Match 2e944: attention query_start_loc drives the compressor kernel;
+        # start_pos / RoPE still come from this cache group.
+        kernel_cu_seqlens = compressor_metadata.query_start_loc if cu_seqlens is None else cu_seqlens
         compressed_kv = torch.ops._C_ascend.compressor(
             hidden_states,
             self.wkv.weight,
@@ -223,7 +227,7 @@ class Compressor(nn.Module):
             compress_sin.view(-1, compress_sin.shape[-1]),
             compress_cos.view(-1, compress_cos.shape[-1]),
             state_block_table=state_metadata.block_table,
-            cu_seqlens=compressor_metadata.query_start_loc,
+            cu_seqlens=kernel_cu_seqlens,
             seqused=None,
             start_pos=compressor_metadata.start_pos,
             rope_head_dim=self.rope_head_dim,
