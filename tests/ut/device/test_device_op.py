@@ -26,6 +26,7 @@ def test_a5_dsa_attn_kv_plan_centralizes_sparse_flash_mla_choices():
     # Plan fields are the source of truth (no DeviceOperator thin wrappers).
     assert bf16_plan.sparse_attn_kwargs() == {}
     assert bf16_plan.applies_sparse_attn_runtime_kwargs is True
+    assert bf16_plan.kv_scatter_kind == "nd_update_"
 
     with (
         mock.patch.object(
@@ -60,6 +61,7 @@ def test_a5_dsa_attn_kv_plan_centralizes_sparse_flash_mla_choices():
         assert fp8_plan.metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
         assert fp8_plan.applies_sparse_attn_runtime_kwargs is False
         assert fp8_plan.sparse_attn_op is fp8_attn_op
+        assert fp8_plan.kv_scatter_kind == "kv_compress_epilog"
 
         base_plan = BaseDeviceAdaptor.build_dsa_attn_kv_plan(torch.bfloat16)
         assert base_plan.uses_sparse_flash_mla is False
@@ -68,6 +70,7 @@ def test_a5_dsa_attn_kv_plan_centralizes_sparse_flash_mla_choices():
         assert base_plan.pack_kv_head_dim_extra is False
         assert base_plan.compressor_slot_mapping_format == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
         assert base_plan.applies_sparse_attn_runtime_kwargs is True
+        assert base_plan.kv_scatter_kind == "nd_update_v2"
 
 
 def test_add_sparse_attn_extra_kwargs_respects_plan_flag():
@@ -302,8 +305,20 @@ def test_a5_format_dsa_slot_mapping_depends_on_kv_dtype():
     )
 
     # Quant path keeps flat ids. Omitting dtype must not accidentally BF16-format.
-    assert A5DeviceAdaptor.format_dsa_slot_mapping(flat, block_size, torch.float8_e4m3fn) is flat
-    assert A5DeviceAdaptor.format_dsa_slot_mapping(flat, block_size) is flat
+    with (
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_kv_quant_sparse_attn_sharedkv",
+            create=True,
+        ),
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_kv_quant_sparse_attn_sharedkv_metadata",
+            create=True,
+        ),
+    ):
+        assert A5DeviceAdaptor.format_dsa_slot_mapping(flat, block_size, torch.float8_e4m3fn) is flat
+        assert A5DeviceAdaptor.format_dsa_slot_mapping(flat, block_size) is flat
 
 
 def test_a5_bf16_format_and_scatter_pass_minus1_directly():
@@ -328,8 +343,9 @@ def test_a5_bf16_format_and_scatter_pass_minus1_directly():
         if valid.any():
             var[indices[valid, 0], indices[valid, 1]] = updates_tensor[valid]
 
+    # Lazy import inside plan.kv_compress_scatter uses torch_npu module attribute.
     with mock.patch(
-        "vllm_ascend.device.device_op.torch_npu.npu_scatter_nd_update_",
+        "torch_npu.npu_scatter_nd_update_",
         side_effect=_fake_scatter_nd_update,
         create=True,
     ) as scatter:
@@ -426,7 +442,7 @@ def test_a5_bf16_dsa_scatter_uses_block_offset_mapping():
         var[indices[:, 0], indices[:, 1]] = updates_tensor
 
     with mock.patch(
-        "vllm_ascend.device.device_op.torch_npu.npu_scatter_nd_update_",
+        "torch_npu.npu_scatter_nd_update_",
         side_effect=_fake_scatter_nd_update,
         create=True,
     ) as scatter_mock:

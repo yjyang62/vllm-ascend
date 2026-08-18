@@ -27,7 +27,6 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     DsaAttnKvPlan,
     build_a5_dsa_attn_kv_plan,
     build_base_dsa_attn_kv_plan,
-    uses_bf16_sparse_flash_mla,
 )
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
@@ -674,7 +673,7 @@ class BaseDeviceAdaptor:
     @staticmethod
     def dsa_kv_compress_scatter(cache, x, slot_mapping):
         """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
+        BaseDeviceAdaptor.build_dsa_attn_kv_plan(None).kv_compress_scatter(cache, x, slot_mapping)
 
     # ===== Indexer Quant + Scatter =====
 
@@ -809,7 +808,9 @@ class BaseDeviceAdaptor:
     def format_dsa_slot_mapping(slot_mapping, block_size, kv_cache_dtype: torch.dtype | None = None):
         """Format slot_mapping for metadata storage.
         Non-A5: 2D [block_idx, offset]; A5: 1D pass-through."""
-        return torch.stack([slot_mapping // block_size, slot_mapping % block_size], axis=-1)
+        return BaseDeviceAdaptor.build_dsa_attn_kv_plan(kv_cache_dtype).format_slot_mapping(
+            slot_mapping, block_size
+        )
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
@@ -1428,29 +1429,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         """Scatter KV into cache with fused quantization+compression.
         A5: kv_compress_epilog handles quant/compress/scatter internally.
         Input x is unquantized bf16; cache shape is [..., head_dim]."""
-        if cache.dtype == torch.bfloat16:
-            if slot_mapping.dim() != 2 or slot_mapping.shape[-1] != 2:
-                raise ValueError(
-                    "SparseFlashMla BF16 slot_mapping must have shape "
-                    f"[num_tokens, 2], got {tuple(slot_mapping.shape)}."
-                )
-            # Experimental: pass invalid [-1, -1] indices straight into
-            # npu_scatter_nd_update_ (no remap-to-token0). Used to check whether
-            # the NPU op tolerates -1 pads under ACLGraph / multistream DSA.
-            # Keep fixed [T, 2] shape; do not filter/gather valid rows only.
-            indices = slot_mapping.to(dtype=torch.int64).contiguous()
-            updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:])).contiguous()
-            torch_npu.npu_scatter_nd_update_(cache, indices, updates)
-            return
-        torch.ops._C_ascend.kv_compress_epilog(
-            kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
-            x=x.view(-1, x.shape[-1]),
-            slot_mapping=slot_mapping,
-            quant_group_size=64,
-            quant_mode=2,
-            round_scale_flag=True,
-            layout=1,
-        )
+        # Select BF16 SparseFlashMla vs quant epilog from the live cache dtype.
+        A5DeviceAdaptor.build_dsa_attn_kv_plan(cache.dtype).kv_compress_scatter(cache, x, slot_mapping)
 
     # ===== Indexer Quant + Scatter =====
 
@@ -1587,18 +1567,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def format_dsa_slot_mapping(slot_mapping, block_size, kv_cache_dtype: torch.dtype | None = None):
-        """A5 uses block/offset mapping for BF16 and flat ids for quant KV.
-
-        BF16 invalid slots (``slot < 0``) become ``[-1, -1]`` so scatter can
-        skip them. Do not use ``%`` on negatives (yields a fake in-range offset).
-        """
-        if not uses_bf16_sparse_flash_mla(kv_cache_dtype):
-            return slot_mapping
-        valid = slot_mapping >= 0
-        invalid = torch.full_like(slot_mapping, -1)
-        block_idx = torch.where(valid, torch.div(slot_mapping, block_size, rounding_mode="floor"), invalid)
-        offset = torch.where(valid, slot_mapping % block_size, invalid)
-        return torch.stack([block_idx, offset], dim=-1).to(dtype=torch.int32)
+        """A5 uses block/offset mapping for BF16 and flat ids for quant KV."""
+        return A5DeviceAdaptor.build_dsa_attn_kv_plan(kv_cache_dtype).format_slot_mapping(
+            slot_mapping, block_size
+        )
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):

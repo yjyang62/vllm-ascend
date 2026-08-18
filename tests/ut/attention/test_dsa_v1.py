@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm_ascend.attention.dsa_attn_kv_plan import DsaAttnKvPlan
 from vllm_ascend.attention.dsa_v1 import (
     DSA_METADATA_BUFFER_SIZE,
     AscendDSAImpl,
@@ -257,8 +258,8 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
             return_value=(2, 0, 3, 0) if num_prefills == 0 else (1, 1, 1, 2),
         ),
         patch.object(
-            DeviceOperator,
-            "format_dsa_slot_mapping",
+            DsaAttnKvPlan,
+            "format_slot_mapping",
             return_value=torch.zeros((3, 2), dtype=torch.int32),
         ),
         patch.object(

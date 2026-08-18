@@ -204,14 +204,14 @@ class DeepseekV4DSparkModel(nn.Module):
         from vllm_ascend.device.device_op import DeviceOperator
 
         # Pass cache dtype so A5 BF16 SparseFlashMla gets [T, 2] block/offset
-        # slots; omitting it leaves flat ids and breaks dsa_kv_compress_scatter.
+        # slots; omitting it leaves flat ids and breaks kv_compress_scatter.
+        attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(swa_kv_cache.dtype)
         if slot_mapping.ndim == 1:
-            slot_mapping = DeviceOperator.format_dsa_slot_mapping(
+            slot_mapping = attn_kv_plan.format_slot_mapping(
                 slot_mapping,
                 swa_cache_layer.block_size,
-                swa_kv_cache.dtype,
             )
-        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, shared_kv, slot_mapping)
+        attn_kv_plan.kv_compress_scatter(swa_kv_cache, shared_kv, slot_mapping)
 
     def precompute_and_store_context_kv(
         self,

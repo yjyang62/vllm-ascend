@@ -343,8 +343,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.seq_lens_cpu = self.common_ratio_to_sas_metadata["seq_lens_cpu"]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-        self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
-            slot_mapping, self.block_size, self.attn_kv_dtype
+        self.slot_mapping[:num_input_tokens] = self.attn_kv_plan.format_slot_mapping(
+            slot_mapping, self.block_size
         )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
@@ -414,8 +414,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
 
         assert self.spec_slot_mapping is not None
-        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
-            slot_mapping, self.block_size, self.attn_kv_dtype
+        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = self.attn_kv_plan.format_slot_mapping(
+            slot_mapping, self.block_size
         )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
@@ -1523,7 +1523,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
+        self.attn_kv_plan.kv_compress_scatter(swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
 
         compress_topk_idxs = None
         if self.compress_ratio > 1:
@@ -1575,7 +1575,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
             if compressed_kv.numel() == 0:
                 compressed_kv = None
-            DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+            self.attn_kv_plan.kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
 
         notify_kv_cache_written(layer_name)
         record_attention_compute_start()
