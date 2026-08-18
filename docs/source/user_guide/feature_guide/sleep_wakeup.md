@@ -2,245 +2,279 @@
 
 !!! note
 
-    本文聚焦一件事：Vime / Ascend 的 Sleep Mode **新流程复用上游**
-    `initialize → reload → finalize` 后，**MoE 权重转置不再塞在 `wake_up` 里**，
-    而是回到正常的加载后处理路径。基础 API 见 [Sleep Mode Guide](sleep_mode.md)。
+    本文讲 RL / 同卡训推下的 **Sleep Mode 流程与原理**。Vime 复用上游 vLLM
+    的 sleep / wake，Level 2 灌权重时走 `initialize → reload → finalize`；
+    Ascend 承接 NPU 内存与权重传输。基础 API 见 [Sleep Mode Guide](sleep_mode.md)。
 
     上游参考：
 
     - [Sleep Mode](https://docs.vllm.ai/en/latest/features/sleep_mode/)
     - [Layerwise (Re)loading](https://docs.vllm.ai/en/latest/training/layerwise/)
-    - 相关修复：[Fix Level-2 MoE weight reload layout](https://github.com/vllm-project/vllm-ascend/pull/13012)
+    - Ascend 示例：`examples/rl/rlhf_http_hccl.py`、`examples/rl/rlhf_http_npu_ipc.py`
 
 ## 1. 原理
 
-### 1.1 问题从哪来
+同卡 RL（PPO / GRPO / RLHF 等）里，rollout 与训练轮流占用同一批 NPU：
+推理侧占着**权重 + KV cache**，训练步要腾显存，训完还要把**新策略权重**灌回引擎。
 
-Ascend 上未量化 MoE 的 expert 权重，不能按 checkpoint 的原始布局直接算。
-加载后必须在 `process_weights_after_loading` 里对 `w13_weight` / `w2_weight` 做
-`transpose(1, 2)`（以及必要的 pad / NZ），才能喂给 `npu_grouped_matmul`。
+Sleep Mode 的解法是：**进程不退出**，把可释放分配放进带 tag 的内存池
+（`weights` / `kv_cache`），按级别 sleep、按 tag wake；需要换权重时，
+再用上游 layerwise 生命周期原地更新，而不是杀进程重建 Engine。
 
-同卡 RL 常用 **Level 2 sleep**：权重内容直接丢弃，醒来后要重新装权重。
-这时有两件必须同时成立的事：
-
-1. **布局要对**：装进来的权重仍要变成 NPU 运行时转置布局；
-2. **地址要稳**：ACLGraph / 已捕获图钉住的是原 `Parameter` 的 `data_ptr`，
-   不能在 reload 时换成新对象。
-
-### 1.2 旧做法：在 `wake_up` 里补转置
-
-早期 Ascend 在 `wake_up(tags=["weights"])` 里扫一遍 `w13_weight` / `w2_weight`，
-按 `hidden_size` 判断后再 `transpose` + `replace_parameter`。这是补丁，不是主路径：
-
-- 转置逻辑与真正的 `process_weights_after_loading` **分叉**，易漏 MTP drafter 等；
-- `replace_parameter` 与「保地址 / 保 `weight_loader`」目标冲突，后续在线更新易断；
-- Sleep 只负责显存让渡，却承担了**权重布局**职责，边界不清。
-
-### 1.3 新做法：复用上游 layerwise，转置回到加载路径
-
-Vime 侧新流程对齐上游控制面：Level 2 醒来后走
-
-```text
-wake_up(weights)
-  → initialize_layerwise_reload
-  → reload / update_weights      # 内含 process_weights_after_loading（转置在这里）
-  → finalize_layerwise_reload    # 把处理后的布局 copy 回原 Parameter 地址
-  → wake_up(kv_cache)
-```
-
-因此：
-
-- **转置只发生在** `process_weights_after_loading`（与首次 load、在线更新同一条路）；
-- **`wake_up` 不再做 MoE 转置**，只 remap 内存、恢复 buffer / 通信 / 图；
-- Ascend 侧配合把 MoE 转置改成**原地写回**（保留原 Parameter 与 `weight_loader`），
-  这样 finalize 才能把「已转置布局」安全写回锚点地址。
-
-角色不变，但职责更干净：
-
-| 组件 | 做什么 |
+| 组件 | 职责 |
 | --- | --- |
-| **Vime** | 编排 sleep、两次 wake、以及 start/update/finish（或 `reload_weights`） |
-| **上游 vLLM** | tag 化 sleep/wake；layerwise 保证「更新数值、不换地址」 |
-| **vLLM Ascend** | CaMem；HCCL/IPC；MoE 转置落在 process 路径；去掉 wake 侧转置兜底 |
+| **Vime** | 编排：何时 sleep、分几次 wake、何时灌权重 |
+| **vLLM（上游）** | Sleep 语义、内存 tag、`initialize → reload → finalize` |
+| **vLLM Ascend** | `CaMemAllocator`、HCCL/IPC、可选 HCCL/ACLGraph 清理、MoE 布局处理 |
+
+启用 `enable_sleep_mode` 后，权重与 KV 的分配进入 sleep 池。之后「让出 / 要回」
+显存，本质是对池内 handle 做 **unmap / remap**；Vime 只调上游控制面。
 
 ## 2. 整体流程
+
+以同卡最常见的 **Level 2 + 分 tag 唤醒 + 在线灌权重** 为例：
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Vm as Vime
-    participant E as vLLM Ascend
-    participant U as 上游 layerwise
-    participant M as MoE process_weights<br/>（转置发生处）
+    participant Vm as Vime<br/>RolloutManager / Trainer
+    participant E as vLLM Ascend Engine
+    participant U as 上游 vLLM<br/>layerwise reload
+    participant N as NPU Memory
 
+    Vm->>E: rollout generate
     Vm->>E: sleep(level=2)
-    Note over E: 丢弃 weights / kv_cache<br/>wake 侧不再补转置
+    E->>N: discard weights + kv_cache
+    Note over E,N: named_buffers CPU 备份<br/>可选 extra_cleanup
+    N-->>Vm: 显存归还训练
 
-    Vm->>Vm: train / 新权重
+    Vm->>Vm: train / 得到新策略权重
 
     Vm->>E: wake_up(tags=["weights"])
-    Note over E: 只 remap 权重槽（空内容）
+    E->>N: 仅 remap 权重虚地址（内容为空）
 
     Vm->>E: start_weight_update
     E->>U: initialize_layerwise_reload
-    Note over U: 快照原 Parameter 作锚点
+    Note over U: 保存 kernel tensor 快照<br/>参数放到 meta，包装 loader
 
     Vm->>E: update_weights / reload_weights
-    E->>U: load_weights
-    U->>M: process_weights_after_loading
-    Note over M: transpose(1,2) 等到<br/>NPU 运行时布局
+    E->>U: 按层装载 + process_weights
+    Note over U: 含量化 / MoE transpose 等布局
 
     Vm->>E: finish_weight_update
     E->>U: finalize_layerwise_reload
-    Note over U: 已转置数值 copy 回锚点<br/>data_ptr 不变
+    Note over U: 布局结果 copy 回原 Parameter<br/>地址不变
 
     Vm->>E: wake_up(tags=["kv_cache"])
-    Note over E: 再开 KV；可选 recapture 图
+    E->>N: 分配 KV cache
+    Note over E: 可选 recapture ACLGraph
+    Vm->>E: 下一轮 rollout
+```
+
+一条因果链：
+
+```text
+sleep 让出显存
+  → train
+  → wake(weights) 打开权重槽
+  → initialize → reload → finalize 灌入并稳住布局/地址
+  → wake(kv_cache) 再开 KV，继续 rollout
 ```
 
 ## 3. 原理展开
 
-### 3.1 为什么转置必须跟 layerwise 绑在一起
+### 3.1 内存池与 tag
 
-Layerwise 三段各自解决一层问题，合起来才替得掉 `wake_up` 转置：
+`CaMemAllocator`（Ascend；上游 GPU 为 CuMem）给分配打 tag。sleep / wake 并不删
+Python 侧模型对象，而是：
 
-| 阶段 | 接口 | 在转置故事里的作用 |
+- **unmap**：物理页归还（内容丢弃，或先拷到 CPU）；
+- **remap**：按原 handle 再 map，**虚地址尽量保持稳定**。
+
+因此 `nn.Parameter` 对象仍在，图捕获记住的 `data_ptr` 仍可能对上——这是后面
+layerwise「更新数值、不换锚点」的前提。RoPE 等 `named_buffers` 在 sleep 前
+CPU clone、wake 后写回；个别必须跨 sleep 存活的分配可用 `sleep_persistent`。
+
+### 3.2 Level 1 与 Level 2
+
+| | Level 1 | Level 2 |
 | --- | --- | --- |
-| **initialize** | `start_weight_update` → `initialize_layerwise_reload` | 保存当前 kernel tensors 快照；层切到可加载态并包装 loader。锚点 = 图仍要引用的原 Parameter。 |
-| **reload** | `update_weights` / `reload_weights` | 写入新权重后走 **`process_weights_after_loading`** → Ascend MoE 在这里 `transpose(1, 2)`。转置发生在「加载后处理」，不是 wake。 |
-| **finalize** | `finish_weight_update` → `finalize_layerwise_reload` | 把处理后的（已转置）tensor **`data.copy_` 回锚点**，再挂回 module。布局对了，地址也没变。 |
+| **权重** | 拷到 Host 再 unmap（可还原） | 直接丢弃内容 |
+| **KV cache** | 丢弃 | 丢弃 |
+| **醒来后权重** | CPU backup 自动还原 | 必须 reload / update |
+| **Host 压力** | 需放下整模权重 | 几乎不备份大权重 |
+| **适用** | 同权重短暂让卡 | **RL 换权重**、Host 紧张 |
 
-没有 initialize 的锚点，finalize 无处可写；没有 reload 里的 process，就没有正确布局；
-没有 finalize 的回写，process 里哪怕做了转置，图仍可能钉着旧内容或旧对象。
-三者缺一，就又会退回「在 wake 里补一刀」的旧路。
+Ascend：L1 为 `sleep(offload_tags=("weights",))`；L2 为 `sleep(offload_tags=())`。
+RL 同卡更新策略优先 L2，避免 Host 上再留一份旧权重。
+
+可选 `enable_sleep_mode_extra_cleanup`：sleep 时再拆 HCCL、清 ACLGraph workspace；
+wakeup 更慢（重建通信，并在合适时机 recapture）。
+
+### 3.3 两次 `wake_up`
+
+`wake_up(tags=...)` 只恢复指定 tag；`tags=None` 表示全部。全部醒完前
+`is_sleeping` 仍为 `true`。
+
+Level 2 推荐拆成两步：
+
+1. **`wake_up(tags=["weights"])`**  
+   只 remap 权重槽。L2 无 CPU backup → **同虚地址、内容为空**，专供后续灌权。
+2. **中间完成 initialize → reload → finalize**（下一节）。
+3. **`wake_up(tags=["kv_cache"])`**  
+   再开 KV，触发 `post_kv_cache_wake_up`；extra cleanup 下**此时才构图**。
+
+这样压峰值（避免 weights + kv 与训练残留叠峰），也保证图建在最终权重布局上。
+
+Level 1 若权重不变，一次 `wake_up()` 即可，不必走 layerwise。
+
+### 3.4 Level 2 灌权重：`initialize → reload → finalize`
+
+Level 2 丢掉的是**权重内容**，不是 Parameter 对象。若醒来后再普通 `load_model`，
+`process_weights_after_loading` 常会**换掉** Parameter，ACLGraph 仍钉着旧
+`data_ptr`，结果错或踩非法地址。
+
+上游因此提供 layerwise reload——**在不换锚点的前提下**更新数值与布局。
+Ascend / Vime 复用同一套生命周期：
 
 ```text
-checkpoint / Trainer 权重（未转置）
-        │  reload + process_weights_after_loading
-        ▼
-临时运行时布局（已 transpose，可能曾换过对象）
-        │  finalize: 锚点.data.copy_(processed)
-        ▼
-原 Parameter(A)（地址不变，内容已是 NPU 布局）
-        │
-        ▼
-ACLGraph / 后续 forward 继续引用 A
+start_weight_update  →  initialize_layerwise_reload
+update_weights       →  reload / load_weights（含 process_weights_after_loading）
+finish_weight_update →  finalize_layerwise_reload
 ```
 
-### 3.2 Sleep / 分 tag wake：给这条灌权路径腾窗口
+也可用 `collective_rpc("reload_weights", ...)` 走检查点，语义仍落在这条链上。
 
-转置路径依赖「先有空的权重槽，再 load，最后再开 KV」：
+**initialize：保存快照，进入可加载态**
 
-1. **`sleep(level=2)`**  
-   丢弃 weights + kv_cache（buffers CPU 备份）。旧权重内容不要了，避免 Host 双份。
-2. **`wake_up(tags=["weights"])`**  
-   只 remap 权重虚地址（L2 下内容为空）。**此处不再转置**——槽位留给 reload。
-3. **initialize → reload → finalize**  
-   完成数值 + 转置布局 + 地址回写。
-4. **`wake_up(tags=["kv_cache"])`**  
-   再开 KV；extra cleanup 场景下此时才 recapture 图，避免半成品权重构图。
+1. 把当前每层 Parameter / buffer 记入 `kernel_tensors`（图绑定的锚点）；
+2. 按首次 load 的 metadata 恢复到 meta 占位；
+3. 包装 `weight_loader`：先缓冲，层内齐套后再 materialize + process。
 
-Level 1 权重会 offload 到 CPU 再还原，**一般不换权重、也不走这套转置 reload**；
-RL 换策略权重用 Level 2。
+直觉：钉住旧对象当锚点，逻辑层切到「准备收新权重」。
 
-`is_sleeping` 在全部 tag 醒完前仍为 `true`。
+**reload：装入新权重并做布局处理**
 
-### 3.3 Ascend 为实现这条路径做了什么
+- 数据来源：Trainer 经 HCCL / NPU IPC，或磁盘 checkpoint；
+- 层内：materialize → 原始 loader 写入 → `process_weights_after_loading`。
 
-相对「wake 里转置」的旧实现，当前路径要求：
+Ascend 上这里会做量化打包、**MoE `w13`/`w2` 的 `transpose(1, 2)`** 等，
+把 checkpoint 布局变成 `npu_grouped_matmul` 需要的运行时布局。
+转置属于加载后处理，**不应再塞进 `wake_up`**。
 
-1. **`wake_up` 删除 MoE transpose / `replace_parameter` 兜底**  
-   Sleep 只管内存与 buffer 恢复。
-2. **MoE `process_weights_after_loading` 原地更新**  
-   转置结果写回原 Parameter（保留 `weight_loader`），供 layerwise 反复 reload。
-3. **与上游生命周期对齐**  
-   HCCL 等：`start_weight_update` / `finish_weight_update` 直接调
-   `initialize_layerwise_reload` / `finalize_layerwise_reload`。
-4. **（相关）EPLB 运行时态升为 named buffer**  
-   避免 Level 2 丢弃非 buffer 的 NPU 状态导致后续挂死——与转置同属「Level 2 可恢复」问题。
+**finalize：布局落稳，地址不变**
+
+1. 补处理未 online 完的层（deferred attention、padding 等）；
+2. `param.data.copy_(processed)` 写回 initialize 保存的原 Parameter / buffer；
+3. 原对象重新挂回 module → **`data_ptr` 不变**。
+
+```text
+锚点 Parameter(A)  ←── finalize: A.data.copy_(processed)
+临时权重 (B) ────────┘
+推理图 / ACLGraph 始终引用 A
+```
+
+finalize 保证的是**对象与地址稳定**；数值来自 Trainer，运行时布局来自
+`process_weights_after_loading`。三段缺一，就又容易退回「在 wake 里补转置」之类的旁路。
 
 ## 4. 具体调用方案
 
-### 4.1 Vime 编排（与转置路径一致）
+### 4.1 Vime 编排（推荐）
 
 ```python
 engine.sleep(level=2)
 trainer.step()
 
-engine.wake_up(tags=["weights"])          # 只开权重槽，不转置
+engine.wake_up(tags=["weights"])
 
-engine.start_weight_update()              # initialize：钉锚点
-engine.update_weights(update_info)        # reload：load + process（转置）
-engine.finish_weight_update()             # finalize：布局写回原地址
+engine.start_weight_update()            # initialize
+engine.update_weights(update_info)      # reload（含布局 / 转置）
+engine.finish_weight_update()           # finalize
 
-engine.wake_up(tags=["kv_cache"])         # 再开 KV / 可选构图
+engine.wake_up(tags=["kv_cache"])
 ```
 
-检查点路径把中间三段换成：
-
-```python
-engine.collective_rpc(
-    "reload_weights",
-    kwargs={"weights_path": model_path},
-)
-```
-
-同卡建议：同步前后 `pause_generation` / `resume_generation`；按需 `reset_prefix_cache`；
-关闭 FRACTAL_NZ（`VLLM_ASCEND_ENABLE_NZ=0`，`weight_nz_mode=0`）。
+同卡建议：同步前后 `pause_generation` / `resume_generation`；Level 2 后按需
+`reset_prefix_cache`；关闭 FRACTAL_NZ（`VLLM_ASCEND_ENABLE_NZ=0`，`weight_nz_mode=0`）。
 
 ### 4.2 Online HTTP（dev mode）
 
 ```bash
 export VLLM_SERVER_DEV_MODE=1
-vllm serve <model> --enable-sleep-mode \
+vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+  --enable-sleep-mode \
+  --additional-config '{"enable_sleep_mode_extra_cleanup": true}' \
   --weight-transfer-config '{"backend": "hccl"}'
 
 curl -X POST 'http://127.0.0.1:8000/sleep?level=2'
 curl -X POST 'http://127.0.0.1:8000/wake_up?tags=weights'
 
-# 在线：/start_weight_update → /update_weights → /finish_weight_update
-# 或检查点：
+# 路径 A：检查点
 curl -X POST 'http://127.0.0.1:8000/collective_rpc' \
   -H 'Content-Type: application/json' \
-  -d '{"method":"reload_weights","kwargs":{"weights_path":"<model>"}}'
+  -d '{"method":"reload_weights","kwargs":{"weights_path":"Qwen/Qwen2.5-0.5B-Instruct"}}'
+
+# 路径 B：在线同步（见 examples/rl/rlhf_http_hccl.py）
+# POST /start_weight_update → /update_weights → /finish_weight_update
 
 curl -X POST 'http://127.0.0.1:8000/wake_up?tags=kv_cache'
+curl -X GET  'http://127.0.0.1:8000/is_sleeping'
 ```
 
-### 4.3 离线 Python
+### 4.3 离线 Python API
 
 ```python
 from vllm import LLM
 
-llm = LLM("<model>", enable_sleep_mode=True)
+llm = LLM(
+    "Qwen/Qwen2.5-0.5B-Instruct",
+    enable_sleep_mode=True,
+    additional_config={"enable_sleep_mode_extra_cleanup": True},
+)
+
 llm.sleep(level=2)
 llm.wake_up(tags=["weights"])
-llm.collective_rpc("reload_weights", kwargs={"weights_path": "<model>"})
+llm.collective_rpc("reload_weights", kwargs={"weights_path": "Qwen/Qwen2.5-0.5B-Instruct"})
 llm.wake_up(tags=["kv_cache"])
+```
+
+### 4.4 Level 1：同权重快速让卡
+
+```python
+llm.sleep(level=1)   # weights → CPU，kv 丢弃
+# ... 其它任务占用 NPU ...
+llm.wake_up()        # 无需 reload / layerwise
 ```
 
 ## 5. 实践补充
 
-1. **不要在 `wake_up` 后再手写 MoE transpose**  
-   布局应以 `process_weights_after_loading` + finalize 为准；再补一刀容易和锚点回写打架。
+1. **Sleep ≠ Weight Transfer ≠ Pause**  
+   显存让渡、权重字节、在飞请求窗口是三件事，组合用。
 
-2. **Dense / 已量化路径**  
-   无 expert 转置或由 quant method 自己处理；同样走 layerwise，只是 process 内容不同。
+2. **Level 2 下先 weights、后 kv_cache**  
+   一次 wake 全部或颠倒顺序，峰值与构图时机都不对。
 
-3. **Sleep ≠ Transfer ≠ Pause**  
-   显存让渡、权重字节、在飞请求窗口分开编排。
+3. **布局处理走 reload/process，不走 wake**  
+   MoE transpose 等应在 `process_weights_after_loading` + finalize 完成；
+   `wake_up` 只负责 remap / buffer / 通信 / 图。
 
 4. **extra cleanup**  
-   更低 sleep 显存 ↔ 更长 wakeup；图捕获仍应落在 finalize 之后的 `kv_cache` wake。
+   更低 sleep 显存 ↔ 更长 wakeup；构图落在 finalize 之后的 `kv_cache` wake。
 
 5. **管理接口仅限 `VLLM_SERVER_DEV_MODE=1`**，内网使用。
+
+6. **与 DP Router 的边界**  
+   Sleep / 权重同步直连 Engine；请求落 DP 仍走 Router。
 
 ## 6. 相关链接
 
 - [Sleep Mode Guide](sleep_mode.md)
+- 上游 [Sleep Mode](https://docs.vllm.ai/en/latest/features/sleep_mode/)
 - 上游 [Layerwise (Re)loading](https://docs.vllm.ai/en/latest/training/layerwise/)
 - 代码锚点：
-  - `vllm_ascend/ops/fused_moe/routed_experts.py` — MoE `transpose` 在 process 路径
-  - `vllm_ascend/worker/worker.py` — `sleep` / `wake_up`（无转置兜底）
+  - `vllm_ascend/worker/worker.py` — `sleep` / `wake_up` / weight update
+  - `vllm_ascend/device_allocator/camem.py` — tag offload / discard / remap
   - `vllm_ascend/distributed/weight_transfer/hccl_engine.py` — initialize / finalize
+  - `vllm_ascend/ops/fused_moe/routed_experts.py` — MoE 布局在 process 路径
+  - `vllm_ascend/device_allocator/sleep_mem_optimized.py` — extra cleanup
 - E2E：`tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py`
