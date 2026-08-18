@@ -808,9 +808,7 @@ class BaseDeviceAdaptor:
     def format_dsa_slot_mapping(slot_mapping, block_size, kv_cache_dtype: torch.dtype | None = None):
         """Format slot_mapping for metadata storage.
         Non-A5: 2D [block_idx, offset]; A5: 1D pass-through."""
-        return BaseDeviceAdaptor.build_dsa_attn_kv_plan(kv_cache_dtype).format_slot_mapping(
-            slot_mapping, block_size
-        )
+        return BaseDeviceAdaptor.build_dsa_attn_kv_plan(kv_cache_dtype).format_slot_mapping(slot_mapping, block_size)
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
@@ -1568,9 +1566,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def format_dsa_slot_mapping(slot_mapping, block_size, kv_cache_dtype: torch.dtype | None = None):
         """A5 uses block/offset mapping for BF16 and flat ids for quant KV."""
-        return A5DeviceAdaptor.build_dsa_attn_kv_plan(kv_cache_dtype).format_slot_mapping(
-            slot_mapping, block_size
-        )
+        return A5DeviceAdaptor.build_dsa_attn_kv_plan(kv_cache_dtype).format_slot_mapping(slot_mapping, block_size)
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):

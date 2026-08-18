@@ -176,9 +176,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # Lazy import: layer.py imports AscendDSABackend from dsa_v1.
         from vllm_ascend.models.layer.attention.layer import dsv4_resolve_attn_kv_dtype
 
-        requested_kv_dtype = kv_cache_dtype_str_to_dtype(
-            vllm_config.cache_config.cache_dtype, vllm_config.model_config
-        )
+        requested_kv_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
         self.attn_kv_dtype = dsv4_resolve_attn_kv_dtype(vllm_config, requested_kv_dtype)
         # Fixed for the life of the builder: SparseFlashMla vs quant choices.
         self.attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(self.attn_kv_dtype)
@@ -343,9 +341,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.seq_lens_cpu = self.common_ratio_to_sas_metadata["seq_lens_cpu"]
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-        self.slot_mapping[:num_input_tokens] = self.attn_kv_plan.format_slot_mapping(
-            slot_mapping, self.block_size
-        )
+        self.slot_mapping[:num_input_tokens] = self.attn_kv_plan.format_slot_mapping(slot_mapping, self.block_size)
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
 
