@@ -54,7 +54,9 @@ class DSAModules:
     indexer: torch.nn.Module | None
     compressor: torch.nn.Module | None
     swa_cache_layer: torch.nn.Module
+    topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
+    skip_topk: bool = False
 
 
 class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
@@ -106,7 +108,9 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         self.attn_sink = dsa_modules.attn_sink
         self.indexer = dsa_modules.indexer
         self.compressor = dsa_modules.compressor
+        self.topk_indices_buffer = dsa_modules.topk_indices_buffer
         self.indexer_rotary_emb = dsa_modules.indexer_rotary_emb
+        self.skip_topk = dsa_modules.skip_topk
         self.prefix = prefix
 
         self.swa_cache_layer = dsa_modules.swa_cache_layer
@@ -142,6 +146,8 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             attn_sink=self.attn_sink,
             eps=self.eps,
             swa_cache_layer=self.swa_cache_layer,
+            skip_topk=self.skip_topk,
+            topk_indices_buffer=self.topk_indices_buffer,
         )
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -178,7 +184,10 @@ def dsa_forward(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    attn_metadata = forward_context.attn_metadata
+    if forward_context.attn_metadata:
+        attn_metadata = filter_metadata(forward_context.attn_metadata, self.prefix)
+    else:
+        attn_metadata = forward_context.attn_metadata
 
     if attn_metadata is None:
         # Profiling run: forward() handles OTP by running _forward_o_proj on a
@@ -210,6 +219,11 @@ direct_register_custom_op(
     fake_impl=dsa_forward_fake,
     dispatch_key="PrivateUse1",
 )
+
+
+def filter_metadata(metadata, prefix):
+    # filter using prefix, sort by key for deterministic order
+    return [v for k, v in sorted(metadata.items()) if k.startswith(prefix)]
 
 
 def _build_kv_cache(self, forward_context):

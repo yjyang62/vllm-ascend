@@ -617,6 +617,8 @@ class DeepseekV4Attention(nn.Module):
             indexer=self.indexer,
             compressor=self.compressor,
             swa_cache_layer=swa_cache_layer,
+            topk_indices_buffer=topk_indices_buffer,
+            skip_topk=skip_topk,
         )
 
         self.dsa_attn = AscendDeepseekSparseAttention(
