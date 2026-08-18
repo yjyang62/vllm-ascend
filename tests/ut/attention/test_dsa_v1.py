@@ -341,7 +341,7 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
 
 
 @pytest.mark.parametrize("for_drafting", [False, True])
-def test_build_classifies_short_speculative_extends_as_decodes(
+def test_build_classifies_short_speculative_extends_as_prefills(
     for_drafting: bool,
 ):
     builder = _make_builder(compressor_ratio=1)
@@ -397,9 +397,9 @@ def test_build_classifies_short_speculative_extends_as_decodes(
                 common_ratio_to_sas_metadata={},
             )
 
-    assert metadata.num_decodes == 2
-    assert metadata.num_decode_tokens == 14
-    assert metadata.num_prefills == 0
+    assert metadata.num_decodes == 1
+    assert metadata.num_decode_tokens == 7
+    assert metadata.num_prefills == 1
 
 
 def test_build_req_metadata_preserves_zero_max_sequence_lengths():
@@ -927,7 +927,7 @@ class TestAscendDSACompressedCacheRouting:
         compress_kv_cache = torch.empty(0)
         state_cache = torch.empty(0)
 
-        with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
+        with patch.object(DsaAttnKvPlan, "kv_compress_scatter") as scatter:
             actual = impl._update_compressed_caches_and_select_topk(
                 layer_name="model.layers.0.self_attn.attn",
                 hidden_states=hidden_states,
@@ -981,7 +981,7 @@ class TestAscendDSACompressedCacheRouting:
         state_cache = torch.empty(0)
         compress_kv_cache = torch.empty(0)
 
-        with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
+        with patch.object(DsaAttnKvPlan, "kv_compress_scatter") as scatter:
             actual = impl._update_compressed_caches_and_select_topk(
                 layer_name="layer",
                 hidden_states=hidden_states,
