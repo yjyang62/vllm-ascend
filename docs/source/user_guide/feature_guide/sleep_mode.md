@@ -4,7 +4,7 @@
 
     For the RL / Vime colocated sleep–wake flow (Level 1 vs Level 2, dual
     `wake_up` tags, and upstream `initialize` / `reload` / `finalize`), see
-    [Sleep Mode Share (Vime / RL)](sleep_wakeup.md).
+    [Colocated Sleep Mode: Free Memory, Reload In Place](sleep_wakeup.md).
 
 ## Overview
 
