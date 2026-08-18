@@ -31,7 +31,7 @@ from vllm_ascend.attention.dsa_v1 import (
     _has_weight_scale,
     _is_w8a8_dynamic,
 )
-from vllm_ascend.device.device_op import BaseDeviceAdaptor, DeviceOperator
+from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor, DeviceOperator
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import AscendDeviceType
 
@@ -52,7 +52,7 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
     )
     vllm_config = SimpleNamespace(
         model_config=model_config,
-        cache_config=SimpleNamespace(cache_dtype="auto"),
+        cache_config=SimpleNamespace(cache_dtype="bfloat16"),
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=16,
             max_num_seqs=4,
@@ -66,10 +66,14 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
             "vllm_ascend.attention.dsa_v1.kv_cache_dtype_str_to_dtype",
             return_value=torch.bfloat16,
         ),
+        patch(
+            "vllm_ascend.models.layer.attention.layer.dsv4_resolve_attn_kv_dtype",
+            return_value=torch.bfloat16,
+        ),
         patch.object(
             DeviceOperator,
             "build_dsa_attn_kv_plan",
-            side_effect=BaseDeviceAdaptor.build_dsa_attn_kv_plan,
+            side_effect=A5DeviceAdaptor.build_dsa_attn_kv_plan,
         ),
     ):
         builder = AscendDSAMetadataBuilder(
@@ -510,7 +514,7 @@ def _make_impl() -> AscendDSAImpl:
         patch.object(
             DeviceOperator,
             "build_dsa_attn_kv_plan",
-            side_effect=BaseDeviceAdaptor.build_dsa_attn_kv_plan,
+            side_effect=A5DeviceAdaptor.build_dsa_attn_kv_plan,
         ),
     ):
         return AscendDSAImpl(
