@@ -23,26 +23,92 @@ def test_a5_dsa_attn_kv_plan_centralizes_sparse_flash_mla_choices():
     assert bf16_plan.sparse_attn_base_kwargs == {}
     assert bf16_plan.metadata_kwargs("npu:0") == {"device": "npu:0"}
 
-    fp8_plan = A5DeviceAdaptor.build_dsa_attn_kv_plan(torch.float8_e4m3fn)
-    assert fp8_plan.uses_sparse_flash_mla is False
-    assert fp8_plan.layout_kv == "PA_ND"
-    assert fp8_plan.requires_block_offset_slots is False
-    assert fp8_plan.pack_kv_head_dim_extra is True
-    assert fp8_plan.compressor_slot_mapping_format == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
-    assert fp8_plan.sparse_attn_base_kwargs["kv_quant_mode"] == 1
-    # A5 FP8 quant metadata matches main: kv_quant_mode only, no device=.
-    assert fp8_plan.metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
+    # Plan fields are the source of truth (no DeviceOperator thin wrappers).
+    assert bf16_plan.sparse_attn_kwargs() == {}
+    assert bf16_plan.applies_sparse_attn_runtime_kwargs is True
 
-    # Thin wrappers stay consistent with the plan.
-    assert A5DeviceAdaptor.get_dsa_kv_layout(torch.bfloat16) == bf16_plan.layout_kv
-    assert A5DeviceAdaptor.get_dsa_sparse_attn_op(torch.bfloat16) is bf16_plan.sparse_attn_op
+    with (
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_kv_quant_sparse_attn_sharedkv",
+            create=True,
+        ) as fp8_attn_op,
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_kv_quant_sparse_attn_sharedkv_metadata",
+            create=True,
+        ),
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_sparse_attn_sharedkv",
+            create=True,
+        ),
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_sparse_attn_sharedkv_metadata",
+            create=True,
+        ),
+    ):
+        fp8_plan = A5DeviceAdaptor.build_dsa_attn_kv_plan(torch.float8_e4m3fn)
+        assert fp8_plan.uses_sparse_flash_mla is False
+        assert fp8_plan.layout_kv == "PA_ND"
+        assert fp8_plan.requires_block_offset_slots is False
+        assert fp8_plan.pack_kv_head_dim_extra is True
+        assert fp8_plan.compressor_slot_mapping_format == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
+        assert fp8_plan.sparse_attn_base_kwargs["kv_quant_mode"] == 1
+        # A5 FP8 quant metadata matches main: kv_quant_mode only, no device=.
+        assert fp8_plan.metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
+        assert fp8_plan.applies_sparse_attn_runtime_kwargs is False
+        assert fp8_plan.sparse_attn_op is fp8_attn_op
 
-    base_plan = BaseDeviceAdaptor.build_dsa_attn_kv_plan(torch.bfloat16)
-    assert base_plan.uses_sparse_flash_mla is False
-    assert base_plan.layout_kv == "PA_ND"
-    assert base_plan.requires_block_offset_slots is True
-    assert base_plan.pack_kv_head_dim_extra is False
-    assert base_plan.compressor_slot_mapping_format == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+        base_plan = BaseDeviceAdaptor.build_dsa_attn_kv_plan(torch.bfloat16)
+        assert base_plan.uses_sparse_flash_mla is False
+        assert base_plan.layout_kv == "PA_ND"
+        assert base_plan.requires_block_offset_slots is True
+        assert base_plan.pack_kv_head_dim_extra is False
+        assert base_plan.compressor_slot_mapping_format == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+        assert base_plan.applies_sparse_attn_runtime_kwargs is True
+
+
+def test_add_sparse_attn_extra_kwargs_respects_plan_flag():
+    from vllm_ascend.attention.dsa_attn_kv_plan import add_sparse_attn_extra_kwargs
+
+    bf16_plan = A5DeviceAdaptor.build_dsa_attn_kv_plan(torch.bfloat16)
+    bf16_kwargs: dict = {}
+    add_sparse_attn_extra_kwargs(bf16_plan, bf16_kwargs, cu_seqlens_ori_kv=1)
+    assert bf16_kwargs == {"cu_seqlens_ori_kv": 1}
+
+    with (
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_kv_quant_sparse_attn_sharedkv",
+            create=True,
+        ),
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_kv_quant_sparse_attn_sharedkv_metadata",
+            create=True,
+        ),
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_sparse_attn_sharedkv",
+            create=True,
+        ),
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_sparse_attn_sharedkv_metadata",
+            create=True,
+        ),
+    ):
+        fp8_plan = A5DeviceAdaptor.build_dsa_attn_kv_plan(torch.float8_e4m3fn)
+        fp8_kwargs: dict = {}
+        add_sparse_attn_extra_kwargs(fp8_plan, fp8_kwargs, cu_seqlens_ori_kv=1)
+        assert fp8_kwargs == {}
+
+        base_plan = BaseDeviceAdaptor.build_dsa_attn_kv_plan(None)
+        base_kwargs: dict = {}
+        add_sparse_attn_extra_kwargs(base_plan, base_kwargs, cu_seqlens_cmp_kv=2)
+        assert base_kwargs == {"cu_seqlens_cmp_kv": 2}
 
 
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():

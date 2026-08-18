@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_attn_kv_plan import add_sparse_attn_extra_kwargs
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     maybe_save_kv_layer_to_connector,
@@ -1012,7 +1013,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # Fixed for the life of the impl: SparseFlashMla vs quant choices.
         self.attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(self.attn_kv_dtype)
         self.layout_kv = self.attn_kv_plan.layout_kv
-        self.sparse_attn_base_kwargs = dict(self.attn_kv_plan.sparse_attn_base_kwargs)
         self.compressor_slot_mapping_format = self.attn_kv_plan.compressor_slot_mapping_format
 
         # indexer param
@@ -1646,17 +1646,17 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         notify_kv_cache_written(layer_name)
         record_attention_compute_start()
         attn_op = self.attn_kv_plan.sparse_attn_op
-        extra_attn_kwargs: dict = dict(self.sparse_attn_base_kwargs)
+        extra_attn_kwargs: dict = self.attn_kv_plan.sparse_attn_kwargs()
         if has_prefill:
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
+            add_sparse_attn_extra_kwargs(
+                self.attn_kv_plan,
                 extra_attn_kwargs,
-                self.attn_kv_dtype,
                 cu_seqlens_ori_kv=actual_seq_lengths_query,
             )
         if self.compress_ratio > 1:
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
+            add_sparse_attn_extra_kwargs(
+                self.attn_kv_plan,
                 extra_attn_kwargs,
-                self.attn_kv_dtype,
                 cu_seqlens_cmp_kv=common_metadata.cu_cmp_seqlen_list,
             )
 

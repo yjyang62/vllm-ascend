@@ -655,13 +655,6 @@ def test_forward_attention_routes_unified_req_metadata(
     swa_kv_cache = torch.empty(0)
     sparse_attn_op = MagicMock(return_value=(attention_output,))
 
-    def add_extra_kwargs(
-        extra_kwargs: dict[str, Any],
-        kv_cache_dtype=None,
-        **kwargs,
-    ) -> None:
-        extra_kwargs.update(kwargs)
-
     with (
         patch.object(
             DeviceOperator,
@@ -680,11 +673,6 @@ def test_forward_attention_routes_unified_req_metadata(
             "_mla_prolog_multistream",
             return_value=(q, torch.empty(0), None),
         ) as mla_prolog,
-        patch.object(
-            DeviceOperator,
-            "add_dsa_sparse_attn_extra_kwargs",
-            side_effect=add_extra_kwargs,
-        ),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
         patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
     ):

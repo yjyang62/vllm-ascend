@@ -669,35 +669,6 @@ class BaseDeviceAdaptor:
         """A2/A3: sharedkv + PA_ND + block/offset slots (dtype does not switch path)."""
         return build_base_dsa_attn_kv_plan(kv_cache_dtype)
 
-    @classmethod
-    def get_dsa_sparse_attn_metadata_op(cls, kv_cache_dtype: torch.dtype | None = None):
-        """Returns the metadata-building operator for sparse attention."""
-        return cls.build_dsa_attn_kv_plan(kv_cache_dtype).sparse_attn_metadata_op
-
-    @classmethod
-    def get_dsa_sparse_attn_metadata_kwargs(cls, device, kv_cache_dtype: torch.dtype | None = None):
-        """Returns kwargs for sparse attention metadata builder."""
-        return cls.build_dsa_attn_kv_plan(kv_cache_dtype).metadata_kwargs(device)
-
-    @classmethod
-    def get_dsa_sparse_attn_op(cls, kv_cache_dtype: torch.dtype | None = None):
-        """Returns the sparse attention operator."""
-        return cls.build_dsa_attn_kv_plan(kv_cache_dtype).sparse_attn_op
-
-    @classmethod
-    def get_dsa_sparse_attn_base_kwargs(cls, kv_cache_dtype: torch.dtype | None = None):
-        """Returns base kwargs for sparse attention (extended by caller)."""
-        return dict(cls.build_dsa_attn_kv_plan(kv_cache_dtype).sparse_attn_base_kwargs)
-
-    @classmethod
-    def get_dsa_kv_layout(cls, kv_cache_dtype: torch.dtype | None = None):
-        return cls.build_dsa_attn_kv_plan(kv_cache_dtype).layout_kv
-
-    @classmethod
-    def get_dsa_compressor_slot_mapping_format(cls, kv_cache_dtype: torch.dtype | None = None):
-        """Slot mapping side output format consumed by the DSA scatter op."""
-        return cls.build_dsa_attn_kv_plan(kv_cache_dtype).compressor_slot_mapping_format
-
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
@@ -845,11 +816,6 @@ class BaseDeviceAdaptor:
         """Non-A5: return the cached cu_seqlens_cmp_kv tensor.
         A5 override always returns None."""
         return cmp_kv_tensor
-
-    @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, kv_cache_dtype: torch.dtype | None = None, **kwargs_to_add):
-        """Non-A5: add extra kwargs for sparse attention. A5: no-op."""
-        extra_kwargs.update(kwargs_to_add)
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_ori_kv(
@@ -1638,12 +1604,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
         """A5: cu_seqlens_cmp_kv is always None."""
         return None
-
-    @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, kv_cache_dtype: torch.dtype | None = None, **kwargs_to_add):
-        plan = A5DeviceAdaptor.build_dsa_attn_kv_plan(kv_cache_dtype)
-        if plan.uses_sparse_flash_mla:
-            extra_kwargs.update(kwargs_to_add)
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_ori_kv(
