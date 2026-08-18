@@ -154,8 +154,8 @@ Ascend 上这里会做量化打包、**MoE `w13`/`w2` 的 `transpose(1, 2)`** �
 **finalize：布局落稳，地址不变**
 
 1. 补处理未 online 完的层（deferred attention、padding 等）；
-2. `param.data.copy_(processed)` 写回 initialize 保存的原 Parameter / buffer；
-3. 原对象重新挂回 module → **`data_ptr` 不变**。
+2. `param.data.copy_(processed)` 写回 initialize 保存的原 Parameter / buffer（HF 布局转化为 runtime 布局）；
+3. 原对象重新挂回 module → **`data_ptr` 不变**（HF 布局转化为 runtime 布局）。
 
 ```text
 锚点 Parameter(A)  ←── finalize: A.data.copy_(processed)
