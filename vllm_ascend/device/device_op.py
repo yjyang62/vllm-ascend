@@ -1427,8 +1427,20 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         """Scatter KV into cache with fused quantization+compression.
         A5: kv_compress_epilog handles quant/compress/scatter internally.
         Input x is unquantized bf16; cache shape is [..., head_dim]."""
-        # Select BF16 SparseFlashMla vs quant epilog from the live cache dtype.
-        A5DeviceAdaptor.build_dsa_attn_kv_plan(cache.dtype).kv_compress_scatter(cache, x, slot_mapping)
+        # Route from the resolved attention KV dtype, not cache.dtype. On A5
+        # auto the logical KV path is FP8 even when the live tensor is tagged
+        # differently; picking SparseFlashMla from cache.dtype skips epilog.
+        from vllm.config import get_current_vllm_config
+
+        from vllm_ascend.models.layer.attention.layer import (
+            dsv4_requested_kv_cache_dtype,
+            dsv4_resolve_attn_kv_dtype,
+        )
+
+        vllm_config = get_current_vllm_config()
+        requested_kv_dtype = dsv4_requested_kv_cache_dtype(vllm_config)
+        attn_kv_dtype = dsv4_resolve_attn_kv_dtype(vllm_config, requested_kv_dtype)
+        A5DeviceAdaptor.build_dsa_attn_kv_plan(attn_kv_dtype).kv_compress_scatter(cache, x, slot_mapping)
 
     # ===== Indexer Quant + Scatter =====
 
