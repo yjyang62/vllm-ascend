@@ -23,7 +23,7 @@ Sleep Mode 的解法是：**进程不退出**，把可释放分配放进带 tag 
 
 | 组件 | 职责 |
 | --- | --- |
-| **Vime** | 编排：何时 sleep、分几次 wake、何时灌权重 |
+| **Vime** | 编排：何时 sleep / wake、何时灌权重 |
 | **vLLM（上游）** | Sleep 语义、内存 tag、`initialize → reload → finalize` |
 | **vLLM Ascend** | `CaMemAllocator`、HCCL/IPC、可选 HCCL/ACLGraph 清理、MoE 布局处理 |
 
@@ -32,7 +32,7 @@ Sleep Mode 的解法是：**进程不退出**，把可释放分配放进带 tag 
 
 ## 2. 整体流程
 
-以同卡最常见的 **Level 2 + 分 tag 唤醒 + 在线灌权重** 为例：
+以同卡最常见的 **Level 2 + 在线灌权重** 为例：
 
 ```mermaid
 sequenceDiagram
@@ -51,7 +51,7 @@ sequenceDiagram
     Vm->>Vm: train / 得到新策略权重
 
     Vm->>E: wake_up(tags=["weights"])
-    E->>N: 仅 remap 权重虚地址（内容为空）
+    E->>N: remap 权重内存
 
     Vm->>E: start_weight_update
     E->>U: initialize_layerwise_reload
@@ -74,11 +74,8 @@ sequenceDiagram
 一条因果链：
 
 ```text
-sleep 让出显存
-  → train
-  → wake(weights) 打开权重槽
-  → initialize → reload → finalize 灌入并稳住布局/地址
-  → wake(kv_cache) 再开 KV，继续 rollout
+sleep 让出显存 → train → wake / 灌权重
+  （initialize → reload → finalize）→ 继续 rollout
 ```
 
 ## 3. 原理展开
@@ -111,24 +108,9 @@ RL 同卡更新策略优先 L2，避免 Host 上再留一份旧权重。
 可选 `enable_sleep_mode_extra_cleanup`：sleep 时再拆 HCCL、清 ACLGraph workspace；
 wakeup 更慢（重建通信，并在合适时机 recapture）。
 
-### 3.3 两次 `wake_up`
+Level 1 若权重不变，`wake_up()` 后即可继续推理，不必走 layerwise。
 
-`wake_up(tags=...)` 只恢复指定 tag；`tags=None` 表示全部。全部醒完前
-`is_sleeping` 仍为 `true`。
-
-Level 2 推荐拆成两步：
-
-1. **`wake_up(tags=["weights"])`**  
-   只 remap 权重槽。L2 无 CPU backup → **同虚地址、内容为空**，专供后续灌权。
-2. **中间完成 initialize → reload → finalize**（下一节）。
-3. **`wake_up(tags=["kv_cache"])`**  
-   再开 KV，触发 `post_kv_cache_wake_up`；extra cleanup 下**此时才构图**。
-
-这样压峰值（避免 weights + kv 与训练残留叠峰），也保证图建在最终权重布局上。
-
-Level 1 若权重不变，一次 `wake_up()` 即可，不必走 layerwise。
-
-### 3.4 Level 2 灌权重：`initialize → reload → finalize`
+### 3.3 Level 2 灌权重：`initialize → reload → finalize`
 
 Level 2 丢掉的是**权重内容**，不是 Parameter 对象。若醒来后再普通 `load_model`，
 `process_weights_after_loading` 常会**换掉** Parameter，ACLGraph 仍钉着旧
@@ -251,19 +233,16 @@ llm.wake_up()        # 无需 reload / layerwise
 1. **Sleep ≠ Weight Transfer ≠ Pause**  
    显存让渡、权重字节、在飞请求窗口是三件事，组合用。
 
-2. **Level 2 下先 weights、后 kv_cache**  
-   一次 wake 全部或颠倒顺序，峰值与构图时机都不对。
-
-3. **布局处理走 reload/process，不走 wake**  
+2. **布局处理走 reload/process，不走 wake**  
    MoE transpose 等应在 `process_weights_after_loading` + finalize 完成；
    `wake_up` 只负责 remap / buffer / 通信 / 图。
 
-4. **extra cleanup**  
-   更低 sleep 显存 ↔ 更长 wakeup；构图落在 finalize 之后的 `kv_cache` wake。
+3. **extra cleanup**  
+   更低 sleep 显存 ↔ 更长 wakeup。
 
-5. **管理接口仅限 `VLLM_SERVER_DEV_MODE=1`**，内网使用。
+4. **管理接口仅限 `VLLM_SERVER_DEV_MODE=1`**，内网使用。
 
-6. **与 DP Router 的边界**  
+5. **与 DP Router 的边界**  
    Sleep / 权重同步直连 Engine；请求落 DP 仍走 Router。
 
 ## 6. 相关链接
