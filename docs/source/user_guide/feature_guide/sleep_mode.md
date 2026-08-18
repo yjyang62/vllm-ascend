@@ -1,5 +1,11 @@
 # Sleep Mode Guide
 
+!!! note
+
+    For the RL / Vime colocated sleep–wake flow (Level 1 vs Level 2, dual
+    `wake_up` tags, and upstream `initialize` / `reload` / `finalize`), see
+    [Sleep Mode Share (Vime / RL)](sleep_wakeup.md).
+
 ## Overview
 
 Sleep Mode is an API designed to offload model weights and discard KV cache from NPU memory. This functionality is essential for reinforcement learning (RL) post-training workloads, particularly in online algorithms such as PPO, GRPO, or DPO. During training, the policy model typically performs autoregressive generation using inference engines like vLLM, followed by forward and backward passes for optimization.
