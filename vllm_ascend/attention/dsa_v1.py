@@ -1403,7 +1403,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 compress_slot_mapping: torch.Tensor,
             ) -> None:
                 if compressed_kv.shape[0] > 0:
-                    DeviceOperator.dsa_kv_compress_scatter(
+                    self.attn_kv_plan.kv_compress_scatter(
                         compress_kv_cache,
                         compressed_kv,
                         compress_slot_mapping,
@@ -1430,7 +1430,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             metadata=layer_metadata.compressor,
         )
         if compressed_kv.shape[0] > 0:
-            DeviceOperator.dsa_kv_compress_scatter(
+            self.attn_kv_plan.kv_compress_scatter(
                 compress_kv_cache,
                 compressed_kv,
                 compress_slot_mapping,

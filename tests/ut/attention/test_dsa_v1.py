@@ -927,7 +927,10 @@ class TestAscendDSACompressedCacheRouting:
         compress_kv_cache = torch.empty(0)
         state_cache = torch.empty(0)
 
-        with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
+        with (
+            patch.object(DsaAttnKvPlan, "kv_compress_scatter") as scatter,
+            patch.object(DeviceOperator, "dsa_kv_compress_scatter") as device_scatter,
+        ):
             actual = impl._update_compressed_caches_and_select_topk(
                 layer_name="model.layers.0.self_attn.attn",
                 hidden_states=hidden_states,
@@ -944,6 +947,7 @@ class TestAscendDSACompressedCacheRouting:
             overlap_plan.scatter_attention_compressed_kv(actual_kv, actual_mapping)
 
         assert actual is topk_indices
+        device_scatter.assert_not_called()
         assert indexer_call.kwargs["layer_name"] == "model.layers.0.self_attn.attn"
         assert indexer_call.kwargs["hidden_states"] is hidden_states
         assert indexer_call.kwargs["qr"] is qr
@@ -981,7 +985,10 @@ class TestAscendDSACompressedCacheRouting:
         state_cache = torch.empty(0)
         compress_kv_cache = torch.empty(0)
 
-        with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
+        with (
+            patch.object(DsaAttnKvPlan, "kv_compress_scatter") as scatter,
+            patch.object(DeviceOperator, "dsa_kv_compress_scatter") as device_scatter,
+        ):
             actual = impl._update_compressed_caches_and_select_topk(
                 layer_name="layer",
                 hidden_states=hidden_states,
@@ -994,6 +1001,7 @@ class TestAscendDSACompressedCacheRouting:
             )
 
         assert actual is None
+        device_scatter.assert_not_called()
         impl.compressor.assert_called_once_with(
             hidden_states=hidden_states,
             state_cache=state_cache,
