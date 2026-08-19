@@ -14,42 +14,24 @@
 
 ## 1. 原理
 
-先把场景说清楚。强化学习（PPO / GRPO / RLHF 等）通常有两段算力：
+强化学习（PPO / GRPO / RLHF 等）包含两个阶段：
 
-1. **Rollout（推理）**：用当前策略模型生成回答 / token，跑在 vLLM Ascend 上；
-2. **Train（训练）**：用这些样本算 loss、反传，更新策略参数，跑在 Trainer（如 Vime）上。
+1. **Rollout**：策略模型在 vLLM Ascend 上做自回归生成；
+2. **Train**：Trainer（如 Vime）基于生成样本更新策略参数。
 
-**同卡**的意思是：这两段**共用同一批 NPU**，不是各占一套卡。于是时间上只能轮流用：
+**同卡训推**指两个阶段共享同一组 NPU。Rollout 期间引擎占用模型权重与 KV cache；进入 Train 前需释放这部分显存，否则训练侧无法完成 forward / backward。Train 结束后策略参数已更新，须写回推理引擎，供下一轮 Rollout 使用。
 
-```text
-时刻 A：推理占用 NPU
-  - vLLM 里放着模型权重
-  - 还有生成用的 KV cache
-  - 这时训练很难再塞进去，显存不够
+若每次通过销毁并重建 vLLM 进程完成切换，通信组与图捕获等状态均需重建，开销较大。Sleep Mode 在**不退出进程**的前提下完成显存让渡与权重回写：
 
-时刻 B：要训练了
-  - 必须先把推理占着的显存腾出来（至少 KV，往往连权重也要让）
-  - Trainer 才能在这批 NPU 上做 forward / backward
-
-时刻 C：训练结束，策略参数已经变了
-  - 下一轮 rollout 必须用**新权重**
-  - 所以要把 Trainer 里的新参数写回 vLLM，再继续生成
-```
-
-如果每次都「杀掉 vLLM 进程 → 训练 → 再拉起 vLLM 重新 load」，能用，但太慢：
-进程、通信组、图捕获都要重建。Sleep Mode 就是为这个同卡切换准备的：
-
-> **vLLM 进程不退出**；先 sleep 把推理显存让出来；训练完再 wake，
-> 并把新权重灌回去，接着 rollout。
+> sleep 释放推理显存 → Train → wake 并灌入新权重 → 继续 Rollout。
 
 | 组件 | 职责 |
 | --- | --- |
-| **Vime** | 编排：何时 sleep / wake、何时灌权重 |
+| **Vime** | 编排 sleep / wake 与权重同步时机 |
 | **vLLM（上游）** | Sleep 语义、内存 tag、`initialize → reload → finalize` |
 | **vLLM Ascend** | `CaMemAllocator`、HCCL/IPC、可选 HCCL/ACLGraph 清理、MoE 布局处理 |
 
-启用 `enable_sleep_mode` 后，权重与 KV 的分配进入 sleep 池。之后「让出 / 要回」
-显存，本质是对池内 handle 做 **unmap / remap**；Vime 只调上游控制面。
+启用 `enable_sleep_mode` 后，权重与 KV 分配进入 sleep 内存池；显存让渡与恢复通过对池内 handle 的 **unmap / remap** 完成，由 Vime 调用上游控制面接口。
 
 ### 1.1 Level 1 与 Level 2
 
