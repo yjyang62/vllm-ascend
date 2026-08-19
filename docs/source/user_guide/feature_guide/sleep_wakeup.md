@@ -1,16 +1,16 @@
 # 同卡训推的 Sleep Mode：让出显存，原地换权
 
-!!! note
-
-    本文讲 RL / 同卡训推下的 **Sleep Mode 流程与原理**。Vime 复用上游 vLLM
-    的 sleep / wake，Level 2 灌权重时走 `initialize → reload → finalize`；
-    Ascend 承接 NPU 内存与权重传输。基础 API 见 [Sleep Mode Guide](sleep_mode.md)。
-
-    上游参考：
-
-    - [Sleep Mode](https://docs.vllm.ai/en/latest/features/sleep_mode/)
-    - [Layerwise (Re)loading](https://docs.vllm.ai/en/latest/training/layerwise/)
-    - Ascend 示例：`examples/rl/rlhf_http_hccl.py`、`examples/rl/rlhf_http_npu_ipc.py`
+> **说明**  
+> 本文讲 RL / 同卡训推下的 **Sleep Mode 流程与原理**。Vime 复用上游 vLLM
+> 的 sleep / wake，Level 2 灌权重时走 `initialize → reload → finalize`；
+> Ascend 承接 NPU 内存与权重传输。基础 API 见
+> [Sleep Mode Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/sleep_mode.html)。
+>
+> 上游参考：
+>
+> - [Sleep Mode](https://docs.vllm.ai/en/latest/features/sleep_mode/)
+> - [Layerwise (Re)loading](https://docs.vllm.ai/en/latest/training/layerwise/)
+> - Ascend 示例：`examples/rl/rlhf_http_hccl.py`、`examples/rl/rlhf_http_npu_ipc.py`
 
 ## 1. 原理
 
@@ -254,7 +254,7 @@ llm.wake_up()        # 无需 reload / layerwise
 
 ## 6. 相关链接
 
-- [Sleep Mode Guide](sleep_mode.md)
+- [Sleep Mode Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/sleep_mode.html)
 - 上游 [Sleep Mode](https://docs.vllm.ai/en/latest/features/sleep_mode/)
 - 上游 [Layerwise (Re)loading](https://docs.vllm.ai/en/latest/training/layerwise/)
 - 代码锚点：
