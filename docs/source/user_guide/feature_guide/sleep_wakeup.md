@@ -14,12 +14,33 @@
 
 ## 1. 原理
 
-同卡 RL（PPO / GRPO / RLHF 等）里，rollout 与训练轮流占用同一批 NPU：
-推理侧占着**权重 + KV cache**，训练步要腾显存，训完还要把**新策略权重**灌回引擎。
+先把场景说清楚。强化学习（PPO / GRPO / RLHF 等）通常有两段算力：
 
-Sleep Mode 的解法是：**进程不退出**，把可释放分配放进带 tag 的内存池
-（`weights` / `kv_cache`），按级别 sleep / wake；需要换权重时，
-再用上游 layerwise 生命周期原地更新，而不是杀进程重建 Engine。
+1. **Rollout（推理）**：用当前策略模型生成回答 / token，跑在 vLLM Ascend 上；
+2. **Train（训练）**：用这些样本算 loss、反传，更新策略参数，跑在 Trainer（如 Vime）上。
+
+**同卡**的意思是：这两段**共用同一批 NPU**，不是各占一套卡。于是时间上只能轮流用：
+
+```text
+时刻 A：推理占用 NPU
+  - vLLM 里放着模型权重
+  - 还有生成用的 KV cache
+  - 这时训练很难再塞进去，显存不够
+
+时刻 B：要训练了
+  - 必须先把推理占着的显存腾出来（至少 KV，往往连权重也要让）
+  - Trainer 才能在这批 NPU 上做 forward / backward
+
+时刻 C：训练结束，策略参数已经变了
+  - 下一轮 rollout 必须用**新权重**
+  - 所以要把 Trainer 里的新参数写回 vLLM，再继续生成
+```
+
+如果每次都「杀掉 vLLM 进程 → 训练 → 再拉起 vLLM 重新 load」，能用，但太慢：
+进程、通信组、图捕获都要重建。Sleep Mode 就是为这个同卡切换准备的：
+
+> **vLLM 进程不退出**；先 sleep 把推理显存让出来；训练完再 wake，
+> 并把新权重灌回去，接着 rollout。
 
 | 组件 | 职责 |
 | --- | --- |
