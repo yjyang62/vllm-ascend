@@ -83,7 +83,15 @@ Level 1 调用见文末示例。
    装入新数值并做 `process_weights_after_loading`（含 MoE 等 runtime 布局）；
    `finish_weight_update` 将结果写回原地址，保证图绑定的 `data_ptr` 不变。
 5. **`wake_up(tags=["kv_cache"])`**  
-   再分配 KV cache；必要时 recapture ACLGraph，然后进入下一轮 Rollout。
+   再分配 KV cache；开启 extra cleanup 时在此 `recapture` ACLGraph，然后进入下一轮
+   Rollout。
+
+拆成两次 `wake_up` 的原因：
+
+- **压峰值**：若 weights 与 kv_cache 同时唤醒，再叠加灌权临时缓冲 / Trainer 残留，
+  同卡大模型易 OOM；先只开权重槽，灌完后再开 KV，峰值更可控。
+- **正确性**：KV 与 ACLGraph 应建立在 finalize 之后的最终权重布局上；先构图再改权重
+  会绑到半成品或错误地址。extra cleanup 下构图也 deliberately 落在 `kv_cache` 这次 wake。
 
 对应时序如下：
 
