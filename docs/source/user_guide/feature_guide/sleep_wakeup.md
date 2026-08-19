@@ -55,8 +55,17 @@ Level 1 权重不变时，`wake_up()` 后即可继续推理。
 因此下文流程图与 layerwise 展开都只画 **Level 2**——这是 Vime 换权路径；
 Level 1 调用见文末示例。
 
-可选 `enable_sleep_mode_extra_cleanup`：sleep 时再拆 HCCL、清 ACLGraph workspace；
-wakeup 更慢（重建通信，并在合适时机 recapture）。
+### 1.2 `enable_sleep_mode_extra_cleanup`
+
+默认 sleep 仅释放 sleep 内存池管理的分配。同卡 RL 若需进一步把显存归还训练侧，
+可通过 `additional_config` 打开 `enable_sleep_mode_extra_cleanup`：
+
+- **sleep**：清理 ACLGraph attention workspace 并失效已捕获图；等待 PP 发送完成后
+  同步 NPU，并销毁 HCCL 进程组；
+- **wake**：重建 HCCL、刷新 MoE dispatcher 元数据；在权重与状态就绪后按需
+  `capture_model()` 重新构图。
+
+这是显存占用与唤醒时延的权衡：同卡显存紧张时可开启；更看重唤醒延迟时保持默认关闭。
 
 ## 2. 整体流程（Level 2）
 
