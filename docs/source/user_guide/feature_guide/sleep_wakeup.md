@@ -265,16 +265,50 @@ Ascend 上这里会做量化打包、**MoE `w13`/`w2` 的 `transpose(1, 2)`** �
 **finalize：布局落稳，地址不变**
 
 1. **补处理未 online 完的层（deferred attention、padding 等）**  
-   reload 时「权重到齐 → 立刻 process」并不覆盖全部层，典型残留由 finalize 收尾：
+   reload 时的理想路径是：某层权重「到齐」→ 立刻 `_layerwise_process`（materialize +
+   `process_weights_after_loading`）。但有两类层走不通这条路，必须留到 finalize。
 
-   - **Deferred attention**：如带 KV scale 的 Attention 层。online 路径会显式跳过
-     （`is_deferred_attention_layer`），因 `k_scale` / `v_scale` 等需在其它层就绪后，
-     再于 finalize 里统一 `_finalize_attention_layer` / `_reload_attention_scales`。
-   - **Padding 导致载入量不足**：层参数按对齐创建了略大的 storage（含 padding），
-     但 checkpoint 只写入有效元素，于是一直 `load_numel < load_numel_total`，
-     online 条件达不到「到齐」。finalize 识别这类 Delayed 层并补做 process。
+   **例子 A：Deferred attention（故意推迟）**
 
-   若不做这步收尾，这些层会停留在未处理或半处理状态。
+   以带 KV 量化 scale 的 Attention 为例。checkpoint / Trainer 会送来
+   `k_scale`、`v_scale` 等。online loader 每装入一个参数就累加 `load_numel`，但对
+   `is_deferred_attention_layer(layer)==True` 的层会**直接 return**，即使数量到齐也
+   **不**调用 `_layerwise_process`。
+
+   原因：attention 的 `process_weights_after_loading` 依赖更完整的上下文（例如要等
+   相关线性层就绪，并按 `model_config.dtype` 处理 scale）。若在 reload 中途就 process，
+   scale 与其它权重的时序容易错。因此代码把这类层收集起来，等所有非 attention 层
+   处理完后，在 finalize 末尾统一跑 `_finalize_attention_layer` /
+   `_reload_attention_scales`。
+
+   ```text
+   reload 中途：
+     Linear / MoE 层 → 到齐就 process（online）
+     Attention 层   → 只缓冲权重，跳过 process   ← deferred
+
+   finalize 末尾：
+     再处理所有 deferred Attention（补 scale + process）
+   ```
+
+   **例子 B：Padding（计数永远到不齐）**
+
+   某些层创建 Parameter 时按硬件对齐多开了元素。例如有效权重 1000 个元素，但
+   storage 按对齐分配成 1024（多出 24 个 padding 槽）。`load_numel_total=1024`，
+   而 checkpoint 只写入有效的 1000 → 累加后 `load_numel=1000 < 1024`。
+
+   online 触发条件是 `load_numel >= load_numel_total`，这里永远不成立，于是该层在
+   reload 阶段一直处于「装了一部分、还没 process」。finalize 识别
+   `0 < load_numel < load_numel_total`，补做 `_layerwise_process`。
+
+   ```text
+   创建：weight.shape 对应 1024 元素（含 pad）
+   载入：checkpoint 只写 1000 有效元素
+   online：1000 >= 1024？否 → 不 process
+   finalize：发现 Delayed → 补 process
+   ```
+
+   两类共同点：reload 结束时它们仍未完成（或未开始）布局处理；finalize 负责收尾，
+   否则这些层会带着未 process / 半 process 的状态进入后续推理。
 
 2. **`param.data.copy_(processed)` 写回 initialize 保存的原 Parameter / buffer**  
    reload / process 得到的是已完成 **HF / checkpoint 布局 → runtime 布局** 的结果（如 MoE `transpose`、量化重排）。这些结果可能暂存在临时 Parameter 上。此处把数值 **copy 进 initialize 快照里的原 storage**，使锚点对象持有最终 runtime 布局内容，而不是换掉对象本身。
