@@ -205,8 +205,9 @@ Ascend 上这里会做量化打包、**MoE `w13`/`w2` 的 `transpose(1, 2)`** �
 推理图 / ACLGraph 始终引用 A（地址不变，内容已是 runtime 布局）
 ```
 
-finalize 保证的是**对象与地址稳定**；数值来自 Trainer，运行时布局来自
-`process_weights_after_loading`。三段缺一，就又容易退回「在 wake 里补转置」之类的旁路。
+finalize 保证的是**对象与地址稳定**：数值来自 Trainer，运行时布局来自
+`process_weights_after_loading`，地址来自 initialize 保存的锚点。三段缺一，
+就又容易退回「在 wake 里补转置」之类的旁路。
 
 ## 4. 具体调用方案
 
