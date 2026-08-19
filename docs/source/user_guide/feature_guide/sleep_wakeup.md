@@ -91,7 +91,7 @@ Level 1 调用见文末示例。
 - **压峰值**：若 weights 与 kv_cache 同时唤醒，再叠加灌权临时缓冲 / Trainer 残留，
   同卡大模型易 OOM；先只开权重槽，灌完后再开 KV，峰值更可控。
 - **正确性**：KV 与 ACLGraph 应建立在 finalize 之后的最终权重布局上；先构图再改权重
-  会绑到半成品或错误地址。extra cleanup 下构图也 deliberately 落在 `kv_cache` 这次 wake。
+  会绑到半成品或错误地址。extra cleanup 下构图也刻意落在 `kv_cache` 这次 wake。
 
 对应时序如下：
 
