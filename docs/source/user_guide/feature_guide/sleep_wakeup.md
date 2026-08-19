@@ -119,15 +119,58 @@ sleep(level=2) 让出显存 → train → wake / 灌权重
 
 ### 3.1 内存池与 tag
 
-`CaMemAllocator`（Ascend；上游 GPU 为 CuMem）给分配打 tag。sleep / wake 并不删
-Python 侧模型对象，而是：
+启用 `enable_sleep_mode` 后，模型权重与 KV cache 不走普通 NPU 分配器，而在
+**sleep 内存池**中分配。Ascend 实现为 `CaMemAllocator`（上游 GPU 侧为 CuMem）。
+池内每次分配带一个 **tag**，用于 sleep / wake 时按类处理：
 
-- **unmap**：物理页归还（内容丢弃，或先拷到 CPU）；
+| tag | 典型内容 | sleep 行为 |
+| --- | --- | --- |
+| `weights` | 模型参数所在块 | L1：拷到 Host 再 unmap；L2：直接丢弃内容并 unmap |
+| `kv_cache` | KV 块 | 丢弃并 unmap |
+| `sleep_persistent` | 必须跨 sleep 存活的少数分配 | **不** offload、**不**释放 |
+
+sleep / wake **不删除** Python 侧的 `nn.Parameter` / module 对象，只对池内 handle 做：
+
+- **unmap**：归还物理页（内容丢弃，或 L1 权重先拷到 CPU）；
 - **remap**：按原 handle 再 map，**虚地址尽量保持稳定**。
 
-因此 `nn.Parameter` 对象仍在，图捕获记住的 `data_ptr` 仍可能对上——这是后面
-layerwise「更新数值、不换锚点」的前提。RoPE 等 `named_buffers` 在 sleep 前
-CPU clone、wake 后写回；个别必须跨 sleep 存活的分配可用 `sleep_persistent`。
+因此 Parameter 对象仍在，图捕获记住的 `data_ptr` 在 remap 后仍可对齐——这是
+layerwise「更新数值、不换锚点」的前提。
+
+**Parameter 与 `register_buffer`**
+
+模块上的 NPU 张量通常分两类：
+
+1. **`nn.Parameter`**：可训练权重，多在 `weights` tag 下分配；L2 丢弃内容后靠
+   reload / layerwise 写回。
+2. **buffer（`register_buffer`）**：非参数状态，但仍挂在 module 上，可通过
+   `named_buffers()` 遍历。常见如 RoPE 的 `cos_sin_cache`，以及 Ascend MoE
+   为 Level 2 可恢复而提升的运行时态（如 `log2phy`、`moe_load`）。
+
+Ascend Worker 在 sleep 前会对 `model.named_buffers()` 做 **CPU clone**，wake 后再
+`copy_` 回设备。因此：只有通过 `register_buffer` 注册的张量，才会进入这条
+备份 / 恢复路径。
+
+若把 NPU 状态只挂成普通 Python 属性（`self.foo = tensor`），则：
+
+- 不会出现在 `named_buffers()` 中，sleep 不会 CPU 备份；
+- Level 2 discard 后设备 storage 已失效，后续仍访问该属性会踩非法地址
+  （例如早期 EPLB 的 `log2phy` 挂死问题）。
+
+正确做法是 `self.register_buffer(name, tensor)`（或 Ascend 侧
+`_promote_attr_to_buffer`），把它纳入 named buffer 生命周期，与 sleep / wake 对齐。
+
+```text
+register_buffer("log2phy", t)
+        │
+        ▼
+named_buffers() 可见
+        │
+sleep: CPU clone ──► wake: copy_ 回原 buffer
+```
+
+个别既不能丢、也不适合走 named buffer 备份的分配，可打 `sleep_persistent` tag，
+sleep 时保持 mapped。
 
 ### 3.2 Level 2 灌权重：`initialize → reload → finalize`
 
