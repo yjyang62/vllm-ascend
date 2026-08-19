@@ -148,11 +148,25 @@ finish_weight_update →  finalize_layerwise_reload
 
 **initialize：保存快照，进入可加载态**
 
-1. 把当前每层 Parameter / buffer 记入 `kernel_tensors`（图绑定的锚点）；
-2. 按首次 load 的 metadata 恢复到 meta 占位；
-3. 包装 `weight_loader`：先缓冲，层内齐套后再 materialize + process。
+1. **把当前每层 Parameter / buffer 记入 `kernel_tensors`**  
+   ACLGraph / CUDA Graph 捕获时绑定的是这些 Parameter 的 storage 地址
+   （`data_ptr`）。先把对象引用存成快照，作为后续回写的**锚点**；后面无论
+   中间加载是否换过临时 tensor，最终都要把结果写回这些原对象。
 
-直觉：钉住旧对象当锚点，逻辑层切到「准备收新权重」。
+2. **按首次 load 的 metadata 恢复到 meta 占位**  
+   首次建模时 `record_metadata_for_reloading` 已记下每层参数的名称、shape、
+   dtype 等元信息。此处按该元信息把层参数切到 **meta device** 上的占位形态，
+   相当于卸下当前 NPU 上的旧内容视图，使层重新处于「可被 weight_loader 装载」
+   的状态，同时避免与即将到来的新权重在设备内存上冲突。
+
+3. **包装 `weight_loader`：先缓冲，层内齐套后再 materialize + process**  
+   一层往往有多个参数（如 `qkv` / `o_proj`，或 MoE 的 `w13` / `w2`）。包装后的
+   loader 不立刻做完整后处理，而是把本次载入的权重先缓存；等该层约定数量的
+   权重到齐后，再一次性：materialize 到目标 device → 写入 → 调用
+   `process_weights_after_loading`（量化、MoE transpose 等）。这样保证布局处理
+   看到的是完整一层，而不是半成品。
+
+目标：钉住原 Parameter 作锚点，同时把逻辑层切到可安全接收新权重的加载态。
 
 **reload：装入新权重并做布局处理**
 
