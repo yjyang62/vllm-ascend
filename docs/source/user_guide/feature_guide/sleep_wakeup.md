@@ -180,7 +180,16 @@ Ascend 上这里会做量化打包、**MoE `w13`/`w2` 的 `transpose(1, 2)`** �
 **finalize：布局落稳，地址不变**
 
 1. **补处理未 online 完的层（deferred attention、padding 等）**  
-   reload 阶段并非所有层都能在「权重到齐」时立刻 process 完：attention 常需等其它层就绪后再处理；部分层因 padding / 分片，实际载入元素数小于创建参数量，也会被推迟。finalize 负责收尾这些残留层，避免留下未处理或半处理状态。
+   reload 时「权重到齐 → 立刻 process」并不覆盖全部层，典型残留由 finalize 收尾：
+
+   - **Deferred attention**：如带 KV scale 的 Attention 层。online 路径会显式跳过
+     （`is_deferred_attention_layer`），因 `k_scale` / `v_scale` 等需在其它层就绪后，
+     再于 finalize 里统一 `_finalize_attention_layer` / `_reload_attention_scales`。
+   - **Padding 导致载入量不足**：层参数按对齐创建了略大的 storage（含 padding），
+     但 checkpoint 只写入有效元素，于是一直 `load_numel < load_numel_total`，
+     online 条件达不到「到齐」。finalize 识别这类 Delayed 层并补做 process。
+
+   若不做这步收尾，这些层会停留在未处理或半处理状态。
 
 2. **`param.data.copy_(processed)` 写回 initialize 保存的原 Parameter / buffer**  
    reload / process 得到的是已完成 **HF / checkpoint 布局 → runtime 布局** 的结果（如 MoE `transpose`、量化重排）。这些结果可能暂存在临时 Parameter 上。此处把数值 **copy 进 initialize 快照里的原 storage**，使锚点对象持有最终 runtime 布局内容，而不是换掉对象本身。
