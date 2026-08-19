@@ -257,7 +257,7 @@ llm.wake_up()        # 无需 reload / layerwise
    `wake_up` 只负责 remap / buffer / 通信 / 图。
 
 3. **extra cleanup**  
-   更低 sleep 显存 ↔ 更长 wakeup。
+   见 [1.2](#12-enable_sleep_mode_extra_cleanup)：更低 sleep 显存 ↔ 更长 wakeup。
 
 4. **管理接口仅限 `VLLM_SERVER_DEV_MODE=1`**，内网使用。
 
