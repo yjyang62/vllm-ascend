@@ -3483,7 +3483,16 @@ class NPUModelRunner(GPUModelRunner):
         """
         # If force_attention is True, we always capture attention, Otherwise,
         # it only happens for cudagraph_runtime_mode=FULL.
-        return force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL
+        if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            return True
+        # DSA/compress models must always build fresh metadata for idle
+        # execute_dummy_batch() runs. Without this, FULL_DECODE_ONLY (and
+        # enforce-eager where ACL graphs are disabled) skip metadata
+        # construction, so stale block-table / slot-mapping from the previous
+        # real request can be fed to DSA kernels on the next dummy forward.
+        # That fault often surfaces asynchronously later in MoE MC2 combine
+        # (e.g. MoeDistributeCombineV3 / 507035) on dp>1 + EP deployments.
+        return self.use_compress and not is_profile
 
     @torch.inference_mode()
     def _dummy_run(
@@ -3657,6 +3666,14 @@ class NPUModelRunner(GPUModelRunner):
             if self.use_compress:
                 self.positions.fill_(127)
                 self._dsa_positions_cpu_buf.fill_(127)
+                # Idle/graph-capture dummy runs do not go through
+                # _prepare_inputs(), so clear stale DSA block-table /
+                # slot-mapping from the previous real request before
+                # metadata construction (see #9818).
+                for kv_cache_gid in range(len(self.kv_cache_config.kv_cache_groups)):
+                    blk_table = self.input_batch.block_table[kv_cache_gid]
+                    blk_table.get_device_tensor().fill_(0)
+                    blk_table.slot_mapping.gpu.fill_(0)
             attn_metadata, _ = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,
                 num_tokens_padded=num_tokens_padded,
@@ -5228,6 +5245,27 @@ class NPUModelRunner(GPUModelRunner):
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=(self.compilation_config.static_forward_context),
         )
+
+    def shutdown(self) -> None:
+        """Best-effort cleanup that tolerates an already-aborted NPU device."""
+        try:
+            from vllm_ascend.compilation import acl_graph
+
+            for wrapper in list(acl_graph._acl_graph_wrappers):
+                wrapper.concrete_aclgraph_entries.clear()
+                wrapper.first_run_finished = False
+        except Exception:
+            logger.exception("NPUModelRunner shutdown: failed to clear ACL graphs")
+
+        try:
+            super().shutdown()
+        except RuntimeError as exc:
+            logger.warning(
+                "NPUModelRunner shutdown: upstream cleanup failed after device error: %s",
+                exc,
+            )
+        except Exception:
+            logger.exception("NPUModelRunner shutdown: unexpected upstream cleanup failure")
 
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
