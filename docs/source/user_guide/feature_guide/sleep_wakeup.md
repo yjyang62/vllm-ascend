@@ -179,14 +179,21 @@ Ascend 上这里会做量化打包、**MoE `w13`/`w2` 的 `transpose(1, 2)`** �
 
 **finalize：布局落稳，地址不变**
 
-1. 补处理未 online 完的层（deferred attention、padding 等）；
-2. `param.data.copy_(processed)` 写回 initialize 保存的原 Parameter / buffer（HF 布局转化为 runtime 布局）；
-3. 原对象重新挂回 module → **`data_ptr` 不变**（HF 布局转化为 runtime 布局）。
+1. **补处理未 online 完的层（deferred attention、padding 等）**  
+   reload 阶段并非所有层都能在「权重到齐」时立刻 process 完：attention 常需等其它层就绪后再处理；部分层因 padding / 分片，实际载入元素数小于创建参数量，也会被推迟。finalize 负责收尾这些残留层，避免留下未处理或半处理状态。
+
+2. **`param.data.copy_(processed)` 写回 initialize 保存的原 Parameter / buffer**  
+   reload / process 得到的是已完成 **HF / checkpoint 布局 → runtime 布局** 的结果（如 MoE `transpose`、量化重排）。这些结果可能暂存在临时 Parameter 上。此处把数值 **copy 进 initialize 快照里的原 storage**，使锚点对象持有最终 runtime 布局内容，而不是换掉对象本身。
+
+3. **原对象重新挂回 module → `data_ptr` 不变**  
+   将快照中的原 Parameter / buffer 重新 `register` 回对应 module 属性。模块对外仍暴露同一批对象，**`data_ptr` 与图捕获时一致**；ACLGraph / 后续 forward 继续引用原地址，读到的已是 runtime 布局后的新权重。
+
+目标：完成 HF → runtime 的布局落地，同时保证图绑定的 Parameter 身份与地址不变。
 
 ```text
-锚点 Parameter(A)  ←── finalize: A.data.copy_(processed)
+锚点 Parameter(A)  ←── finalize: A.data.copy_(processed runtime 布局)
 临时权重 (B) ────────┘
-推理图 / ACLGraph 始终引用 A
+推理图 / ACLGraph 始终引用 A（地址不变，内容已是 runtime 布局）
 ```
 
 finalize 保证的是**对象与地址稳定**；数值来自 Trainer，运行时布局来自
