@@ -226,8 +226,12 @@ engine.finish_weight_update()           # finalize
 engine.wake_up(tags=["kv_cache"])
 ```
 
-同卡建议：同步前后 `pause_generation` / `resume_generation`；Level 2 后按需
-`reset_prefix_cache`；关闭 FRACTAL_NZ（`VLLM_ASCEND_ENABLE_NZ=0`，`weight_nz_mode=0`）。
+同卡建议：
+
+- 权重同步（`start/update/finish_weight_update` 或 `reload_weights`）**开始前**
+  `pause_generation`，**结束后**再 `resume_generation`，避免在飞请求读到半更新权重；
+- Level 2 后按需 `reset_prefix_cache`，避免沿用旧权重下的 prefix；
+- 关闭 FRACTAL_NZ（`VLLM_ASCEND_ENABLE_NZ=0`，`weight_nz_mode=0`）。
 
 ### 4.2 Online HTTP（dev mode）
 
