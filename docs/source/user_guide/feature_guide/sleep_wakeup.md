@@ -69,7 +69,23 @@ Level 1 调用见文末示例。
 
 ## 2. 整体流程（Level 2）
 
-RL 同卡换权的完整路径：
+同卡换权按时间顺序可概括为五步：
+
+1. **Rollout 结束，执行 `sleep(level=2)`**  
+   丢弃权重与 KV cache 内容，释放 NPU 显存；`named_buffers` 先 CPU 备份；若开启
+   extra cleanup，可一并释放 HCCL / ACLGraph workspace。显存归还 Trainer。
+2. **Train**  
+   在同一组 NPU 上完成训练，得到更新后的策略参数。
+3. **`wake_up(tags=["weights"])`**  
+   仅 remap 权重内存槽（内容为空），为灌权准备地址稳定的写入目标；此时仍不分配 KV。
+4. **灌入新权重：`initialize → reload → finalize`**  
+   `start_weight_update` 钉住原 Parameter 锚点；`update_weights` / `reload_weights`
+   装入新数值并做 `process_weights_after_loading`（含 MoE 等 runtime 布局）；
+   `finish_weight_update` 将结果写回原地址，保证图绑定的 `data_ptr` 不变。
+5. **`wake_up(tags=["kv_cache"])`**  
+   再分配 KV cache；必要时 recapture ACLGraph，然后进入下一轮 Rollout。
+
+对应时序如下：
 
 ```mermaid
 sequenceDiagram
@@ -108,11 +124,8 @@ sequenceDiagram
     Vm->>E: 下一轮 rollout
 ```
 
-一条因果链：
-
 ```text
-sleep(level=2) 让出显存 → train → wake / 灌权重
-  （initialize → reload → finalize）→ 继续 rollout
+sleep(level=2) → Train → wake(weights) → initialize/reload/finalize → wake(kv_cache) → Rollout
 ```
 
 ## 3. 原理展开
