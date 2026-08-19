@@ -86,12 +86,20 @@ Level 1 调用见文末示例。
    再分配 KV cache；开启 extra cleanup 时在此 `recapture` ACLGraph，然后进入下一轮
    Rollout。
 
-拆成两次 `wake_up` 的原因：
+拆成两次 `wake_up` 的原因（与是否构图无关，构图只是额外约束）：
 
-- **压峰值**：若 weights 与 kv_cache 同时唤醒，再叠加灌权临时缓冲 / Trainer 残留，
-  同卡大模型易 OOM；先只开权重槽，灌完后再开 KV，峰值更可控。
-- **正确性**：KV 与 ACLGraph 应建立在 finalize 之后的最终权重布局上；先构图再改权重
-  会绑到半成品或错误地址。extra cleanup 下构图也刻意落在 `kv_cache` 这次 wake。
+- **灌权不需要 KV，却需要权重槽**  
+  `initialize → reload → finalize` 只读写权重相关 storage。先
+  `wake_up(tags=["weights"])` 得到地址稳定的空权重槽即可开始灌权；此时分配 KV
+  没有任何收益，只是提前占住一大块显存。
+- **压峰值**  
+  灌权过程本身还有临时开销（按层 materialize、缓冲、`process_weights_after_loading`
+  中的 transpose / 重排等）。若 KV 已与权重槽同时占用，峰值 ≈ 权重 + KV + 灌权临时内存，
+  同卡场景极易 OOM。先只保留权重槽完成灌权，临时内存释放后再
+  `wake_up(tags=["kv_cache"])`，峰值更低。
+- **开启 extra cleanup 时的构图时机**  
+  ACLGraph 应捕获 finalize 之后的最终权重；因此 recapture 落在第二次
+  `wake_up(tags=["kv_cache"])`，避免绑到半成品权重。
 
 对应时序如下：
 
