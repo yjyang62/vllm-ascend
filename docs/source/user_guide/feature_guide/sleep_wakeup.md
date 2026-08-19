@@ -77,7 +77,20 @@ Level 1 调用见文末示例。
 2. **Train**  
    在同一组 NPU 上完成训练，得到更新后的策略参数。
 3. **`wake_up(tags=["weights"])`**  
-   仅 remap 权重内存槽（内容为空），为灌权准备地址稳定的写入目标；此时仍不分配 KV。
+   仅恢复 `weights` tag，具体操作为：
+
+   1. **`CaMemAllocator.wake_up(tags=["weights"])`**  
+      遍历池内 tag=`weights` 的分配：`create_and_map(handle)` 把物理页重新映射到
+      sleep 前的虚地址。Level 2 无 CPU backup → 得到**同地址、内容为空**的权重槽；
+      Level 1 若有 backup 则会 `memcpy` 回 Host 上的旧权重。`kv_cache` 分配本步不碰。
+   2. **恢复 `named_buffers`（若 sleep 时做过 CPU clone）**  
+      将 RoPE / EPLB 等 buffer 从 Host 备份 `copy_` 回设备。
+   3. **不调用 `post_kv_cache_wake_up`**  
+      因 tags 不含 `kv_cache`。
+   4. **extra cleanup 时**  
+      可重建 HCCL；**不** `capture_model()`（构图推迟到 `kv_cache` 那次 wake）。
+
+   本步结束后：权重槽地址就绪、内容待灌；KV 仍未占用。
 4. **灌入新权重：`initialize → reload → finalize`**  
    `start_weight_update` 钉住原 Parameter 锚点；`update_weights` / `reload_weights`
    装入新数值并做 `process_weights_after_loading`（含 MoE 等 runtime 布局）；
