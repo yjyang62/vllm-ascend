@@ -32,6 +32,7 @@ from vllm.platforms import Platform, PlatformEnum
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.triton_gluon_compat import install_triton_gluon_compat
 
 # isort: off
 from vllm_ascend.utils import (
@@ -51,6 +52,10 @@ from vllm_ascend.utils import (
     is_310p,
     enable_sp,
 )
+
+# Must run before vLLM continues into vllm.triton_utils. NVIDIA gluon
+# shipped by triton 3.5.0 cannot import under triton-ascend 3.2.x.
+install_triton_gluon_compat()
 
 # Since vllm-project/vllm#43746, DeepSeek V4 model classes no longer
 # carry @support_torch_compile. This makes vLLM auto-enable the breakable
