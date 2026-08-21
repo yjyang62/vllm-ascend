@@ -28,6 +28,35 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * Import-time Shield (not applied via adapt_patch):
+# ===================================================
+# ** File: vllm_ascend/triton_gluon_compat.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `triton.experimental.gluon` / `triton.experimental.gluon.language`
+#      `triton.language.core._aggregate`
+#    Why:
+#       Upstream vLLM imports NVIDIA-only gluon whenever HAS_TRITON is true.
+#       triton-ascend 3.2.x pulls triton==3.5.0, whose gluon imports
+#       `constexpr_type` from `triton.language.core`. The triton-ascend overlay
+#       of language.core does not provide that symbol, so `vllm serve` crashes
+#       during `import vllm.config` — before engine init. Reinstalling
+#       triton-ascend==3.2.1 does not help because pip reinstalls triton 3.5.0.
+#    How:
+#       Called from `vllm_ascend/__init__.py` at plugin discovery (and again
+#       from `vllm_ascend.platform` import). Always runs when gluon cannot
+#       import — including when `VLLM_VERSION=0.26.0` is set for local vLLM
+#       main trees. Installs a package placeholder (`__path__` + `.language`)
+#       so both `from triton.experimental import gluon` and
+#       `from triton.experimental.gluon import language` succeed, while
+#       HAS_TRITON stays true for real triton-ascend kernels.
+#    Related PR (if no, explain why):
+#       No, this is an Ascend packaging incompatibility with upstream vLLM's
+#       eager NVIDIA gluon import. Long-term fix is upstream wrapping that
+#       import in try/except.
+#    Future Plan:
+#       Remove this shield when upstream vLLM guards the gluon import, or when
+#       triton-ascend ships a language.core that provides constexpr_type.
+#
 # * Platform Patch:
 # =================
 # Entries are listed in alphabetical order by file name.
