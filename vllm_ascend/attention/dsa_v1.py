@@ -920,7 +920,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
             batch_size=num_reqs,
-            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compressor_ratio),
+            cmp_ratio=1,
             ori_mask_mode=4,
             cmp_mask_mode=3,
             ori_win_left=ori_win_left,
