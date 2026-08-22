@@ -6,6 +6,7 @@ from unittest import mock
 import torch
 
 from vllm_ascend.attention.dsa_kv_mode import DSV4_EXPLICIT_BF16_KV_KEY, uses_explicit_bf16_kv
+from vllm_ascend.attention.dsa_v1 import _dsa_o_proj_matmul
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.device.device_op import (
     DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
@@ -72,3 +73,11 @@ def test_a5_explicit_bf16_selectors_use_sparse_flash_mla():
             A5DeviceAdaptor.format_dsa_slot_mapping(flat_slots, 128),
             torch.tensor([[0, 5], [-1, -1]], dtype=torch.int32),
         )
+
+
+def test_a5_bf16_o_proj_matmul_matches_grouped_einsum():
+    o_proj_input = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    weight = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+    output = _dsa_o_proj_matmul(o_proj_input, weight, num_groups=3)
+    expected = torch.einsum("tgd,grd->tgr", o_proj_input, weight.view(3, 2, 4))
+    torch.testing.assert_close(output, expected)
