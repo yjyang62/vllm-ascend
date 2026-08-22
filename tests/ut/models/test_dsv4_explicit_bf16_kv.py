@@ -37,10 +37,7 @@ def test_mode_without_current_vllm_config_defaults_to_fp8():
 def test_a5_fp8_selectors_remain_identical_to_main():
     flat_slots = torch.tensor([5, -1], dtype=torch.int32)
     with mock.patch("vllm_ascend.device.device_op.uses_explicit_bf16_kv", return_value=False):
-        assert (
-            A5DeviceAdaptor.get_dsa_sparse_attn_op()
-            is torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
-        )
+        assert A5DeviceAdaptor.get_dsa_sparse_attn_op() is torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
         assert (
             A5DeviceAdaptor.get_dsa_sparse_attn_metadata_op()
             is torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
@@ -64,10 +61,7 @@ def test_a5_explicit_bf16_selectors_use_sparse_flash_mla():
         assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_op() is sparse_flash_mla_metadata
         assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"device": "npu:0"}
         assert A5DeviceAdaptor.get_dsa_sparse_attn_base_kwargs() == {}
-        assert (
-            A5DeviceAdaptor.get_dsa_compressor_slot_mapping_format()
-            == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
-        )
+        assert A5DeviceAdaptor.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
         assert A5DeviceAdaptor.get_dsa_layout_kv() == "PA_BBND"
         assert A5DeviceAdaptor.dsa_requires_block_offset_slots()
         torch.testing.assert_close(
