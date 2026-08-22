@@ -115,8 +115,10 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         elif get_ascend_device_type() in {AscendDeviceType.A5}:
             self.dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-        cached_head_size = self.head_dim if use_bf16_kv else (
-            self.head_dim + 128 if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_dim
+        cached_head_size = (
+            self.head_dim
+            if use_bf16_kv
+            else (self.head_dim + 128 if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_dim)
         )
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,

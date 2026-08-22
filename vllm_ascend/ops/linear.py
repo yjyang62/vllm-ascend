@@ -463,9 +463,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             and uses_explicit_bf16_kv()
             and self.quant_config is None
         )
-        if "wo_a" in self.prefix and (
-            get_ascend_device_type() != AscendDeviceType.A5 or reshape_a5_bf16_wo_a
-        ):
+        if "wo_a" in self.prefix and (get_ascend_device_type() != AscendDeviceType.A5 or reshape_a5_bf16_wo_a):
             if self.weight.ndim == 2:
                 super().weight_loader(param, loaded_weight)
                 self.weight.data = (
