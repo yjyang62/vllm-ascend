@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_kv_mode import uses_explicit_bf16_kv
 from vllm_ascend.attention.dsa_v1 import (
+    _dsa_o_proj_matmul,
     _has_weight_scale,
     build_dspark_swa_indices,
     get_dspark_sparse_sas_window,
@@ -551,7 +552,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seqlen_q=max_local_query_len,
             max_seqlen_kv=max_local_seq_lens,
             batch_size=num_reqs,
-            cmp_ratio=1,
+            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compressor_ratio),
             ori_mask_mode=4,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
@@ -1486,6 +1487,12 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 if olora_tp_enable():
                     o_proj_input = self.wo_a(o_proj_input)
+                elif get_ascend_device_type() == AscendDeviceType.A5 and uses_explicit_bf16_kv():
+                    o_proj_input = _dsa_o_proj_matmul(
+                        o_proj_input,
+                        self._get_batched_wo_a_weight(o_proj_groups),
+                        o_proj_groups,
+                    )
                 else:
                     # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
                     # o = torch.einsum("tgd,grd->tgr", o, wo_a)
@@ -1697,7 +1704,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             seqused_kv=local_seq_lengths_key,
             sinks=self.attn_sink,
             softmax_scale=self.softmax_scale,
-            cmp_ratio=max(self.compress_ratio, 1),
+            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compress_ratio),
             ori_mask_mode=4,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,

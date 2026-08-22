@@ -696,6 +696,10 @@ class BaseDeviceAdaptor:
     def dsa_requires_block_offset_slots():
         return True
 
+    @staticmethod
+    def get_dsa_swa_only_cmp_ratio(compress_ratio):
+        return max(compress_ratio, 1)
+
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
@@ -1490,6 +1494,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def dsa_requires_block_offset_slots():
         return uses_explicit_bf16_kv()
+
+    @staticmethod
+    def get_dsa_swa_only_cmp_ratio(compress_ratio):
+        if uses_explicit_bf16_kv() and compress_ratio <= 1:
+            return 0
+        return max(compress_ratio, 1)
 
     # ===== SWA / Compressor KV Scatter =====
 
