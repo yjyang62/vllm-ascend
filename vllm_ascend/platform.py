@@ -960,6 +960,21 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
         )
 
     if model_config and hasattr(model_config.hf_text_config, "index_topk"):
+        from vllm_ascend.attention.dsa_kv_mode import DSV4_EXPLICIT_BF16_KV_KEY
+
+        requested_cache_dtype = vllm_config.cache_config.cache_dtype
+        additional_config.setdefault(
+            DSV4_EXPLICIT_BF16_KV_KEY,
+            get_ascend_device_type() == AscendDeviceType.A5
+            and requested_cache_dtype == "bfloat16",
+        )
+        logger.info(
+            "DeepSeek-V4 attention KV mode: %s (requested cache dtype: %s)",
+            "BF16 SparseFlashMla"
+            if additional_config[DSV4_EXPLICIT_BF16_KV_KEY]
+            else "main-compatible FP8",
+            requested_cache_dtype,
+        )
         vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
 
     # Update compilation mode in some cases

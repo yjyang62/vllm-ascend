@@ -13,7 +13,10 @@ from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, Att
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_kv_mode import uses_explicit_bf16_kv
 from vllm_ascend.attention.dsa_v1 import (
+    _dsa_o_proj_matmul,
+    _has_weight_scale,
     build_dspark_swa_indices,
     get_dspark_sparse_sas_window,
 )
@@ -234,10 +237,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
-        else:
+        if DeviceOperator.dsa_requires_block_offset_slots():
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
+        else:
+            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.spec_slot_mapping = [
@@ -549,12 +552,12 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seqlen_q=max_local_query_len,
             max_seqlen_kv=max_local_seq_lens,
             batch_size=num_reqs,
-            cmp_ratio=1,
+            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compressor_ratio),
             ori_mask_mode=4,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv=DeviceOperator.get_dsa_layout_kv(),
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -969,7 +972,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 ori_win_left=self.model_config.hf_config.sliding_window - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_layout_kv(),
                 has_ori_kv=True,
             )
 
@@ -1456,7 +1459,10 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self._switch_o_proj_to_full_weight()
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
-            if get_ascend_device_type() in {AscendDeviceType.A5}:
+            use_a5_quant_o_proj = get_ascend_device_type() == AscendDeviceType.A5 and (
+                not uses_explicit_bf16_kv() or _has_weight_scale(self.wo_a)
+            )
+            if use_a5_quant_o_proj:
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
                 if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
@@ -1481,6 +1487,12 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 if olora_tp_enable():
                     o_proj_input = self.wo_a(o_proj_input)
+                elif get_ascend_device_type() == AscendDeviceType.A5 and uses_explicit_bf16_kv():
+                    o_proj_input = _dsa_o_proj_matmul(
+                        o_proj_input,
+                        self._get_batched_wo_a_weight(o_proj_groups),
+                        o_proj_groups,
+                    )
                 else:
                     # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
                     # o = torch.einsum("tgd,grd->tgr", o, wo_a)
@@ -1692,12 +1704,12 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             seqused_kv=local_seq_lengths_key,
             sinks=self.attn_sink,
             softmax_scale=self.softmax_scale,
-            cmp_ratio=max(self.compress_ratio, 1),
+            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compress_ratio),
             ori_mask_mode=4,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv=DeviceOperator.get_dsa_layout_kv(),
             **extra_attn_kwargs,
         )
 

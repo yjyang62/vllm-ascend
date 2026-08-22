@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_kv_mode import uses_explicit_bf16_kv
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     maybe_save_kv_layer_to_connector,
@@ -77,6 +78,27 @@ def _is_w8a8_dynamic(linear) -> bool:
         return False
     inner_method = getattr(quant_method, "quant_method", None)
     return isinstance(inner_method, AscendW8A8DynamicLinearMethod)
+
+
+def _has_weight_scale(linear) -> bool:
+    return getattr(linear, "weight_scale", None) is not None
+
+
+def _dsa_o_proj_matmul(
+    o_proj_input: torch.Tensor,
+    weight: torch.Tensor,
+    num_groups: int,
+) -> torch.Tensor:
+    """Grouped A5 BF16 o_proj without the quantized batch-matmul kernel."""
+    if weight.ndim == 2:
+        grouped_weight = weight.view(num_groups, -1, weight.shape[-1]).transpose(1, 2)
+    elif weight.ndim == 3 and weight.shape[0] == num_groups:
+        grouped_weight = weight
+        if grouped_weight.shape[1] != o_proj_input.shape[-1]:
+            grouped_weight = grouped_weight.transpose(1, 2)
+    else:
+        raise ValueError(f"Unexpected DSA wo_a weight shape: {tuple(weight.shape)}")
+    return torch.matmul(o_proj_input.transpose(0, 1), grouped_weight).transpose(0, 1)
 
 
 class AscendDSABackend(AttentionBackend):
@@ -338,10 +360,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
-        else:
+        if DeviceOperator.dsa_requires_block_offset_slots():
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
+        else:
+            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.spec_slot_mapping = [
@@ -592,7 +614,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             tp_size = get_tensor_model_parallel_world_size()
             n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
             index_topk = self.model_config.hf_config.index_topk
-            cmp_ratio = 1 if self.compressor_ratio <= 1 else 4 if self.compressor_ratio == 4 else 128
+            cmp_ratio = (
+                DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compressor_ratio)
+                if self.compressor_ratio <= 1
+                else 4
+                if self.compressor_ratio == 4
+                else 128
+            )
             metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
             sas_metadata = metadata_op(
@@ -615,7 +643,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 ori_win_left=self.model_config.hf_config.sliding_window - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=DeviceOperator.get_dsa_layout_kv(),
                 has_ori_kv=True,
                 has_cmp_kv=self.compressor_ratio > 1,
             )
@@ -892,13 +920,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
             batch_size=num_reqs,
-            cmp_ratio=1,
+            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compressor_ratio),
             ori_mask_mode=4,
             cmp_mask_mode=3,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv=DeviceOperator.get_dsa_layout_kv(),
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -1016,6 +1044,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+        if self.multistream_dsv4_dsa_overlap and uses_explicit_bf16_kv():
+            self.multistream_dsv4_dsa_overlap = False
 
     def _get_layer_metadata(
         self,
@@ -1079,7 +1109,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
         # + quantized batch matmul). Preserve it as-is: it predates and is
         # orthogonal to the OTP / olora_tp paths below, so it must win first.
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        use_a5_quant_o_proj = get_ascend_device_type() == AscendDeviceType.A5 and (
+            not uses_explicit_bf16_kv() or _has_weight_scale(self.wo_a)
+        )
+        if use_a5_quant_o_proj:
             o = o_proj_input
             o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
             o = torch_npu.npu_transpose_quant_batchmatmul(
@@ -1167,16 +1200,19 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             o_proj_input = self.wo_a(o_proj_input)
             output[...] = self.wo_b(o_proj_input)
         else:
-            o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                o_proj_input,
-                self.wo_a.weight,
-                bias=None,
-                scale=None,
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-                batch_split_factor=1,
-            )
+            if get_ascend_device_type() == AscendDeviceType.A5 and uses_explicit_bf16_kv():
+                o_proj_input = _dsa_o_proj_matmul(o_proj_input, self.wo_a.weight, self.n_local_groups)
+            else:
+                o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                    o_proj_input,
+                    self.wo_a.weight,
+                    bias=None,
+                    scale=None,
+                    perm_x1=(1, 0, 2),
+                    perm_x2=(0, 1, 2),
+                    perm_y=(1, 0, 2),
+                    batch_split_factor=1,
+                )
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
             output[...] = self.wo_b(o_proj_input)
         return output
@@ -1567,12 +1603,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             sinks=self.attn_sink,
             metadata=common_metadata.sas_metadata,
             softmax_scale=self.softmax_scale,
-            cmp_ratio=max(self.compress_ratio, 1),
+            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compress_ratio),
             ori_mask_mode=4,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv=DeviceOperator.get_dsa_layout_kv(),
         )
 
         if self.compress_ratio <= 1:

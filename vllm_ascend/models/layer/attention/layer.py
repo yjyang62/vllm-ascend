@@ -19,6 +19,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from vllm_ascend.attention.dsa_kv_mode import uses_explicit_bf16_kv
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC128Backend,
@@ -31,7 +32,7 @@ from vllm_ascend.utils import (
 )
 
 
-def get_dsv4_block_sizes():
+def get_dsv4_block_sizes(attn_kv_dtype: torch.dtype | None = None):
     # cache_config.block_size: [mla, swa, c4 state, c128 state], [page_size_padded_t1, page_size_padded_t2]
     _DSV4_BLOCK_SIZES = {
         128: [[128, 128, 8, 32], [16640, 131072]],
@@ -43,13 +44,27 @@ def get_dsv4_block_sizes():
         64: [[64, 64, 4, 8], [8448, 40960]],
         32: [[32, 32, 2, 4], [4224, 20480]],
     }
+    _DSV4_BLOCK_SIZES_A5_BF16 = {
+        128: [[128, 128, 8, 16], [16896, 131072]],
+        64: [[64, 64, 4, 8], [8448, 65536]],
+        32: [[32, 32, 2, 4], [4224, 32768]],
+    }
     if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if attn_kv_dtype == torch.bfloat16:
+            return _DSV4_BLOCK_SIZES_A5_BF16
         return _DSV4_BLOCK_SIZES_A5
     else:
         return _DSV4_BLOCK_SIZES
 
 
 DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
+
+
+def dsv4_attn_kv_dtype(vllm_config: VllmConfig, default_dtype: torch.dtype) -> torch.dtype:
+    """Resolve attention KV without changing main's non-BF16 behavior."""
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        return torch.bfloat16 if uses_explicit_bf16_kv(vllm_config) else torch.float8_e4m3fn
+    return default_dtype
 
 
 class DSAAttention(nn.Module, AttentionLayerBase):
@@ -178,14 +193,17 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        use_bf16_kv = get_ascend_device_type() == AscendDeviceType.A5 and uses_explicit_bf16_kv(vllm_config)
+        if use_bf16_kv:
+            kv_cache_dtype = torch.bfloat16
+        elif get_ascend_device_type() in {AscendDeviceType.A5}:
             kv_cache_dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
-        cached_head_size = (
+        cached_head_size = self.head_size if use_bf16_kv else (
             (self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size
         )
-        storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
+        storage_block_size = get_dsv4_block_sizes(kv_cache_dtype)[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
             # The scheduler operates in raw-token units. Ascend kernels keep
             # using the compressed page exposed by storage_block_size.

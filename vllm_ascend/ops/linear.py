@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.attention.dsa_kv_mode import uses_explicit_bf16_kv
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.quantization.tp_weight_switch import TPWeightGatherSpec, TPWeightSwitchMixin
 from vllm_ascend.utils import (
@@ -456,7 +457,15 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        if "wo_a" in self.prefix and get_ascend_device_type() != AscendDeviceType.A5:
+        reshape_a5_bf16_wo_a = (
+            "wo_a" in self.prefix
+            and get_ascend_device_type() == AscendDeviceType.A5
+            and uses_explicit_bf16_kv()
+            and self.quant_config is None
+        )
+        if "wo_a" in self.prefix and (
+            get_ascend_device_type() != AscendDeviceType.A5 or reshape_a5_bf16_wo_a
+        ):
             if self.weight.ndim == 2:
                 super().weight_loader(param, loaded_weight)
                 self.weight.data = (

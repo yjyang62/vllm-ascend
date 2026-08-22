@@ -55,9 +55,10 @@ class AscendCompressorStateCache(CompressorStateCache):
         self.block_size = block_size
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
+        from vllm_ascend.models.layer.attention.layer import dsv4_attn_kv_dtype, get_dsv4_block_sizes
 
-        pads = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][1]
+        attn_kv_dtype = dsv4_attn_kv_dtype(vllm_config, torch.bfloat16)
+        pads = get_dsv4_block_sizes(attn_kv_dtype)[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
         return AscendSlidingWindowMLASpec(
