@@ -24,6 +24,14 @@ def test_explicit_bf16_mode_is_opt_in():
     assert not uses_explicit_bf16_kv(SimpleNamespace(additional_config={}))
 
 
+def test_mode_without_current_vllm_config_defaults_to_fp8():
+    with mock.patch(
+        "vllm.config.get_current_vllm_config",
+        side_effect=AssertionError("Current vLLM config is not set"),
+    ):
+        assert not uses_explicit_bf16_kv()
+
+
 def test_a5_fp8_selectors_remain_identical_to_main():
     flat_slots = torch.tensor([5, -1], dtype=torch.int32)
     with mock.patch("vllm_ascend.device.device_op.uses_explicit_bf16_kv", return_value=False):
