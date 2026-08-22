@@ -7,8 +7,8 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
 )
+from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
-from vllm_ascend.ops.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 
 
 def test_a5_dsa_attn_kv_plan_centralizes_sparse_flash_mla_choices():
@@ -369,7 +369,7 @@ def test_a5_bf16_format_and_scatter_pass_minus1_directly():
 def test_sparse_flash_mla_requires_cann_9_2():
     import sys
 
-    import vllm_ascend.ops.sparse_flash_mla as sparse_flash_mla_mod
+    import vllm_ascend.attention.sparse_flash_mla as sparse_flash_mla_mod
 
     sparse_flash_mla_mod._get_sparse_flash_mla_ops.cache_clear()
     # sys.modules[name] = None makes `import name` raise ImportError.
@@ -388,7 +388,7 @@ def test_sparse_flash_mla_wrappers_adapt_dsa_kwargs():
     seqused_kv = torch.tensor([10, 65], dtype=torch.int32)
 
     with mock.patch(
-        "vllm_ascend.ops.sparse_flash_mla._get_sparse_flash_mla_ops",
+        "vllm_ascend.attention.sparse_flash_mla._get_sparse_flash_mla_ops",
         return_value=(attention_op, metadata_op),
     ):
         metadata = sparse_flash_mla_metadata(

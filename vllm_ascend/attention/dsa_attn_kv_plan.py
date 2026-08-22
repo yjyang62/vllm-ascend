@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import torch
 
-from vllm_ascend.ops.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
+from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
