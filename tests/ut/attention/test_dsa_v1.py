@@ -77,7 +77,7 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
     )
     with (
         patch(
-            "vllm_ascend.attention.dsa_v1.kv_cache_dtype_str_to_dtype",
+            "vllm_ascend.models.layer.attention.layer.dsv4_requested_kv_cache_dtype",
             return_value=torch.bfloat16,
         ),
         patch(
@@ -585,7 +585,7 @@ def _make_impl() -> AscendDSAImpl:
             ),
         ),
         patch(
-            "vllm_ascend.attention.dsa_v1.kv_cache_dtype_str_to_dtype",
+            "vllm_ascend.models.layer.attention.layer.dsv4_requested_kv_cache_dtype",
             return_value=torch.bfloat16,
         ),
         patch.object(

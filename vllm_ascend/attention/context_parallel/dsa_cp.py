@@ -9,7 +9,6 @@ import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -183,9 +182,12 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # Match AscendDSACPImpl / pre-cfe764c67 builder: resolve attn KV dtype
         # from request/config, not kv_cache_spec.dtype (TP>1 BF16 capture).
         # Lazy import: layer.py imports AscendDSABackend from dsa_v1.
-        from vllm_ascend.models.layer.attention.layer import dsv4_resolve_attn_kv_dtype
+        from vllm_ascend.models.layer.attention.layer import (
+            dsv4_requested_kv_cache_dtype,
+            dsv4_resolve_attn_kv_dtype,
+        )
 
-        requested_kv_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+        requested_kv_dtype = dsv4_requested_kv_cache_dtype(vllm_config)
         self.attn_kv_dtype = dsv4_resolve_attn_kv_dtype(vllm_config, requested_kv_dtype)
         # Fixed for the life of the builder: SparseFlashMla vs quant choices.
         self.attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(self.attn_kv_dtype)
@@ -1128,11 +1130,12 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.vllm_config = get_current_vllm_config()
         # Attention KV dtype for SparseFlashMla / DSA (not indexer_kv_dtype).
         # Lazy import: layer.py imports AscendDSABackend from dsa_v1.
-        from vllm_ascend.models.layer.attention.layer import dsv4_resolve_attn_kv_dtype
-
-        requested_kv_dtype = kv_cache_dtype_str_to_dtype(
-            self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
+        from vllm_ascend.models.layer.attention.layer import (
+            dsv4_requested_kv_cache_dtype,
+            dsv4_resolve_attn_kv_dtype,
         )
+
+        requested_kv_dtype = dsv4_requested_kv_cache_dtype(self.vllm_config)
         self.attn_kv_dtype = dsv4_resolve_attn_kv_dtype(self.vllm_config, requested_kv_dtype)
         # Fixed for the life of the impl: SparseFlashMla vs quant choices.
         self.attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(self.attn_kv_dtype)

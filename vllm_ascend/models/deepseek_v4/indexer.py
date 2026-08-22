@@ -103,10 +103,14 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # Indexer cache stays quantized on A5 even when attention KV is BF16.
-        # Do not rewrite vllm_config.cache_config.cache_dtype here — that would
-        # poison the BF16 SparseFlashMla attention path.
         self.dtype = _dsv4_indexer_kv_dtype()
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            from vllm_ascend.models.layer.attention.layer import dsv4_uses_bf16_sparse_flash_mla
+
+            if not dsv4_uses_bf16_sparse_flash_mla(vllm_config):
+                # Preserve main's FP8 normalization without poisoning explicit
+                # BF16 attention KV (the indexer itself remains FP8).
+                vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES

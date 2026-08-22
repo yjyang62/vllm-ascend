@@ -62,29 +62,29 @@ def get_dsv4_block_sizes(attn_kv_dtype: torch.dtype | None = None):
 DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
 
 
+def dsv4_uses_bf16_sparse_flash_mla(vllm_config: VllmConfig) -> bool:
+    """Whether the original A5 request explicitly selected BF16 attention KV."""
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    return bool(additional_config.get("dsv4_use_bf16_sparse_flash_mla", False))
+
+
 def dsv4_requested_kv_cache_dtype(vllm_config: VllmConfig) -> torch.dtype:
     """Resolve the user/model-requested KV cache dtype from cache config."""
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        return torch.bfloat16 if dsv4_uses_bf16_sparse_flash_mla(vllm_config) else torch.float8_e4m3fn
     return kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
 
 
 def dsv4_resolve_attn_kv_dtype(vllm_config: VllmConfig, non_a5_dtype: torch.dtype) -> torch.dtype:
     """Resolve SWA/compress attention KV dtype (``attn_kv_dtype``).
 
-    On A5, SparseFlashMla is used only for an explicit BF16 request
-    (``--kv-cache-dtype bfloat16``). ``auto`` and other values stay on FP8.
-    Never mutate ``vllm_config.cache_config.cache_dtype`` here.
+    On A5, SparseFlashMla is used only when the platform recorded an explicit
+    BF16 request. ``auto`` and FP8 retain main's legacy FP8 normalization.
     Indexer KV is separate — see ``_dsv4_indexer_kv_dtype`` / indexer_kv_dtype.
     """
     if get_ascend_device_type() != AscendDeviceType.A5:
         return non_a5_dtype
-    raw_cache_dtype = vllm_config.cache_config.cache_dtype
-    # "auto" follows model dtype via kv_cache_dtype_str_to_dtype (usually BF16),
-    # but A5 default attention KV must remain FP8 unless the user opts in.
-    if raw_cache_dtype in (None, "auto"):
-        return torch.float8_e4m3fn
-    if dsv4_requested_kv_cache_dtype(vllm_config) == torch.bfloat16:
-        return torch.bfloat16
-    return torch.float8_e4m3fn
+    return torch.bfloat16 if dsv4_uses_bf16_sparse_flash_mla(vllm_config) else torch.float8_e4m3fn
 
 
 class DSAAttention(nn.Module, AttentionLayerBase):
@@ -219,6 +219,9 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(kv_cache_dtype)
         cached_head_size = self.head_size + 128 if attn_kv_plan.pack_kv_head_dim_extra else self.head_size
         storage_block_size = get_dsv4_block_sizes(kv_cache_dtype)[vllm_config.cache_config.block_size][0][0]
+        if get_ascend_device_type() == AscendDeviceType.A5 and not attn_kv_plan.uses_sparse_flash_mla:
+            # Preserve main's FP8 configuration state for downstream workers.
+            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
         return AscendMLAAttentionSpec(
             # The scheduler operates in raw-token units. Ascend kernels keep
             # using the compressed page exposed by storage_block_size.
@@ -228,5 +231,5 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             model_version="deepseek_v4",
             compress_ratio=self.compress_ratio,
-            cache_dtype_str=str(kv_cache_dtype).replace("torch.", ""),
+            cache_dtype_str=vllm_config.cache_config.cache_dtype,
         )

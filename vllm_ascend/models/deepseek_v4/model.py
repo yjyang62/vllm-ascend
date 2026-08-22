@@ -117,6 +117,9 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         self.dtype = _dsv4_resolve_attn_kv_dtype(vllm_config, self.dtype)
         use_bf16 = get_ascend_device_type() == AscendDeviceType.A5 and self.dtype == torch.bfloat16
+        if get_ascend_device_type() == AscendDeviceType.A5 and not use_bf16:
+            # Match main's legacy FP8 state for all non-BF16 requests.
+            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
         cached_head_size = (
             self.head_dim
             if use_bf16
@@ -128,7 +131,7 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
             head_size=cached_head_size,
             dtype=self.dtype,
             sliding_window=self.window_size,
-            cache_dtype_str=str(self.dtype).replace("torch.", ""),
+            cache_dtype_str=vllm_config.cache_config.cache_dtype,
             model_version="deepseek_v4",
             alignment=None,
         )

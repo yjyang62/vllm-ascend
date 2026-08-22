@@ -22,6 +22,7 @@ def _vllm_config(cache_dtype: str, model_dtype: torch.dtype = torch.bfloat16):
     return SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype=cache_dtype, block_size=128),
         model_config=SimpleNamespace(dtype=model_dtype),
+        additional_config={"dsv4_use_bf16_sparse_flash_mla": cache_dtype == "bfloat16"},
     )
 
 
@@ -99,7 +100,7 @@ def test_a5_auto_swa_spec_stays_fp8_not_sparse_flash_mla():
 
     assert spec.dtype == torch.float8_e4m3fn
     assert spec.head_size == 512 + 128
-    assert vllm_config.cache_config.cache_dtype == "auto"
+    assert vllm_config.cache_config.cache_dtype == "float8_e4m3fn"
 
 
 def test_swa_get_kv_cache_spec_keeps_a5_bf16_and_does_not_mutate_cache_config():

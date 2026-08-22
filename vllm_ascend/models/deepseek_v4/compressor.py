@@ -35,7 +35,6 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
@@ -172,9 +171,12 @@ class Compressor(nn.Module):
             )
 
         from vllm_ascend.device.device_op import DeviceOperator
-        from vllm_ascend.models.layer.attention.layer import dsv4_resolve_attn_kv_dtype
+        from vllm_ascend.models.layer.attention.layer import (
+            dsv4_requested_kv_cache_dtype,
+            dsv4_resolve_attn_kv_dtype,
+        )
 
-        requested_kv_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+        requested_kv_dtype = dsv4_requested_kv_cache_dtype(vllm_config)
         self.attn_kv_plan = DeviceOperator.build_dsa_attn_kv_plan(
             dsv4_resolve_attn_kv_dtype(vllm_config, requested_kv_dtype)
         )
