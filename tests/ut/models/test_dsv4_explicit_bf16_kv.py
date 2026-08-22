@@ -12,6 +12,7 @@ from vllm_ascend.device.device_op import (
     DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
     A5DeviceAdaptor,
+    BaseDeviceAdaptor,
 )
 
 
@@ -73,6 +74,23 @@ def test_a5_explicit_bf16_selectors_use_sparse_flash_mla():
             A5DeviceAdaptor.format_dsa_slot_mapping(flat_slots, 128),
             torch.tensor([[0, 5], [-1, -1]], dtype=torch.int32),
         )
+
+
+def test_swa_only_cmp_ratio_matches_main_outside_bf16():
+    # Every non-BF16 caller previously computed max(compress_ratio, 1) inline,
+    # so the helper must reproduce it for both adaptors.
+    for compress_ratio in (0, 1, 4, 128):
+        expected = max(compress_ratio, 1)
+        assert BaseDeviceAdaptor.get_dsa_swa_only_cmp_ratio(compress_ratio) == expected
+        with mock.patch("vllm_ascend.device.device_op.uses_explicit_bf16_kv", return_value=False):
+            assert A5DeviceAdaptor.get_dsa_swa_only_cmp_ratio(compress_ratio) == expected
+
+
+def test_swa_only_cmp_ratio_drops_compression_for_bf16_swa():
+    with mock.patch("vllm_ascend.device.device_op.uses_explicit_bf16_kv", return_value=True):
+        assert A5DeviceAdaptor.get_dsa_swa_only_cmp_ratio(0) == 0
+        assert A5DeviceAdaptor.get_dsa_swa_only_cmp_ratio(1) == 0
+        assert A5DeviceAdaptor.get_dsa_swa_only_cmp_ratio(4) == 4
 
 
 def test_a5_bf16_o_proj_matmul_matches_grouped_einsum():
