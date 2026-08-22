@@ -218,10 +218,23 @@ def test_build_qli_metadata_parameters_cache_and_builder_buffer():
 
 
 @pytest.mark.parametrize("num_prefills", [0, 1])
+@pytest.mark.parametrize(
+    ("uses_sparse_flash_mla", "expected_treat_short_extends_as_decodes"),
+    [
+        (False, True),
+        (True, False),
+    ],
+)
 def test_build_req_metadata_uses_for_prefill_and_decode(
     num_prefills: int,
+    uses_sparse_flash_mla: bool,
+    expected_treat_short_extends_as_decodes: bool,
 ):
     builder = _make_builder()
+    builder.attn_kv_plan = replace(
+        builder.attn_kv_plan,
+        uses_sparse_flash_mla=uses_sparse_flash_mla,
+    )
     metadata_cache: dict[str, Any] = {}
     query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
     seq_lens_cpu = torch.tensor([8, 6], dtype=torch.int32)
@@ -255,7 +268,7 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
         patch(
             "vllm_ascend.attention.dsa_v1.split_decodes_and_prefills",
             return_value=(2, 0, 3, 0) if num_prefills == 0 else (1, 1, 1, 2),
-        ),
+        ) as split_op,
         patch.object(
             DeviceOperator,
             "format_dsa_slot_mapping",
@@ -292,6 +305,11 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
         )
 
     rope_op.assert_called_once()
+    split_op.assert_called_once()
+    assert (
+        split_op.call_args.kwargs["treat_short_extends_as_decodes"]
+        is expected_treat_short_extends_as_decodes
+    )
     assert torch.equal(rope_op.call_args.args[0], input_positions)
     assert rope_op.call_args.kwargs["use_cache"] is (num_prefills == 0)
     assert metadata_cache["cos"] is cos

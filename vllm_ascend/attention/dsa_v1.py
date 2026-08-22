@@ -520,7 +520,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 split_decodes_and_prefills(
                     common_attn_metadata,
                     decode_threshold=self.decode_threshold,
-                    treat_short_extends_as_decodes=False,
+                    # Match main for the legacy FP8/sharedkv path: a one-token
+                    # extend is decode and must use decode metadata. Keep the
+                    # BF16 SparseFlashMla behavior introduced on this branch.
+                    treat_short_extends_as_decodes=not self.attn_kv_plan.uses_sparse_flash_mla,
                 )
             )
             self.common_ratio_to_sas_metadata["num_decodes"] = self.num_decodes
@@ -771,7 +774,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
-                treat_short_extends_as_decodes=False,
+                treat_short_extends_as_decodes=not self.attn_kv_plan.uses_sparse_flash_mla,
             )
         )
         num_reqs = common_attn_metadata.num_reqs
