@@ -10,6 +10,12 @@ def uses_explicit_bf16_kv(vllm_config=None) -> bool:
     if vllm_config is None:
         from vllm.config import get_current_vllm_config
 
-        vllm_config = get_current_vllm_config()
+        try:
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            # Module inspection and direct unit tests can call device helpers
+            # without a current vLLM config. Preserve main's FP8 default there;
+            # BF16 remains opt-in only inside a configured engine context.
+            return False
     additional_config = getattr(vllm_config, "additional_config", None) or {}
     return bool(additional_config.get(DSV4_EXPLICIT_BF16_KV_KEY, False))
