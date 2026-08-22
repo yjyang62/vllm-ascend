@@ -84,6 +84,23 @@ def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
 
 
+def _dsa_o_proj_matmul(
+    o_proj_input: torch.Tensor,
+    weight: torch.Tensor,
+    num_groups: int,
+) -> torch.Tensor:
+    """Grouped A5 BF16 o_proj without the quantized batch-matmul kernel."""
+    if weight.ndim == 2:
+        grouped_weight = weight.view(num_groups, -1, weight.shape[-1]).transpose(1, 2)
+    elif weight.ndim == 3 and weight.shape[0] == num_groups:
+        grouped_weight = weight
+        if grouped_weight.shape[1] != o_proj_input.shape[-1]:
+            grouped_weight = grouped_weight.transpose(1, 2)
+    else:
+        raise ValueError(f"Unexpected DSA wo_a weight shape: {tuple(weight.shape)}")
+    return torch.matmul(o_proj_input.transpose(0, 1), grouped_weight).transpose(0, 1)
+
+
 class AscendDSABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -597,7 +614,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             tp_size = get_tensor_model_parallel_world_size()
             n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
             index_topk = self.model_config.hf_config.index_topk
-            cmp_ratio = 1 if self.compressor_ratio <= 1 else 4 if self.compressor_ratio == 4 else 128
+            cmp_ratio = (
+                DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compressor_ratio)
+                if self.compressor_ratio <= 1
+                else 4
+                if self.compressor_ratio == 4
+                else 128
+            )
             metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
             sas_metadata = metadata_op(
@@ -897,7 +920,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
             batch_size=num_reqs,
-            cmp_ratio=1,
+            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compressor_ratio),
             ori_mask_mode=4,
             cmp_mask_mode=3,
             ori_win_left=ori_win_left,
@@ -1177,16 +1200,19 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             o_proj_input = self.wo_a(o_proj_input)
             output[...] = self.wo_b(o_proj_input)
         else:
-            o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                o_proj_input,
-                self.wo_a.weight,
-                bias=None,
-                scale=None,
-                perm_x1=(1, 0, 2),
-                perm_x2=(0, 1, 2),
-                perm_y=(1, 0, 2),
-                batch_split_factor=1,
-            )
+            if get_ascend_device_type() == AscendDeviceType.A5 and uses_explicit_bf16_kv():
+                o_proj_input = _dsa_o_proj_matmul(o_proj_input, self.wo_a.weight, self.n_local_groups)
+            else:
+                o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                    o_proj_input,
+                    self.wo_a.weight,
+                    bias=None,
+                    scale=None,
+                    perm_x1=(1, 0, 2),
+                    perm_x2=(0, 1, 2),
+                    perm_y=(1, 0, 2),
+                    batch_split_factor=1,
+                )
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
             output[...] = self.wo_b(o_proj_input)
         return output
@@ -1577,7 +1603,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             sinks=self.attn_sink,
             metadata=common_metadata.sas_metadata,
             softmax_scale=self.softmax_scale,
-            cmp_ratio=max(self.compress_ratio, 1),
+            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compress_ratio),
             ori_mask_mode=4,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
