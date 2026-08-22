@@ -808,6 +808,7 @@ def test_a5_bf16_o_proj_uses_npu_transpose_batchmatmul_with_gdr_weight():
     impl = SimpleNamespace(
         n_local_groups=3,
         o_lora_rank=2,
+        attn_kv_plan=SimpleNamespace(uses_sparse_flash_mla=True),
         wo_a=SimpleNamespace(weight=weight),
         wo_b=lambda x: x,
     )

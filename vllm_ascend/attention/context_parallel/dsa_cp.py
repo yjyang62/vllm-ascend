@@ -1410,9 +1410,12 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self._switch_o_proj_to_full_weight()
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
-            # Match dsa_v1: A5 MX-quantized o_proj only when weight_scale exists.
-            # BF16 A5 falls through to npu_transpose_batchmatmul below.
-            if get_ascend_device_type() == AscendDeviceType.A5 and _has_weight_scale(self.wo_a):
+            # FP8 preserves main's unconditional A5 MX o_proj path. Explicit
+            # BF16 may use the unquantized fallback when no scale exists.
+            use_a5_quant_o_proj = get_ascend_device_type() == AscendDeviceType.A5 and (
+                not self.attn_kv_plan.uses_sparse_flash_mla or _has_weight_scale(self.wo_a)
+            )
+            if use_a5_quant_o_proj:
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
                 o = torch_npu.npu_transpose_quant_batchmatmul(

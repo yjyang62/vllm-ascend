@@ -1115,9 +1115,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
         # + quantized batch matmul). Preserve it as-is: it predates and is
         # orthogonal to the OTP / olora_tp paths below, so it must win first.
-        # Quantized A5 checkpoints use dynamic MX quantization for o_proj.
-        # BF16 checkpoints have regular linear weights and no weight_scale.
-        if get_ascend_device_type() in {AscendDeviceType.A5} and _has_weight_scale(self.wo_a):
+        # FP8 must preserve main's unconditional A5 MX o_proj path. Only the
+        # explicit BF16 SparseFlashMla path may fall back when no scale exists.
+        use_a5_quant_o_proj = get_ascend_device_type() == AscendDeviceType.A5 and (
+            not self.attn_kv_plan.uses_sparse_flash_mla or _has_weight_scale(self.wo_a)
+        )
+        if use_a5_quant_o_proj:
             o = o_proj_input
             o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
             o = torch_npu.npu_transpose_quant_batchmatmul(
