@@ -688,18 +688,6 @@ class BaseDeviceAdaptor:
         """Slot mapping side output format consumed by the DSA scatter op."""
         return DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
 
-    @staticmethod
-    def get_dsa_layout_kv():
-        return "PA_ND"
-
-    @staticmethod
-    def dsa_requires_block_offset_slots():
-        return True
-
-    @staticmethod
-    def get_dsa_swa_only_cmp_ratio(compress_ratio):
-        return max(compress_ratio, 1)
-
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
@@ -1486,20 +1474,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if uses_explicit_bf16_kv():
             return DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
         return DSA_COMPRESSOR_SLOT_MAPPING_FLAT
-
-    @staticmethod
-    def get_dsa_layout_kv():
-        return "PA_BBND" if uses_explicit_bf16_kv() else "PA_ND"
-
-    @staticmethod
-    def dsa_requires_block_offset_slots():
-        return uses_explicit_bf16_kv()
-
-    @staticmethod
-    def get_dsa_swa_only_cmp_ratio(compress_ratio):
-        if uses_explicit_bf16_kv() and compress_ratio <= 1:
-            return 0
-        return max(compress_ratio, 1)
 
     # ===== SWA / Compressor KV Scatter =====
 

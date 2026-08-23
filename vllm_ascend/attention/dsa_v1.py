@@ -84,6 +84,17 @@ def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
 
 
+def _dsa_layout_kv() -> str:
+    return "PA_BBND" if uses_explicit_bf16_kv() else "PA_ND"
+
+
+def _dsa_swa_only_cmp_ratio(compress_ratio: int) -> int:
+    """BF16 SWA-only attention takes no compressed stream; otherwise keep main's value."""
+    if uses_explicit_bf16_kv() and compress_ratio <= 1:
+        return 0
+    return max(compress_ratio, 1)
+
+
 def _dsa_o_proj_matmul(
     o_proj_input: torch.Tensor,
     weight: torch.Tensor,
@@ -360,10 +371,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if DeviceOperator.dsa_requires_block_offset_slots():
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
-        else:
+        if get_ascend_device_type() in {AscendDeviceType.A5} and not uses_explicit_bf16_kv():
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
+        else:
+            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.spec_slot_mapping = [
@@ -615,7 +626,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
             index_topk = self.model_config.hf_config.index_topk
             cmp_ratio = (
-                DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compressor_ratio)
+                _dsa_swa_only_cmp_ratio(self.compressor_ratio)
                 if self.compressor_ratio <= 1
                 else 4
                 if self.compressor_ratio == 4
@@ -643,7 +654,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 ori_win_left=self.model_config.hf_config.sliding_window - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv=DeviceOperator.get_dsa_layout_kv(),
+                layout_kv=_dsa_layout_kv(),
                 has_ori_kv=True,
                 has_cmp_kv=self.compressor_ratio > 1,
             )
@@ -926,7 +937,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             layout_q="TND",
-            layout_kv=DeviceOperator.get_dsa_layout_kv(),
+            layout_kv=_dsa_layout_kv(),
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -1603,12 +1614,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             sinks=self.attn_sink,
             metadata=common_metadata.sas_metadata,
             softmax_scale=self.softmax_scale,
-            cmp_ratio=DeviceOperator.get_dsa_swa_only_cmp_ratio(self.compress_ratio),
+            cmp_ratio=_dsa_swa_only_cmp_ratio(self.compress_ratio),
             ori_mask_mode=4,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             layout_q="TND",
-            layout_kv=DeviceOperator.get_dsa_layout_kv(),
+            layout_kv=_dsa_layout_kv(),
         )
 
         if self.compress_ratio <= 1:

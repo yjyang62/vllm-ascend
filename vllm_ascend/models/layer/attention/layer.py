@@ -32,7 +32,7 @@ from vllm_ascend.utils import (
 )
 
 
-def get_dsv4_block_sizes(attn_kv_dtype: torch.dtype | None = None):
+def get_dsv4_block_sizes():
     # cache_config.block_size: [mla, swa, c4 state, c128 state], [page_size_padded_t1, page_size_padded_t2]
     _DSV4_BLOCK_SIZES = {
         128: [[128, 128, 8, 32], [16640, 131072]],
@@ -44,14 +44,7 @@ def get_dsv4_block_sizes(attn_kv_dtype: torch.dtype | None = None):
         64: [[64, 64, 4, 8], [8448, 40960]],
         32: [[32, 32, 2, 4], [4224, 20480]],
     }
-    _DSV4_BLOCK_SIZES_A5_BF16 = {
-        128: [[128, 128, 8, 16], [16896, 131072]],
-        64: [[64, 64, 4, 8], [8448, 65536]],
-        32: [[32, 32, 2, 4], [4224, 32768]],
-    }
     if get_ascend_device_type() in {AscendDeviceType.A5}:
-        if attn_kv_dtype == torch.bfloat16:
-            return _DSV4_BLOCK_SIZES_A5_BF16
         return _DSV4_BLOCK_SIZES_A5
     else:
         return _DSV4_BLOCK_SIZES
@@ -59,12 +52,24 @@ def get_dsv4_block_sizes(attn_kv_dtype: torch.dtype | None = None):
 
 DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
 
+# BF16 SparseFlashMla pages the unquantized KV without the FP8 scale tail, so
+# the C128 state and padded page sizes differ from the FP8 table above.
+_DSV4_BLOCK_SIZES_A5_BF16 = {
+    128: [[128, 128, 8, 16], [16896, 131072]],
+    64: [[64, 64, 4, 8], [8448, 65536]],
+    32: [[32, 32, 2, 4], [4224, 32768]],
+}
 
-def dsv4_attn_kv_dtype(vllm_config: VllmConfig, default_dtype: torch.dtype) -> torch.dtype:
-    """Resolve attention KV without changing main's non-BF16 behavior."""
-    if get_ascend_device_type() == AscendDeviceType.A5:
-        return torch.bfloat16 if uses_explicit_bf16_kv(vllm_config) else torch.float8_e4m3fn
-    return default_dtype
+
+def dsv4_block_sizes(vllm_config: VllmConfig):
+    """Return the upstream table unless BF16 KV was explicitly requested.
+
+    Non-BF16 launches must reuse the exact ``DSV4_BLOCK_SIZES`` object that
+    upstream reads, not a freshly evaluated copy.
+    """
+    if uses_explicit_bf16_kv(vllm_config) and get_ascend_device_type() in {AscendDeviceType.A5}:
+        return _DSV4_BLOCK_SIZES_A5_BF16
+    return DSV4_BLOCK_SIZES
 
 
 class DSAAttention(nn.Module, AttentionLayerBase):
@@ -205,7 +210,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             if use_bf16_kv
             else ((self.head_size + 128) if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_size)
         )
-        storage_block_size = get_dsv4_block_sizes(kv_cache_dtype)[vllm_config.cache_config.block_size][0][0]
+        storage_block_size = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
             # The scheduler operates in raw-token units. Ascend kernels keep
             # using the compressed page exposed by storage_block_size.
