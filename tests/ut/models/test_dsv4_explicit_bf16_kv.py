@@ -12,7 +12,10 @@ from vllm_ascend.attention.dsa_kv_mode import (
     uses_explicit_bf16_kv,
 )
 from vllm_ascend.attention.dsa_v1 import _dsa_layout_kv, _dsa_o_proj_matmul, _dsa_swa_only_cmp_ratio
-from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
+from vllm_ascend.attention.sparse_flash_mla import (
+    sparse_flash_mla,
+    sparse_flash_mla_metadata,
+)
 from vllm_ascend.device.device_op import (
     DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
@@ -151,6 +154,20 @@ def test_a5_bf16_selectors_use_explicit_config():
     assert A5DeviceAdaptor.get_dsa_compressor_slot_mapping_format(config) == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
 
 
+def test_sparse_flash_mla_adapter_enforces_bf16_paged_layout():
+    metadata_op = mock.Mock(return_value=torch.empty(0))
+    attention_op = mock.Mock(return_value=torch.empty(0))
+    with mock.patch(
+        "vllm_ascend.attention.sparse_flash_mla._get_sparse_flash_mla_ops",
+        return_value=(attention_op, metadata_op),
+    ):
+        sparse_flash_mla_metadata(layout_kv="PA_ND")
+        sparse_flash_mla(torch.empty(0), layout_kv="PA_ND")
+
+    assert metadata_op.call_args.kwargs["layout_kv"] == "PA_BBND"
+    assert attention_op.call_args.kwargs["layout_kv"] == "PA_BBND"
+
+
 def test_layout_and_cmp_ratio_match_main_outside_bf16():
     with mock.patch("vllm_ascend.attention.dsa_v1.uses_explicit_bf16_kv", return_value=False):
         assert _dsa_layout_kv() == "PA_ND"
@@ -164,6 +181,10 @@ def test_layout_and_cmp_ratio_switch_for_bf16():
         assert _dsa_swa_only_cmp_ratio(0) == 0
         assert _dsa_swa_only_cmp_ratio(1) == 0
         assert _dsa_swa_only_cmp_ratio(4) == 4
+
+    config = _dsv4_config(recorded=True)
+    assert _dsa_layout_kv(config) == "PA_BBND"
+    assert _dsa_swa_only_cmp_ratio(1, config) == 0
 
 
 def test_a5_bf16_o_proj_matmul_matches_grouped_einsum():

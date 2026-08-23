@@ -84,13 +84,13 @@ def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
 
 
-def _dsa_layout_kv() -> str:
-    return "PA_BBND" if uses_explicit_bf16_kv() else "PA_ND"
+def _dsa_layout_kv(vllm_config: VllmConfig | None = None) -> str:
+    return "PA_BBND" if uses_explicit_bf16_kv(vllm_config) else "PA_ND"
 
 
-def _dsa_swa_only_cmp_ratio(compress_ratio: int) -> int:
+def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig | None = None) -> int:
     """BF16 SWA-only attention takes no compressed stream; otherwise keep main's value."""
-    if uses_explicit_bf16_kv() and compress_ratio <= 1:
+    if uses_explicit_bf16_kv(vllm_config) and compress_ratio <= 1:
         return 0
     return max(compress_ratio, 1)
 
@@ -626,7 +626,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
             index_topk = self.model_config.hf_config.index_topk
             cmp_ratio = (
-                _dsa_swa_only_cmp_ratio(self.compressor_ratio)
+                _dsa_swa_only_cmp_ratio(self.compressor_ratio, self.vllm_config)
                 if self.compressor_ratio <= 1
                 else 4
                 if self.compressor_ratio == 4
@@ -656,7 +656,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 ori_win_left=self.model_config.hf_config.sliding_window - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv=_dsa_layout_kv(),
+                layout_kv=_dsa_layout_kv(self.vllm_config),
                 has_ori_kv=True,
                 has_cmp_kv=self.compressor_ratio > 1,
             )
@@ -939,7 +939,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             layout_q="TND",
-            layout_kv=_dsa_layout_kv(),
+            layout_kv=_dsa_layout_kv(self.vllm_config),
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -1620,12 +1620,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             sinks=self.attn_sink,
             metadata=common_metadata.sas_metadata,
             softmax_scale=self.softmax_scale,
-            cmp_ratio=_dsa_swa_only_cmp_ratio(self.compress_ratio),
+            cmp_ratio=_dsa_swa_only_cmp_ratio(self.compress_ratio, self.vllm_config),
             ori_mask_mode=4,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             layout_q="TND",
-            layout_kv=_dsa_layout_kv(),
+            layout_kv=_dsa_layout_kv(self.vllm_config),
         )
 
         if self.compress_ratio <= 1:

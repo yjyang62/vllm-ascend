@@ -34,9 +34,12 @@ def _add_compressed_kv_lengths(kwargs: dict[str, Any]) -> None:
 
 
 def sparse_flash_mla_metadata(**kwargs):
-    """Adapt existing DSA metadata kwargs to SparseFlashMla."""
+    """Adapt existing DSA metadata kwargs to SparseFlashMla BF16 KV."""
     kwargs.pop("device", None)
     kwargs.pop("kv_quant_mode", None)
+    # This adapter is only selected for the BF16 paged-KV path. SparseFlashMla
+    # accepts PA_BBND for this cache; PA_ND belongs to the FP8 quantized op.
+    kwargs["layout_kv"] = "PA_BBND"
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     if "max_seqlen_kv" in kwargs:
@@ -47,10 +50,11 @@ def sparse_flash_mla_metadata(**kwargs):
 
 
 def sparse_flash_mla(q: torch.Tensor, **kwargs):
-    """Adapt existing DSA attention kwargs to SparseFlashMla."""
+    """Adapt existing DSA attention kwargs to SparseFlashMla BF16 KV."""
     kwargs.pop("kv_quant_mode", None)
     kwargs.pop("tile_size", None)
     kwargs.pop("rope_head_dim", None)
+    kwargs["layout_kv"] = "PA_BBND"
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     _add_compressed_kv_lengths(kwargs)
