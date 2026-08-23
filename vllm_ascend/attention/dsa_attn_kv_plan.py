@@ -32,6 +32,25 @@ class DsaAttnKvPlan:
     include_metadata_device: bool
     applies_sparse_attn_runtime_kwargs: bool
 
+    def get_dsa_sparse_attn_metadata_op(self):
+        return self.sparse_attn_metadata_op
+
+    def get_dsa_sparse_attn_metadata_kwargs(self, device) -> dict[str, Any]:
+        kwargs = dict(self.sparse_attn_metadata_kwargs)
+        if self.include_metadata_device:
+            kwargs["device"] = str(device)
+        return kwargs
+
+    def get_dsa_sparse_attn_op(self):
+        return self.sparse_attn_op
+
+    def get_dsa_sparse_attn_base_kwargs(self) -> dict[str, Any]:
+        return dict(self.sparse_attn_base_kwargs)
+
+    def add_dsa_sparse_attn_extra_kwargs(self, extra_kwargs: dict[str, Any], **kwargs_to_add) -> None:
+        if self.applies_sparse_attn_runtime_kwargs:
+            extra_kwargs.update(kwargs_to_add)
+
     def format_slot_mapping(self, slot_mapping: torch.Tensor, block_size: int) -> torch.Tensor:
         if not self.requires_block_offset_slots:
             return slot_mapping

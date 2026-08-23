@@ -1446,23 +1446,19 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_op(vllm_config=None):
-        return get_dsa_attn_kv_plan(vllm_config).sparse_attn_metadata_op
+        return get_dsa_attn_kv_plan(vllm_config).get_dsa_sparse_attn_metadata_op()
 
     @staticmethod
     def get_dsa_sparse_attn_metadata_kwargs(device, vllm_config=None):
-        plan = get_dsa_attn_kv_plan(vllm_config)
-        kwargs = dict(plan.sparse_attn_metadata_kwargs)
-        if plan.uses_sparse_flash_mla:
-            kwargs["device"] = str(device)
-        return kwargs
+        return get_dsa_attn_kv_plan(vllm_config).get_dsa_sparse_attn_metadata_kwargs(device)
 
     @staticmethod
     def get_dsa_sparse_attn_op(vllm_config=None):
-        return get_dsa_attn_kv_plan(vllm_config).sparse_attn_op
+        return get_dsa_attn_kv_plan(vllm_config).get_dsa_sparse_attn_op()
 
     @staticmethod
     def get_dsa_sparse_attn_base_kwargs(vllm_config=None):
-        return dict(get_dsa_attn_kv_plan(vllm_config).sparse_attn_base_kwargs)
+        return get_dsa_attn_kv_plan(vllm_config).get_dsa_sparse_attn_base_kwargs()
 
     @staticmethod
     def get_dsa_compressor_slot_mapping_format(vllm_config=None):
@@ -1624,8 +1620,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, vllm_config=None, **kwargs_to_add):
         """A5: no-op — A5 ops do not need extra kwargs from this path."""
-        if get_dsa_attn_kv_plan(vllm_config).applies_sparse_attn_runtime_kwargs:
-            extra_kwargs.update(kwargs_to_add)
+        get_dsa_attn_kv_plan(vllm_config).add_dsa_sparse_attn_extra_kwargs(extra_kwargs, **kwargs_to_add)
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_ori_kv(
