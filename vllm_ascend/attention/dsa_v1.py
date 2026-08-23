@@ -1120,9 +1120,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
         # + quantized batch matmul). Preserve it as-is: it predates and is
         # orthogonal to the OTP / olora_tp paths below, so it must win first.
-        use_a5_quant_o_proj = get_ascend_device_type() == AscendDeviceType.A5 and (
-            not uses_explicit_bf16_kv() or _has_weight_scale(self.wo_a)
-        )
+        use_a5_quant_o_proj = get_ascend_device_type() == AscendDeviceType.A5 and _has_weight_scale(self.wo_a)
         if use_a5_quant_o_proj:
             o = o_proj_input
             o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
