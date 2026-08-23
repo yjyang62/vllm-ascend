@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_kv_mode import uses_explicit_bf16_kv
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -85,7 +86,7 @@ def _has_weight_scale(linear) -> bool:
 
 
 def _dsa_layout_kv(vllm_config: VllmConfig | None = None) -> str:
-    return "PA_BBND" if uses_explicit_bf16_kv(vllm_config) else "PA_ND"
+    return get_dsa_attn_kv_plan(vllm_config).layout_kv
 
 
 def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig | None = None) -> int:
