@@ -49,9 +49,9 @@ def _dsv4_config(
     )
 
 
-def test_auto_bf16_checkpoint_defaults_to_bf16_kv():
+def test_auto_bf16_checkpoint_defaults_to_fp8_kv():
     config = _dsv4_config(cache_dtype="auto", model_dtype=torch.bfloat16)
-    assert resolve_dsv4_use_bf16_kv(config)
+    assert not resolve_dsv4_use_bf16_kv(config)
 
 
 def test_auto_fp8_quantized_checkpoint_defaults_to_fp8_kv():
@@ -67,7 +67,7 @@ def test_auto_fp8_quantized_checkpoint_defaults_to_fp8_kv():
 
 def test_explicit_kv_cache_dtype_overrides_auto():
     bf16_model = _dsv4_config(cache_dtype="auto", model_dtype=torch.bfloat16)
-    assert resolve_dsv4_use_bf16_kv(bf16_model)
+    assert not resolve_dsv4_use_bf16_kv(bf16_model)
 
     fp8_override = _dsv4_config(cache_dtype="fp8", model_dtype=torch.bfloat16)
     assert not resolve_dsv4_use_bf16_kv(fp8_override)
@@ -84,10 +84,10 @@ def test_explicit_kv_cache_dtype_overrides_auto():
 def test_record_dsv4_kv_mode_persists_before_platform_rewrite():
     config = _dsv4_config(cache_dtype="auto", model_dtype=torch.bfloat16)
     record_dsv4_kv_mode(config, config.additional_config)
-    assert config.additional_config[DSV4_EXPLICIT_BF16_KV_KEY] is True
+    assert config.additional_config[DSV4_EXPLICIT_BF16_KV_KEY] is False
 
     config.cache_config.cache_dtype = "bfloat16"
-    assert uses_explicit_bf16_kv(config)
+    assert not uses_explicit_bf16_kv(config)
 
 
 def test_recorded_mode_is_used_after_platform_rewrite():

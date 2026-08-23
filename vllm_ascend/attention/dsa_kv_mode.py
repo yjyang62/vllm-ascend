@@ -5,39 +5,20 @@
 Resolution order (see ``resolve_dsv4_use_bf16_kv``):
 
 1. Explicit ``--kv-cache-dtype`` (anything other than ``auto``).
-2. ``auto`` on an unquantized BF16 checkpoint → BF16 SparseFlashMla KV.
-3. ``auto`` otherwise → upstream-compatible FP8 KV.
+2. ``auto`` → upstream-compatible FP8 KV.
 """
 
 from __future__ import annotations
-
-import torch
 
 DSV4_EXPLICIT_BF16_KV_KEY = "dsv4_use_bf16_sparse_flash_mla"
 
 _FP8_KV_CACHE_DTYPES = frozenset({"fp8", "float8", "float8_e4m3fn", "float8_e5m2"})
 _BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
-_DSV4_FP8_QUANT_METHODS = frozenset({"deepseek_v4_fp8"})
 
 
 def _is_dsv4_model(model_config) -> bool:
     hf_config = getattr(model_config, "hf_text_config", None)
     return hf_config is not None and hasattr(hf_config, "index_topk")
-
-
-def _is_dsv4_fp8_quantized(vllm_config) -> bool:
-    model_config = vllm_config.model_config
-    quant_method = getattr(model_config, "quantization", None)
-    if quant_method in _DSV4_FP8_QUANT_METHODS:
-        return True
-    quant_config = getattr(vllm_config, "quant_config", None)
-    return quant_config is not None and quant_config.get_name() in _DSV4_FP8_QUANT_METHODS
-
-
-def _is_unquantized_bf16_checkpoint(vllm_config) -> bool:
-    if _is_dsv4_fp8_quantized(vllm_config):
-        return False
-    return vllm_config.model_config.dtype == torch.bfloat16
 
 
 def resolve_dsv4_use_bf16_kv(vllm_config) -> bool:
@@ -53,7 +34,7 @@ def resolve_dsv4_use_bf16_kv(vllm_config) -> bool:
         if normalized in _FP8_KV_CACHE_DTYPES:
             return False
 
-    return _is_unquantized_bf16_checkpoint(vllm_config)
+    return False
 
 
 def record_dsv4_kv_mode(vllm_config, additional_config: dict) -> None:
