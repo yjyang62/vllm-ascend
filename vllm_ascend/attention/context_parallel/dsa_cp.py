@@ -1461,9 +1461,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self._switch_o_proj_to_full_weight()
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
-            use_a5_quant_o_proj = get_ascend_device_type() == AscendDeviceType.A5 and (
-                not uses_explicit_bf16_kv() or _has_weight_scale(self.wo_a)
-            )
+            use_a5_quant_o_proj = get_ascend_device_type() == AscendDeviceType.A5 and _has_weight_scale(self.wo_a)
             if use_a5_quant_o_proj:
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
