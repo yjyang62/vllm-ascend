@@ -50,20 +50,6 @@ from vllm_ascend.utils import (
 )
 
 
-def _requires_a5_bf16_wo_a_layout(
-    prefix: str,
-    quant_config: QuantizationConfig | None,
-    loaded_weight_dtype: torch.dtype,
-) -> bool:
-    """Return whether an unquantized BF16 DSV4 ``wo_a`` needs batched layout."""
-    return (
-        "wo_a" in prefix
-        and get_ascend_device_type() == AscendDeviceType.A5
-        and quant_config is None
-        and loaded_weight_dtype == torch.bfloat16
-    )
-
-
 def unquantized_gemm(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -470,10 +456,11 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        reshape_a5_bf16_wo_a = _requires_a5_bf16_wo_a_layout(
-            self.prefix,
-            self.quant_config,
-            loaded_weight.dtype,
+        reshape_a5_bf16_wo_a = (
+            "wo_a" in self.prefix
+            and get_ascend_device_type() == AscendDeviceType.A5
+            and self.quant_config is None
+            and loaded_weight.dtype == torch.bfloat16
         )
         if "wo_a" in self.prefix and (get_ascend_device_type() != AscendDeviceType.A5 or reshape_a5_bf16_wo_a):
             if self.weight.ndim == 2:

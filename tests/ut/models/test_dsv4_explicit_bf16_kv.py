@@ -21,7 +21,6 @@ from vllm_ascend.attention.sparse_flash_mla import (
     sparse_flash_mla,
     sparse_flash_mla_metadata,
 )
-from vllm_ascend.ops.linear import _requires_a5_bf16_wo_a_layout
 from vllm_ascend.utils import AscendDeviceType
 
 
@@ -135,13 +134,6 @@ def test_a5_bf16_selectors_use_sparse_flash_mla():
             plan.format_dsa_slot_mapping(flat_slots, 128),
             torch.tensor([[0, 5], [-1, -1]], dtype=torch.int32),
         )
-
-
-def test_a5_bf16_wo_a_layout_is_independent_of_kv_dtype():
-    with mock.patch("vllm_ascend.ops.linear.get_ascend_device_type", return_value=AscendDeviceType.A5):
-        assert _requires_a5_bf16_wo_a_layout("model.layers.0.wo_a", None, torch.bfloat16)
-        assert not _requires_a5_bf16_wo_a_layout("model.layers.0.wo_a", None, torch.float8_e4m3fn)
-        assert not _requires_a5_bf16_wo_a_layout("model.layers.0.wo_a", object(), torch.bfloat16)
 
 
 def test_sparse_flash_mla_adapter_enforces_bf16_paged_layout():
