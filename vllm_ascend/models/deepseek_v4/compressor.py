@@ -170,7 +170,7 @@ class Compressor(nn.Module):
         self,
         metadata: typing.Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        from vllm_ascend.device.device_op import DeviceOperator
+        from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 
         assert metadata.full_compress_cos is not None
         assert metadata.full_compress_sin is not None
@@ -192,7 +192,7 @@ class Compressor(nn.Module):
             metadata.start_pos,
             metadata.block_table,
             metadata.storage_block_size,
-            DeviceOperator.get_dsa_compressor_slot_mapping_format(self.vllm_config),
+            get_dsa_attn_kv_plan(self.vllm_config).get_dsa_compressor_slot_mapping_format(),
             self.compress_ratio,
             metadata.num_compressed_tokens,
             metadata.num_reqs_actual,

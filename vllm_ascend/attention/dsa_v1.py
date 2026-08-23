@@ -586,8 +586,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # are generated later from the logical block table by compressor_metadata.
         if self.compressor_ratio <= 1:
             slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-            self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
-                slot_mapping, self.storage_block_size, self.vllm_config
+            self.slot_mapping[:num_input_tokens] = get_dsa_attn_kv_plan(self.vllm_config).format_dsa_slot_mapping(
+                slot_mapping, self.storage_block_size
             )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
@@ -841,9 +841,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True, draft_index=draft_index)
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
         assert self.spec_slot_mapping is not None
-        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
-            slot_mapping, self.storage_block_size, self.vllm_config
-        )
+        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = get_dsa_attn_kv_plan(
+            self.vllm_config
+        ).format_dsa_slot_mapping(slot_mapping, self.storage_block_size)
         req_metadata = self.build_req_metadata_for_drafting(
             draft_index=draft_index,
             common_attn_metadata=common_attn_metadata,
@@ -1356,11 +1356,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         )
 
         # swa exec kv
-        DeviceOperator.dsa_kv_compress_scatter(
+        get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
             swa_kv_cache,
             kv,
             slot_mapping,
-            self.vllm_config,
         )
 
         return q, qr, qr_pertoken_scale
@@ -1432,7 +1431,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 rotary_mode="interleave",
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
-            DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping, self.vllm_config)
+            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
 
         if is_prefill:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
@@ -1494,11 +1493,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 compress_slot_mapping: torch.Tensor,
             ) -> None:
                 if compressed_kv.shape[0] > 0:
-                    DeviceOperator.dsa_kv_compress_scatter(
+                    get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
                         compress_kv_cache,
                         compressed_kv,
                         compress_slot_mapping,
-                        self.vllm_config,
                     )
 
             overlap_plan = IndexerOverlapPlan(
@@ -1522,11 +1520,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             metadata=layer_metadata.compressor,
         )
         if compressed_kv.shape[0] > 0:
-            DeviceOperator.dsa_kv_compress_scatter(
+            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
                 compress_kv_cache,
                 compressed_kv,
                 compress_slot_mapping,
-                self.vllm_config,
             )
         return None
 
