@@ -32,7 +32,7 @@ from vllm_ascend.utils import (
 )
 
 
-def get_dsv4_block_sizes():
+def get_dsv4_block_sizes(use_a5_bf16_kv: bool = False):
     # cache_config.block_size: [mla, swa, c4 state, c128 state], [page_size_padded_t1, page_size_padded_t2]
     _DSV4_BLOCK_SIZES = {
         128: [[128, 128, 8, 32], [16640, 131072]],
@@ -44,6 +44,13 @@ def get_dsv4_block_sizes():
         64: [[64, 64, 4, 8], [8448, 40960]],
         32: [[32, 32, 2, 4], [4224, 20480]],
     }
+    _DSV4_BLOCK_SIZES_A5_BF16 = {
+        128: [[128, 128, 8, 16], [16896, 131072]],
+        64: [[64, 64, 4, 8], [8448, 65536]],
+        32: [[32, 32, 2, 4], [4224, 32768]],
+    }
+    if use_a5_bf16_kv and get_ascend_device_type() in {AscendDeviceType.A5}:
+        return _DSV4_BLOCK_SIZES_A5_BF16
     if get_ascend_device_type() in {AscendDeviceType.A5}:
         return _DSV4_BLOCK_SIZES_A5
     else:
@@ -51,14 +58,6 @@ def get_dsv4_block_sizes():
 
 
 DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
-
-# BF16 SparseFlashMla pages the unquantized KV without the FP8 scale tail, so
-# the C128 state and padded page sizes differ from the FP8 table above.
-_DSV4_BLOCK_SIZES_A5_BF16 = {
-    128: [[128, 128, 8, 16], [16896, 131072]],
-    64: [[64, 64, 4, 8], [8448, 65536]],
-    32: [[32, 32, 2, 4], [4224, 32768]],
-}
 
 
 def dsv4_block_sizes(vllm_config: VllmConfig):
@@ -68,7 +67,7 @@ def dsv4_block_sizes(vllm_config: VllmConfig):
     upstream reads, not a freshly evaluated copy.
     """
     if uses_explicit_bf16_kv(vllm_config) and get_ascend_device_type() in {AscendDeviceType.A5}:
-        return _DSV4_BLOCK_SIZES_A5_BF16
+        return get_dsv4_block_sizes(use_a5_bf16_kv=True)
     return DSV4_BLOCK_SIZES
 
 
