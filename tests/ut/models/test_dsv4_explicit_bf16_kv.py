@@ -136,6 +136,38 @@ def test_a5_bf16_selectors_use_sparse_flash_mla():
         )
 
 
+def test_non_a5_plan_preserves_shared_kv_contract():
+    flat_slots = torch.tensor([5, -1], dtype=torch.int32)
+    with mock.patch(
+        "vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type",
+        return_value=AscendDeviceType.A3,
+    ):
+        plan = get_dsa_attn_kv_plan(_dsv4_config(recorded=True))
+        assert plan.get_dsa_sparse_attn_op() is torch.ops._C_ascend.npu_sparse_attn_sharedkv
+        assert plan.get_dsa_sparse_attn_metadata_op() is torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
+        assert plan.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"device": "npu:0"}
+        assert plan.get_dsa_sparse_attn_base_kwargs() == {}
+        assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+        torch.testing.assert_close(
+            plan.format_dsa_slot_mapping(flat_slots, 128),
+            torch.tensor([[0, 5], [-1, -1]], dtype=torch.int32),
+        )
+        kwargs = {}
+        plan.add_dsa_sparse_attn_extra_kwargs(kwargs, cu_seqlens_ori_kv=torch.tensor([0, 1]))
+        assert "cu_seqlens_ori_kv" in kwargs
+
+
+def test_a5_fp8_plan_ignores_runtime_kv_kwargs():
+    with mock.patch(
+        "vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type",
+        return_value=AscendDeviceType.A5,
+    ):
+        plan = get_dsa_attn_kv_plan(_dsv4_config(recorded=False))
+        kwargs = {}
+        plan.add_dsa_sparse_attn_extra_kwargs(kwargs, cu_seqlens_ori_kv=torch.tensor([0, 1]))
+        assert kwargs == {}
+
+
 def test_sparse_flash_mla_adapter_enforces_bf16_paged_layout():
     metadata_op = mock.Mock(return_value=torch.empty(0))
     attention_op = mock.Mock(return_value=torch.empty(0))
