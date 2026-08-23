@@ -525,10 +525,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         num_heads = self.model_config.hf_config.num_attention_heads
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
-        metadata_op = kv_plan.sparse_attn_metadata_op
-        metadata_kwargs = dict(kv_plan.sparse_attn_metadata_kwargs)
-        if kv_plan.include_metadata_device:
-            metadata_kwargs["device"] = str(self.seqused_q.device)
+        metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
+        metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         cu_seqlens_ori_kv = (
             local_query_start_loc
             if has_prefill
@@ -958,10 +956,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
             )
             kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
-            metadata_op = kv_plan.sparse_attn_metadata_op
-            metadata_kwargs = dict(kv_plan.sparse_attn_metadata_kwargs)
-            if kv_plan.include_metadata_device:
-                metadata_kwargs["device"] = str(self.seqused_q.device)
+            metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
+            metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
             kw = dict(
                 **metadata_kwargs,
                 num_heads_q=num_heads,
@@ -1697,10 +1693,10 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         notify_kv_cache_written(layer_name)
         record_attention_compute_start()
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
-        attn_op = kv_plan.sparse_attn_op
-        extra_attn_kwargs: dict = dict(kv_plan.sparse_attn_base_kwargs)
-        if has_prefill and kv_plan.applies_sparse_attn_runtime_kwargs:
-            extra_attn_kwargs["cu_seqlens_ori_kv"] = local_seq_lengths_query
+        attn_op = kv_plan.get_dsa_sparse_attn_op()
+        extra_attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()
+        if has_prefill:
+            kv_plan.add_dsa_sparse_attn_extra_kwargs(extra_attn_kwargs, cu_seqlens_ori_kv=local_seq_lengths_query)
         if swa_req_metadata.dspark_swa_indices is not None:
             extra_attn_kwargs["ori_sparse_indices"] = swa_req_metadata.dspark_swa_indices
 
@@ -1733,8 +1729,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             assert compressor_attn_metadata is not None
             compressor_req_metadata = compressor_attn_metadata.req_metadata
             assert compressor_req_metadata is not None
-            if kv_plan.applies_sparse_attn_runtime_kwargs:
-                common_attn_kwargs["cu_seqlens_cmp_kv"] = req_metadata.cu_cmp_seqlen_list
+            kv_plan.add_dsa_sparse_attn_extra_kwargs(
+                common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
+            )
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -1750,8 +1747,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             assert compressor_attn_metadata is not None
             compressor_req_metadata = compressor_attn_metadata.req_metadata
             assert compressor_req_metadata is not None
-            if kv_plan.applies_sparse_attn_runtime_kwargs:
-                common_attn_kwargs["cu_seqlens_cmp_kv"] = req_metadata.cu_cmp_seqlen_list
+            kv_plan.add_dsa_sparse_attn_extra_kwargs(
+                common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
+            )
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
