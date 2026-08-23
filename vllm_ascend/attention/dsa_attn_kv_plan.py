@@ -46,9 +46,11 @@ class DsaAttnKvPlan:
                 return
             if slot_mapping.ndim != 2 or slot_mapping.shape[-1] != 2:
                 raise ValueError(f"BF16 DSA slot_mapping must be [num_tokens, 2], got {tuple(slot_mapping.shape)}.")
-            valid = (slot_mapping >= 0).all(dim=-1)
-            indices = slot_mapping[valid].to(torch.int64).contiguous()
-            updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:]))[valid].contiguous()
+            # Keep fixed [T, 2] shape under ACLGraph. SparseFlashMla's
+            # scatter path receives padded [-1, -1] rows directly; do not
+            # introduce a data-dependent Nonzero/gather operation here.
+            indices = slot_mapping.to(torch.int64).contiguous()
+            updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:])).contiguous()
             torch_npu.npu_scatter_nd_update_(cache, indices, updates)
             return
         torch.ops._C_ascend.kv_compress_epilog(
