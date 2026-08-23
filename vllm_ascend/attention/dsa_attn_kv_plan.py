@@ -22,6 +22,7 @@ class DsaAttnKvPlan:
     """The attention-KV plan only; indexer KV remains independently FP8."""
 
     uses_sparse_flash_mla: bool
+    uses_kv_compress_epilog: bool
     layout_kv: str
     compressor_slot_mapping_format: int
     requires_block_offset_slots: bool
@@ -76,6 +77,9 @@ class DsaAttnKvPlan:
             updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:])).contiguous()
             torch_npu.npu_scatter_nd_update_(cache, indices, updates)
             return
+        if not self.uses_kv_compress_epilog:
+            torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
+            return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
             x=x.view(-1, x.shape[-1]),
@@ -92,6 +96,7 @@ def get_dsa_attn_kv_plan(vllm_config=None) -> DsaAttnKvPlan:
     if get_ascend_device_type() != AscendDeviceType.A5:
         return DsaAttnKvPlan(
             uses_sparse_flash_mla=False,
+            uses_kv_compress_epilog=False,
             layout_kv="PA_ND",
             compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
             requires_block_offset_slots=True,
@@ -107,6 +112,7 @@ def get_dsa_attn_kv_plan(vllm_config=None) -> DsaAttnKvPlan:
     if use_bf16:
         return DsaAttnKvPlan(
             uses_sparse_flash_mla=True,
+            uses_kv_compress_epilog=False,
             layout_kv="PA_BBND",
             compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
             requires_block_offset_slots=True,
@@ -119,6 +125,7 @@ def get_dsa_attn_kv_plan(vllm_config=None) -> DsaAttnKvPlan:
         )
     return DsaAttnKvPlan(
         uses_sparse_flash_mla=False,
+        uses_kv_compress_epilog=True,
         layout_kv="PA_ND",
         compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
         requires_block_offset_slots=False,
