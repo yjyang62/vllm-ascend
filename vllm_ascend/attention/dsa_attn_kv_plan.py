@@ -65,9 +65,9 @@ class DsaAttnKvPlan:
         return torch.stack([block_idx, offset], dim=-1).to(torch.int32)
 
     def dsa_kv_compress_scatter(self, cache: torch.Tensor, x: torch.Tensor | None, slot_mapping: torch.Tensor) -> None:
+        if x is None:
+            return
         if self.uses_sparse_flash_mla:
-            if x is None:
-                return
             if slot_mapping.ndim != 2 or slot_mapping.shape[-1] != 2:
                 raise ValueError(f"BF16 DSA slot_mapping must be [num_tokens, 2], got {tuple(slot_mapping.shape)}.")
             # Keep fixed [T, 2] shape under ACLGraph. SparseFlashMla's

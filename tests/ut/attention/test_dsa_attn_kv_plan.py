@@ -43,3 +43,12 @@ def test_non_a5_plan_preserves_shared_kv_runtime_kwargs():
         kwargs = {}
         plan.add_dsa_sparse_attn_extra_kwargs(kwargs, cu_seqlens_ori_kv=torch.tensor([0, 1]))
         assert "cu_seqlens_ori_kv" in kwargs
+
+
+def test_scatter_skips_none_updates():
+    with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A5):
+        plan = get_dsa_attn_kv_plan(_config(False))
+        cache = torch.zeros(2, 1, 4)
+        with mock.patch.object(torch.ops._C_ascend, "kv_compress_epilog") as epilog:
+            plan.dsa_kv_compress_scatter(cache, None, torch.tensor([0], dtype=torch.int32))
+            epilog.assert_not_called()
