@@ -239,7 +239,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5} and not uses_explicit_bf16_kv():
+        if get_ascend_device_type() in {AscendDeviceType.A5} and not uses_explicit_bf16_kv(vllm_config):
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
@@ -344,7 +344,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if self.compressor_ratio <= 1:
             slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
             self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
-                slot_mapping, self.storage_block_size
+                slot_mapping, self.storage_block_size, self.vllm_config
             )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
@@ -413,7 +413,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         assert self.spec_slot_mapping is not None
         self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
-            slot_mapping, self.storage_block_size
+            slot_mapping, self.storage_block_size, self.vllm_config
         )
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]

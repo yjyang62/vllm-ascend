@@ -134,6 +134,17 @@ def test_a5_bf16_selectors_use_sparse_flash_mla():
         )
 
 
+def test_a5_bf16_slot_mapping_uses_builder_config():
+    flat_slots = torch.tensor([5, -1], dtype=torch.int32)
+    config = _dsv4_config(recorded=True)
+    with mock.patch("vllm_ascend.device.device_op.uses_explicit_bf16_kv") as use_bf16:
+        use_bf16.side_effect = lambda vllm_config=None: vllm_config is config
+        torch.testing.assert_close(
+            A5DeviceAdaptor.format_dsa_slot_mapping(flat_slots, 128, config),
+            torch.tensor([[0, 5], [-1, -1]], dtype=torch.int32),
+        )
+
+
 def test_layout_and_cmp_ratio_match_main_outside_bf16():
     with mock.patch("vllm_ascend.attention.dsa_v1.uses_explicit_bf16_kv", return_value=False):
         assert _dsa_layout_kv() == "PA_ND"
