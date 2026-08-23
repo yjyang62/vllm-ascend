@@ -47,8 +47,6 @@ class DsaAttnKvPlan:
             if slot_mapping.ndim != 2 or slot_mapping.shape[-1] != 2:
                 raise ValueError(f"BF16 DSA slot_mapping must be [num_tokens, 2], got {tuple(slot_mapping.shape)}.")
             valid = (slot_mapping >= 0).all(dim=-1)
-            if not torch.any(valid):
-                return
             indices = slot_mapping[valid].to(torch.int64).contiguous()
             updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:]))[valid].contiguous()
             torch_npu.npu_scatter_nd_update_(cache, indices, updates)
