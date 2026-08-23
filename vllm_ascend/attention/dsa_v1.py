@@ -633,10 +633,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 if self.compressor_ratio == 4
                 else 128
             )
-            metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.vllm_config)
-            metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
-                self.seqused_q.device, self.vllm_config
-            )
+            kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+            metadata_op = kv_plan.sparse_attn_metadata_op
+            metadata_kwargs = dict(kv_plan.sparse_attn_metadata_kwargs)
+            if kv_plan.include_metadata_device:
+                metadata_kwargs["device"] = str(self.seqused_q.device)
             sas_metadata = metadata_op(
                 **metadata_kwargs,
                 num_heads_q=n_local_heads,
@@ -917,8 +918,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_seqlens_cmp_kv = (
             None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.vllm_config)
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device, self.vllm_config)
+        kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+        metadata_op = kv_plan.sparse_attn_metadata_op
+        metadata_kwargs = dict(kv_plan.sparse_attn_metadata_kwargs)
+        if kv_plan.include_metadata_device:
+            metadata_kwargs["device"] = str(self.seqused_q.device)
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
         sas_metadata = metadata_op(
@@ -1598,20 +1602,14 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         notify_kv_cache_written(layer_name)
         record_attention_compute_start()
-        attn_op = DeviceOperator.get_dsa_sparse_attn_op(self.vllm_config)
-        attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs(self.vllm_config)
-        if has_prefill:
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
-                attn_kwargs,
-                self.vllm_config,
-                cu_seqlens_ori_kv=actual_seq_lengths_query,
-            )
-        if self.compress_ratio > 1:
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
-                attn_kwargs,
-                self.vllm_config,
-                cu_seqlens_cmp_kv=common_metadata.cu_cmp_seqlen_list,
-            )
+        kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+        attn_op = kv_plan.sparse_attn_op
+        attn_kwargs: dict = dict(kv_plan.sparse_attn_base_kwargs)
+        if kv_plan.applies_sparse_attn_runtime_kwargs:
+            if has_prefill:
+                attn_kwargs["cu_seqlens_ori_kv"] = actual_seq_lengths_query
+            if self.compress_ratio > 1:
+                attn_kwargs["cu_seqlens_cmp_kv"] = common_metadata.cu_cmp_seqlen_list
 
         attn_kwargs.update(
             ori_kv=swa_kv_cache,
