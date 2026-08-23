@@ -51,7 +51,10 @@ class DsaAttnKvPlan:
         if self.applies_sparse_attn_runtime_kwargs:
             extra_kwargs.update(kwargs_to_add)
 
-    def format_slot_mapping(self, slot_mapping: torch.Tensor, block_size: int) -> torch.Tensor:
+    def get_dsa_compressor_slot_mapping_format(self) -> int:
+        return self.compressor_slot_mapping_format
+
+    def format_dsa_slot_mapping(self, slot_mapping: torch.Tensor, block_size: int) -> torch.Tensor:
         if not self.requires_block_offset_slots:
             return slot_mapping
         valid = slot_mapping >= 0
@@ -60,7 +63,7 @@ class DsaAttnKvPlan:
         offset = torch.where(valid, slot_mapping % block_size, invalid)
         return torch.stack([block_idx, offset], dim=-1).to(torch.int32)
 
-    def scatter(self, cache: torch.Tensor, x: torch.Tensor | None, slot_mapping: torch.Tensor) -> None:
+    def dsa_kv_compress_scatter(self, cache: torch.Tensor, x: torch.Tensor | None, slot_mapping: torch.Tensor) -> None:
         if self.uses_sparse_flash_mla:
             if x is None:
                 return
