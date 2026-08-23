@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-import torch_npu
 
 from vllm_ascend.attention.dsa_kv_mode import uses_explicit_bf16_kv
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
@@ -46,10 +45,10 @@ class DsaAttnKvPlan:
                 return
             if slot_mapping.ndim != 2 or slot_mapping.shape[-1] != 2:
                 raise ValueError(f"BF16 DSA slot_mapping must be [num_tokens, 2], got {tuple(slot_mapping.shape)}.")
-            valid = (slot_mapping >= 0).all(dim=-1)
-            indices = slot_mapping[valid].to(torch.int64).contiguous()
-            updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:]))[valid].contiguous()
-            torch_npu.npu_scatter_nd_update_(cache, indices, updates)
+            # Keep the static [T, 2] mapping, including PAD_SLOT_ID rows. The
+            # v2 scatter operator handles padded slots without a data-dependent
+            # boolean-index / Nonzero operation, which ACLGraph cannot capture.
+            torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
             return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
