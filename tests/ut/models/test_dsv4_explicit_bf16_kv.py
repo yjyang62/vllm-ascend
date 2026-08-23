@@ -5,6 +5,11 @@ from unittest import mock
 
 import torch
 
+from vllm_ascend.attention.dsa_attn_kv_plan import (
+    DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
+    DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
+    get_dsa_attn_kv_plan,
+)
 from vllm_ascend.attention.dsa_kv_mode import (
     DSV4_EXPLICIT_BF16_KV_KEY,
     record_dsv4_kv_mode,
@@ -15,11 +20,6 @@ from vllm_ascend.attention.dsa_v1 import _dsa_layout_kv, _dsa_o_proj_matmul, _ds
 from vllm_ascend.attention.sparse_flash_mla import (
     sparse_flash_mla,
     sparse_flash_mla_metadata,
-)
-from vllm_ascend.device.device_op import (
-    DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
-    DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
-    A5DeviceAdaptor,
 )
 from vllm_ascend.ops.linear import _requires_a5_bf16_wo_a_layout
 from vllm_ascend.utils import AscendDeviceType
@@ -109,51 +109,32 @@ def test_mode_without_current_vllm_config_defaults_to_fp8():
 
 def test_a5_fp8_selectors_remain_identical_to_main():
     flat_slots = torch.tensor([5, -1], dtype=torch.int32)
-    with mock.patch("vllm_ascend.device.device_op.uses_explicit_bf16_kv", return_value=False):
-        assert A5DeviceAdaptor.get_dsa_sparse_attn_op() is torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
-        assert (
-            A5DeviceAdaptor.get_dsa_sparse_attn_metadata_op()
-            is torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
-        )
-        assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
-        assert A5DeviceAdaptor.get_dsa_sparse_attn_base_kwargs() == {
+    with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A5):
+        plan = get_dsa_attn_kv_plan(_dsv4_config(recorded=False))
+        assert plan.get_dsa_sparse_attn_op() is torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
+        assert plan.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
+        assert plan.get_dsa_sparse_attn_base_kwargs() == {
             "kv_quant_mode": 1,
             "tile_size": 64,
             "rope_head_dim": 64,
         }
-        assert A5DeviceAdaptor.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
-        assert A5DeviceAdaptor.format_dsa_slot_mapping(flat_slots, 128) is flat_slots
+        assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
+        assert plan.format_dsa_slot_mapping(flat_slots, 128) is flat_slots
 
 
 def test_a5_bf16_selectors_use_sparse_flash_mla():
     flat_slots = torch.tensor([5, -1], dtype=torch.int32)
-    with mock.patch("vllm_ascend.device.device_op.uses_explicit_bf16_kv", return_value=True):
-        assert A5DeviceAdaptor.get_dsa_sparse_attn_op() is sparse_flash_mla
-        assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_op() is sparse_flash_mla_metadata
-        assert A5DeviceAdaptor.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"device": "npu:0"}
-        assert A5DeviceAdaptor.get_dsa_sparse_attn_base_kwargs() == {}
-        assert A5DeviceAdaptor.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+    with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A5):
+        plan = get_dsa_attn_kv_plan(_dsv4_config(recorded=True))
+        assert plan.get_dsa_sparse_attn_op() is sparse_flash_mla
+        assert plan.get_dsa_sparse_attn_metadata_op() is sparse_flash_mla_metadata
+        assert plan.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"device": "npu:0"}
+        assert plan.get_dsa_sparse_attn_base_kwargs() == {}
+        assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
         torch.testing.assert_close(
-            A5DeviceAdaptor.format_dsa_slot_mapping(flat_slots, 128),
+            plan.format_dsa_slot_mapping(flat_slots, 128),
             torch.tensor([[0, 5], [-1, -1]], dtype=torch.int32),
         )
-
-
-def test_a5_bf16_slot_mapping_uses_builder_config():
-    flat_slots = torch.tensor([5, -1], dtype=torch.int32)
-    config = _dsv4_config(recorded=True)
-    with mock.patch("vllm_ascend.device.device_op.uses_explicit_bf16_kv") as use_bf16:
-        use_bf16.side_effect = lambda vllm_config=None: vllm_config is config
-        torch.testing.assert_close(
-            A5DeviceAdaptor.format_dsa_slot_mapping(flat_slots, 128, config),
-            torch.tensor([[0, 5], [-1, -1]], dtype=torch.int32),
-        )
-
-
-def test_a5_bf16_selectors_use_explicit_config():
-    config = _dsv4_config(recorded=True)
-    assert A5DeviceAdaptor.get_dsa_sparse_attn_op(config) is sparse_flash_mla
-    assert A5DeviceAdaptor.get_dsa_compressor_slot_mapping_format(config) == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
 
 
 def test_a5_bf16_wo_a_layout_is_independent_of_kv_dtype():
