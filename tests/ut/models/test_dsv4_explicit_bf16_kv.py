@@ -21,6 +21,8 @@ from vllm_ascend.device.device_op import (
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
     A5DeviceAdaptor,
 )
+from vllm_ascend.ops.linear import _requires_a5_bf16_wo_a_layout
+from vllm_ascend.utils import AscendDeviceType
 
 
 def _dsv4_config(
@@ -152,6 +154,13 @@ def test_a5_bf16_selectors_use_explicit_config():
     config = _dsv4_config(recorded=True)
     assert A5DeviceAdaptor.get_dsa_sparse_attn_op(config) is sparse_flash_mla
     assert A5DeviceAdaptor.get_dsa_compressor_slot_mapping_format(config) == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+
+
+def test_a5_bf16_wo_a_layout_is_independent_of_kv_dtype():
+    with mock.patch("vllm_ascend.ops.linear.get_ascend_device_type", return_value=AscendDeviceType.A5):
+        assert _requires_a5_bf16_wo_a_layout("model.layers.0.wo_a", None, torch.bfloat16)
+        assert not _requires_a5_bf16_wo_a_layout("model.layers.0.wo_a", None, torch.float8_e4m3fn)
+        assert not _requires_a5_bf16_wo_a_layout("model.layers.0.wo_a", object(), torch.bfloat16)
 
 
 def test_sparse_flash_mla_adapter_enforces_bf16_paged_layout():
