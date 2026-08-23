@@ -192,7 +192,7 @@ class Compressor(nn.Module):
             metadata.start_pos,
             metadata.block_table,
             metadata.storage_block_size,
-            DeviceOperator.get_dsa_compressor_slot_mapping_format(),
+            DeviceOperator.get_dsa_compressor_slot_mapping_format(self.vllm_config),
             self.compress_ratio,
             metadata.num_compressed_tokens,
             metadata.num_reqs_actual,

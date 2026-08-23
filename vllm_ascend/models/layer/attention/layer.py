@@ -161,6 +161,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             n_local_groups=self.n_local_groups,
             window_size=self.window_size,
             compress_ratio=self.compress_ratio,
+            vllm_config=get_current_vllm_config(),
             **extra_impl_args,
         )
 

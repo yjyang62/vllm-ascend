@@ -664,34 +664,34 @@ class BaseDeviceAdaptor:
     # ===== Sparse Attention Metadata & Op Selectors =====
 
     @staticmethod
-    def get_dsa_sparse_attn_metadata_op():
+    def get_dsa_sparse_attn_metadata_op(vllm_config=None):
         """Returns the metadata-building operator for sparse attention."""
         return torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
 
     @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
+    def get_dsa_sparse_attn_metadata_kwargs(device, vllm_config=None):
         """Returns kwargs for sparse attention metadata builder."""
         return {"device": str(device)}
 
     @staticmethod
-    def get_dsa_sparse_attn_op():
+    def get_dsa_sparse_attn_op(vllm_config=None):
         """Returns the sparse attention operator."""
         return torch.ops._C_ascend.npu_sparse_attn_sharedkv
 
     @staticmethod
-    def get_dsa_sparse_attn_base_kwargs():
+    def get_dsa_sparse_attn_base_kwargs(vllm_config=None):
         """Returns base kwargs for sparse attention (extended by caller)."""
         return {}
 
     @staticmethod
-    def get_dsa_compressor_slot_mapping_format():
+    def get_dsa_compressor_slot_mapping_format(vllm_config=None):
         """Slot mapping side output format consumed by the DSA scatter op."""
         return DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
 
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping):
+    def dsa_kv_compress_scatter(cache, x, slot_mapping, vllm_config=None):
         """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
         torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
 
@@ -837,7 +837,7 @@ class BaseDeviceAdaptor:
         return cmp_kv_tensor
 
     @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, **kwargs_to_add):
+    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, vllm_config=None, **kwargs_to_add):
         """Non-A5: add extra kwargs for sparse attention. A5: no-op."""
         extra_kwargs.update(kwargs_to_add)
 
@@ -1445,44 +1445,44 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     # ===== Sparse Attention Metadata & Op Selectors =====
 
     @staticmethod
-    def get_dsa_sparse_attn_metadata_op():
-        if uses_explicit_bf16_kv():
+    def get_dsa_sparse_attn_metadata_op(vllm_config=None):
+        if uses_explicit_bf16_kv(vllm_config):
             return sparse_flash_mla_metadata
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
 
     @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
-        if uses_explicit_bf16_kv():
+    def get_dsa_sparse_attn_metadata_kwargs(device, vllm_config=None):
+        if uses_explicit_bf16_kv(vllm_config):
             return {"device": str(device)}
         return {"kv_quant_mode": 1}
 
     @staticmethod
-    def get_dsa_sparse_attn_op():
-        if uses_explicit_bf16_kv():
+    def get_dsa_sparse_attn_op(vllm_config=None):
+        if uses_explicit_bf16_kv(vllm_config):
             return sparse_flash_mla
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
 
     @staticmethod
-    def get_dsa_sparse_attn_base_kwargs():
-        if uses_explicit_bf16_kv():
+    def get_dsa_sparse_attn_base_kwargs(vllm_config=None):
+        if uses_explicit_bf16_kv(vllm_config):
             return {}
         return {"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64}
 
     @staticmethod
-    def get_dsa_compressor_slot_mapping_format():
+    def get_dsa_compressor_slot_mapping_format(vllm_config=None):
         """A5 kv_compress_epilog consumes flat slot ids."""
-        if uses_explicit_bf16_kv():
+        if uses_explicit_bf16_kv(vllm_config):
             return DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
         return DSA_COMPRESSOR_SLOT_MAPPING_FLAT
 
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping):
+    def dsa_kv_compress_scatter(cache, x, slot_mapping, vllm_config=None):
         """Scatter KV into cache with fused quantization+compression.
         A5: kv_compress_epilog handles quant/compress/scatter internally.
         Input x is unquantized bf16; cache shape is [..., head_dim]."""
-        if uses_explicit_bf16_kv():
+        if uses_explicit_bf16_kv(vllm_config):
             if x is None:
                 return
             if slot_mapping.dim() != 2 or slot_mapping.shape[-1] != 2:
@@ -1655,9 +1655,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return None
 
     @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, **kwargs_to_add):
+    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, vllm_config=None, **kwargs_to_add):
         """A5: no-op — A5 ops do not need extra kwargs from this path."""
-        if uses_explicit_bf16_kv():
+        if uses_explicit_bf16_kv(vllm_config):
             extra_kwargs.update(kwargs_to_add)
 
     @staticmethod

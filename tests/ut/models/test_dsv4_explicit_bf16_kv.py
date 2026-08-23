@@ -145,6 +145,12 @@ def test_a5_bf16_slot_mapping_uses_builder_config():
         )
 
 
+def test_a5_bf16_selectors_use_explicit_config():
+    config = _dsv4_config(recorded=True)
+    assert A5DeviceAdaptor.get_dsa_sparse_attn_op(config) is sparse_flash_mla
+    assert A5DeviceAdaptor.get_dsa_compressor_slot_mapping_format(config) == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+
+
 def test_layout_and_cmp_ratio_match_main_outside_bf16():
     with mock.patch("vllm_ascend.attention.dsa_v1.uses_explicit_bf16_kv", return_value=False):
         assert _dsa_layout_kv() == "PA_ND"

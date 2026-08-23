@@ -523,8 +523,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]
 
         num_heads = self.model_config.hf_config.num_attention_heads
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.vllm_config)
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device, self.vllm_config)
         metadata_kwargs.setdefault("device", str(self.seqused_q.device))
         cu_seqlens_ori_kv = (
             local_query_start_loc
@@ -954,8 +954,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cu_seqlens_cmp_kv = (
                 None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
             )
-            metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-            metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+            metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.vllm_config)
+            metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
+                self.seqused_q.device, self.vllm_config
+            )
             metadata_kwargs.setdefault("device", str(self.seqused_q.device))
             kw = dict(
                 **metadata_kwargs,
@@ -1116,7 +1118,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
         self.attn_sink = kwargs["attn_sink"]
 
-        self.vllm_config = get_current_vllm_config()
+        self.vllm_config = kwargs.get("vllm_config", get_current_vllm_config())
 
         # indexer param
         if self.indexer is not None:
@@ -1199,7 +1201,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             metadata.start_pos,
             metadata.block_table,
             metadata.storage_block_size,
-            DeviceOperator.get_dsa_compressor_slot_mapping_format(),
+            DeviceOperator.get_dsa_compressor_slot_mapping_format(self.vllm_config),
             self.compress_ratio,
             metadata.num_compressed_tokens,
             metadata.num_reqs_actual,
@@ -1625,7 +1627,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
+        DeviceOperator.dsa_kv_compress_scatter(
+            swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping, self.vllm_config
+        )
 
         compress_topk_idxs = None
         if self.compress_ratio > 1:
@@ -1683,15 +1687,17 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
             if compressed_kv.numel() == 0:
                 compressed_kv = None
-            DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+            DeviceOperator.dsa_kv_compress_scatter(
+                compress_kv_cache, compressed_kv, compress_slot_mapping, self.vllm_config
+            )
 
         notify_kv_cache_written(layer_name)
         record_attention_compute_start()
-        attn_op = DeviceOperator.get_dsa_sparse_attn_op()
-        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
+        attn_op = DeviceOperator.get_dsa_sparse_attn_op(self.vllm_config)
+        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs(self.vllm_config)
         if has_prefill:
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
-                extra_attn_kwargs, cu_seqlens_ori_kv=local_seq_lengths_query
+                extra_attn_kwargs, self.vllm_config, cu_seqlens_ori_kv=local_seq_lengths_query
             )
         if swa_req_metadata.dspark_swa_indices is not None:
             extra_attn_kwargs["ori_sparse_indices"] = swa_req_metadata.dspark_swa_indices
@@ -1726,7 +1732,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             compressor_req_metadata = compressor_attn_metadata.req_metadata
             assert compressor_req_metadata is not None
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
-                common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
+                common_attn_kwargs, self.vllm_config, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
             attn_output = attn_op(
                 q,
@@ -1744,7 +1750,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             compressor_req_metadata = compressor_attn_metadata.req_metadata
             assert compressor_req_metadata is not None
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
-                common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
+                common_attn_kwargs, self.vllm_config, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
             attn_output = attn_op(
                 q,
