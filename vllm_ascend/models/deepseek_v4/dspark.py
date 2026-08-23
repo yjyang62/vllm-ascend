@@ -119,6 +119,7 @@ class DeepseekV4DSparkModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
+        self.vllm_config = vllm_config
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
         self.hc_mult = config.hc_mult
@@ -233,8 +234,10 @@ class DeepseekV4DSparkModel(nn.Module):
         from vllm_ascend.device.device_op import DeviceOperator
 
         if slot_mapping.ndim == 1:
-            slot_mapping = DeviceOperator.format_dsa_slot_mapping(slot_mapping, swa_cache_layer.block_size)
-        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, shared_kv, slot_mapping)
+            slot_mapping = DeviceOperator.format_dsa_slot_mapping(
+                slot_mapping, swa_cache_layer.block_size, self.vllm_config
+            )
+        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, shared_kv, slot_mapping, self.vllm_config)
 
     def precompute_and_store_context_kv(
         self,

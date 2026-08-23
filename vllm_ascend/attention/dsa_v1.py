@@ -632,8 +632,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 if self.compressor_ratio == 4
                 else 128
             )
-            metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-            metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+            metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.vllm_config)
+            metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(
+                self.seqused_q.device, self.vllm_config
+            )
             sas_metadata = metadata_op(
                 **metadata_kwargs,
                 num_heads_q=n_local_heads,
@@ -914,8 +916,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_seqlens_cmp_kv = (
             None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op(self.vllm_config)
+        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device, self.vllm_config)
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
         sas_metadata = metadata_op(
@@ -1014,6 +1016,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         compress_ratio: int,
         **kwargs,
     ):
+        self.vllm_config = kwargs["vllm_config"]
         self.num_heads = n_heads
         self.n_local_heads = n_local_heads
         self.scale = scale
@@ -1356,6 +1359,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             swa_kv_cache,
             kv,
             slot_mapping,
+            self.vllm_config,
         )
 
         return q, qr, qr_pertoken_scale
@@ -1427,7 +1431,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 rotary_mode="interleave",
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
-            DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
+            DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping, self.vllm_config)
 
         if is_prefill:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
@@ -1493,6 +1497,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                         compress_kv_cache,
                         compressed_kv,
                         compress_slot_mapping,
+                        self.vllm_config,
                     )
 
             overlap_plan = IndexerOverlapPlan(
@@ -1520,6 +1525,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 compress_kv_cache,
                 compressed_kv,
                 compress_slot_mapping,
+                self.vllm_config,
             )
         return None
 
@@ -1591,16 +1597,18 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         notify_kv_cache_written(layer_name)
         record_attention_compute_start()
-        attn_op = DeviceOperator.get_dsa_sparse_attn_op()
-        attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
+        attn_op = DeviceOperator.get_dsa_sparse_attn_op(self.vllm_config)
+        attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs(self.vllm_config)
         if has_prefill:
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
                 attn_kwargs,
+                self.vllm_config,
                 cu_seqlens_ori_kv=actual_seq_lengths_query,
             )
         if self.compress_ratio > 1:
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
                 attn_kwargs,
+                self.vllm_config,
                 cu_seqlens_cmp_kv=common_metadata.cu_cmp_seqlen_list,
             )
 
