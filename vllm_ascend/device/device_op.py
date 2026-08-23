@@ -825,7 +825,7 @@ class BaseDeviceAdaptor:
         return slot_mapping
 
     @staticmethod
-    def format_dsa_slot_mapping(slot_mapping, block_size):
+    def format_dsa_slot_mapping(slot_mapping, block_size, vllm_config=None):
         """Format slot_mapping for metadata storage.
         Non-A5: 2D [block_idx, offset]; A5: 1D pass-through."""
         return torch.stack([slot_mapping // block_size, slot_mapping % block_size], axis=-1)
@@ -1639,9 +1639,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return slot_mapping
 
     @staticmethod
-    def format_dsa_slot_mapping(slot_mapping, block_size):
-        """A5: 1D pass-through."""
-        if uses_explicit_bf16_kv():
+    def format_dsa_slot_mapping(slot_mapping, block_size, vllm_config=None):
+        """Format A5 slots for the configured FP8 or BF16 DSV4 cache."""
+        if uses_explicit_bf16_kv(vllm_config):
             valid = slot_mapping >= 0
             invalid = torch.full_like(slot_mapping, -1)
             block_idx = torch.where(valid, torch.div(slot_mapping, block_size, rounding_mode="floor"), invalid)
