@@ -28,3 +28,15 @@ def test_recorded_mode_survives_cache_dtype_normalization():
     assert config.additional_config[DSV4_EXPLICIT_BF16_KV_KEY] is False
     config.cache_config.cache_dtype = "bfloat16"
     assert not uses_explicit_bf16_kv(config)
+
+
+def test_recording_overwrites_a_hand_written_key():
+    config = _config()
+    config.additional_config[DSV4_EXPLICIT_BF16_KV_KEY] = True
+    record_dsv4_kv_mode(config, config.additional_config)
+    assert not uses_explicit_bf16_kv(config)
+
+
+def test_missing_snapshot_keeps_fp8_even_for_bf16_cache_dtype():
+    config = _config("bfloat16")
+    assert not uses_explicit_bf16_kv(config)

@@ -25,7 +25,13 @@ def record_dsv4_kv_mode(vllm_config, additional_config: dict) -> None:
 
 
 def uses_explicit_bf16_kv(vllm_config=None) -> bool:
-    """Return whether the launch selected BF16 SparseFlashMla KV."""
+    """Return whether the launch recorded BF16 SparseFlashMla KV.
+
+    Only the recorded snapshot is trusted. Re-reading ``cache_dtype`` here
+    cannot tell an explicit bfloat16 request apart from ``auto``, because the
+    platform rewrites it to the model dtype right after recording. A missing
+    snapshot therefore means the upstream FP8 KV path.
+    """
     if vllm_config is None:
         from vllm.config import get_current_vllm_config
 
@@ -33,10 +39,7 @@ def uses_explicit_bf16_kv(vllm_config=None) -> bool:
             vllm_config = get_current_vllm_config()
         except AssertionError:
             # Module inspection and direct unit tests can reach device helpers
-            # without a current vLLM config. Fall back to the upstream FP8
-            # behavior there.
+            # without a current vLLM config.
             return False
     additional_config = getattr(vllm_config, "additional_config", None) or {}
-    if DSV4_EXPLICIT_BF16_KV_KEY in additional_config:
-        return bool(additional_config[DSV4_EXPLICIT_BF16_KV_KEY])
-    return resolve_dsv4_use_bf16_kv(vllm_config)
+    return bool(additional_config.get(DSV4_EXPLICIT_BF16_KV_KEY, False))
