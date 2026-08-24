@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import torch
 import torch.nn as nn
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention.attention import _init_kv_cache_quant
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -94,7 +94,6 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         n_local_groups: int,
         window_size: int,
         compress_ratio: int,
-        vllm_config: VllmConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -158,18 +157,20 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             n_local_groups=self.n_local_groups,
             window_size=self.window_size,
             compress_ratio=self.compress_ratio,
-            vllm_config=vllm_config,
+            vllm_config=get_current_vllm_config(),
             **extra_impl_args,
         )
 
         self.use_direct_call = not current_platform.opaque_attention_op()
 
-        compilation_config = vllm_config.compilation_config
+        compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        self.kv_cache = [torch.tensor([]) for _ in range(vllm_config.parallel_config.pipeline_parallel_size)]
+        self.kv_cache = [
+            torch.tensor([]) for _ in range(get_current_vllm_config().parallel_config.pipeline_parallel_size)
+        ]
         self.kv_cache_dtype = kv_cache_dtype
 
         self.use_sparse = True
