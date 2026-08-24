@@ -629,6 +629,13 @@ class NPUWorker(WorkerBase):
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         self.log_memory_stats()
+        with set_current_vllm_config(self.vllm_config):
+            return self._execute_model(scheduler_output)
+
+    def _execute_model(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
@@ -694,7 +701,8 @@ class NPUWorker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        with set_current_vllm_config(self.vllm_config):
+            return self.model_runner.sample_tokens(grammar_output)
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -741,17 +749,18 @@ class NPUWorker(WorkerBase):
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
 
-        for size in sorted(warmup_sizes, reverse=True):
-            logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size)
+        with set_current_vllm_config(self.vllm_config):
+            for size in sorted(warmup_sizes, reverse=True):
+                logger.info("Compile and warming up model for size %d", size)
+                self.model_runner._dummy_run(size)
 
-        from vllm_ascend.model_executor.warmup.kernel_warmup import kernel_warmup
+            from vllm_ascend.model_executor.warmup.kernel_warmup import kernel_warmup
 
-        kernel_warmup(self)
+            kernel_warmup(self)
 
-        npugraph_memory_bytes = 0
-        if not self.model_config.enforce_eager:
-            npugraph_memory_bytes = self.model_runner.capture_model()
+            npugraph_memory_bytes = 0
+            if not self.model_config.enforce_eager:
+                npugraph_memory_bytes = self.model_runner.capture_model()
 
         # Suggest an optimal --kv-cache-memory value for future runs.
         # Only emitted when we ran full profiling (kv_cache_memory_bytes was not
@@ -869,11 +878,12 @@ class NPUWorker(WorkerBase):
         # Without force_attention, attn_metadata may be None and attention
         # won't run, making profiling results inaccurate.
         # _dummy_run handles PP internally (intermediate tensors, etc.)
-        self.model_runner._dummy_run(
-            num_tokens=num_tokens,
-            force_attention=True,  # Critical: ensure attention is executed
-            profile_cpp=True,
-        )
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner._dummy_run(
+                num_tokens=num_tokens,
+                force_attention=True,  # Critical: ensure attention is executed
+                profile_cpp=True,
+            )
 
         # Synchronize after forward to ensure NPU operations complete
         torch.npu.synchronize()
@@ -1050,7 +1060,8 @@ class NPUWorker(WorkerBase):
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        with set_current_vllm_config(self.vllm_config):
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
