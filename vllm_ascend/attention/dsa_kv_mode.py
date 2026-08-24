@@ -10,7 +10,8 @@ Resolution order (see ``resolve_dsv4_use_bf16_kv``):
 
 from __future__ import annotations
 
-DSV4_EXPLICIT_BF16_KV_KEY = "dsv4_use_bf16_sparse_flash_mla"
+# Internal snapshot written by ``record_dsv4_kv_mode``; not a user-facing option.
+DSV4_EXPLICIT_BF16_KV_KEY = "_dsv4_use_bf16_sparse_flash_mla"
 
 _FP8_KV_CACHE_DTYPES = frozenset({"fp8", "float8", "float8_e4m3fn", "float8_e5m2"})
 _BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
