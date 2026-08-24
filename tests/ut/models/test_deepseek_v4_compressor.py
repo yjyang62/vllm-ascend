@@ -8,7 +8,6 @@ import pytest
 import torch
 
 from vllm_ascend.attention import dsa_attn_kv_plan
-from vllm_ascend.attention.dsa_kv_mode import DSV4_EXPLICIT_BF16_KV_KEY
 from vllm_ascend.models.deepseek_v4.compressor import (
     AscendCompressorMetadata,
     AscendCompressorStateCache,
@@ -154,8 +153,7 @@ class TestCompressorStateCache:
         cache.dtype = torch.float32
         cache.sliding_window = 64
         vllm_config = SimpleNamespace(
-            cache_config=SimpleNamespace(block_size=128),
-            additional_config={DSV4_EXPLICIT_BF16_KV_KEY: False},
+            cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
         )
 
         spec = cache.get_kv_cache_spec(vllm_config)

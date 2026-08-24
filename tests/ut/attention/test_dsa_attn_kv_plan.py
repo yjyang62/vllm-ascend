@@ -9,13 +9,12 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
     get_dsa_attn_kv_plan,
 )
-from vllm_ascend.attention.dsa_kv_mode import DSV4_EXPLICIT_BF16_KV_KEY
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.utils import AscendDeviceType
 
 
 def _config(use_bf16: bool):
-    return SimpleNamespace(additional_config={DSV4_EXPLICIT_BF16_KV_KEY: use_bf16})
+    return SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16" if use_bf16 else "auto"))
 
 
 def test_a5_fp8_plan_uses_flat_shared_kv():

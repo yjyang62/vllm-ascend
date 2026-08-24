@@ -1,42 +1,55 @@
 # SPDX-License-Identifier: Apache-2.0
 from types import SimpleNamespace
+from unittest import mock
 
-from vllm_ascend.attention.dsa_kv_mode import (
-    DSV4_EXPLICIT_BF16_KV_KEY,
-    record_dsv4_kv_mode,
-    resolve_dsv4_use_bf16_kv,
-    uses_explicit_bf16_kv,
-)
+from vllm_ascend.attention.dsa_kv_mode import resolve_dsv4_cache_dtype, uses_explicit_bf16_kv
+from vllm_ascend.utils import AscendDeviceType
 
 
 def _config(cache_dtype: str = "auto"):
-    return SimpleNamespace(
-        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
-        additional_config={},
-    )
+    return SimpleNamespace(cache_config=SimpleNamespace(cache_dtype=cache_dtype))
 
 
-def test_auto_defaults_to_fp8_and_explicit_dtype_overrides():
-    assert not resolve_dsv4_use_bf16_kv(_config())
-    assert not resolve_dsv4_use_bf16_kv(_config("fp8"))
-    assert resolve_dsv4_use_bf16_kv(_config("bfloat16"))
+def _on(device_type):
+    return mock.patch("vllm_ascend.attention.dsa_kv_mode.get_ascend_device_type", return_value=device_type)
 
 
-def test_recorded_mode_survives_cache_dtype_normalization():
-    config = _config()
-    record_dsv4_kv_mode(config, config.additional_config)
-    assert config.additional_config[DSV4_EXPLICIT_BF16_KV_KEY] is False
-    config.cache_config.cache_dtype = "bfloat16"
-    assert not uses_explicit_bf16_kv(config)
+def test_only_explicit_bfloat16_selects_bf16_kv_on_a5():
+    with _on(AscendDeviceType.A5):
+        assert uses_explicit_bf16_kv(_config("bfloat16"))
+        assert not uses_explicit_bf16_kv(_config())
+        assert not uses_explicit_bf16_kv(_config("fp8"))
+        # The A5 spec path rewrites cache_dtype once FP8 KV is chosen.
+        assert not uses_explicit_bf16_kv(_config("float8_e4m3fn"))
 
 
-def test_recording_overwrites_a_hand_written_key():
-    config = _config()
-    config.additional_config[DSV4_EXPLICIT_BF16_KV_KEY] = True
-    record_dsv4_kv_mode(config, config.additional_config)
-    assert not uses_explicit_bf16_kv(config)
+def test_non_a5_never_uses_bf16_kv():
+    with _on(AscendDeviceType.A3):
+        assert not uses_explicit_bf16_kv(_config("bfloat16"))
 
 
-def test_missing_snapshot_keeps_fp8_even_for_bf16_cache_dtype():
-    config = _config("bfloat16")
-    assert not uses_explicit_bf16_kv(config)
+def test_non_a5_pins_cache_dtype_to_the_model_dtype():
+    with _on(AscendDeviceType.A3):
+        for launch in ("auto", "bfloat16", "fp8"):
+            assert resolve_dsv4_cache_dtype(launch, "bfloat16") == "bfloat16"
+
+
+def test_a5_collapses_non_bfloat16_requests_to_auto():
+    # "auto" resolves to the model dtype everywhere downstream, so it carries
+    # the FP8 mode without changing any value upstream would have computed.
+    with _on(AscendDeviceType.A5):
+        assert resolve_dsv4_cache_dtype("bfloat16", "bfloat16") == "bfloat16"
+        assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "auto"
+        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "auto"
+
+
+def test_a5_mode_survives_the_spec_path_rewrite():
+    with _on(AscendDeviceType.A5):
+        for launch in ("auto", "fp8"):
+            pinned = resolve_dsv4_cache_dtype(launch, "bfloat16")
+            assert not uses_explicit_bf16_kv(_config(pinned))
+            # layer.get_kv_cache_spec pins FP8 once it has picked the mode.
+            assert not uses_explicit_bf16_kv(_config("float8_e4m3fn"))
+
+        pinned = resolve_dsv4_cache_dtype("bfloat16", "bfloat16")
+        assert uses_explicit_bf16_kv(_config(pinned))
