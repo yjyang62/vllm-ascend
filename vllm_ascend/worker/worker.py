@@ -167,7 +167,6 @@ class NPUWorker(WorkerBase):
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         self._pp_send_work: list[Handle] = []
-        self._current_vllm_config_cm = None
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -623,22 +622,6 @@ class NPUWorker(WorkerBase):
             self.torch_allocated / GiB_bytes,
         )
 
-    def _pin_current_vllm_config(self) -> None:
-        """Keep this worker's config set for the process lifetime.
-
-        CustomOps (RMSNorm, rotary, Linear, MoE) call get_current_vllm_config()
-        from ``__init__``, including when they are created during eager prefill.
-        ``set_current_vllm_config`` restores ``None`` on exit, so wrapping only
-        ``load_model`` is not enough. Pinning once after load avoids wrapping
-        every later entry point. Nested ``with set_current_vllm_config(...)``
-        still restores this pin.
-        """
-        if getattr(self, "_current_vllm_config_cm", None) is not None:
-            return
-        cm = set_current_vllm_config(self.vllm_config)
-        cm.__enter__()
-        self._current_vllm_config_cm = cm
-
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -723,7 +706,6 @@ class NPUWorker(WorkerBase):
 
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
-        self._pin_current_vllm_config()
 
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (
