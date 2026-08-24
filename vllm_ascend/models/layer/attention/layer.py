@@ -58,16 +58,13 @@ def get_dsv4_block_sizes(use_a5_bf16_kv: bool = False):
 
 
 DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
+DSV4_BLOCK_SIZES_A5_BF16 = get_dsv4_block_sizes(use_a5_bf16_kv=True)
 
 
 def dsv4_block_sizes(vllm_config: VllmConfig):
-    """Return the upstream table unless BF16 KV was explicitly requested.
-
-    Non-BF16 launches must reuse the exact ``DSV4_BLOCK_SIZES`` object that
-    upstream reads, not a freshly evaluated copy.
-    """
-    if uses_explicit_bf16_kv(vllm_config) and get_ascend_device_type() in {AscendDeviceType.A5}:
-        return get_dsv4_block_sizes(use_a5_bf16_kv=True)
+    """Return the A5 BF16 KV table when explicitly requested, else the upstream table."""
+    if get_ascend_device_type() in {AscendDeviceType.A5} and uses_explicit_bf16_kv(vllm_config):
+        return DSV4_BLOCK_SIZES_A5_BF16
     return DSV4_BLOCK_SIZES
 
 
