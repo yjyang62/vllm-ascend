@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm_ascend.attention.dsa_kv_mode import DSV4_EXPLICIT_BF16_KV_KEY
 from vllm_ascend.attention.dsa_v1 import (
     DSA_METADATA_BUFFER_SIZE,
     AscendDSAImpl,
@@ -583,6 +584,7 @@ def _make_impl() -> AscendDSAImpl:
             n_local_groups=1,
             window_size=16,
             compress_ratio=1,
+            vllm_config=SimpleNamespace(additional_config={DSV4_EXPLICIT_BF16_KV_KEY: False}),
             wq_a=linear,
             wq_b=linear,
             wkv=linear,
