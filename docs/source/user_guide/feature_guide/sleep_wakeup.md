@@ -425,7 +425,42 @@ llm.wake_up()        # 无需 reload / layerwise
 5. **与 DP Router 的边界**  
    Sleep / 权重同步直连 Engine；请求落 DP 仍走 Router。
 
-## 6. 相关链接
+## 6. 不足与改进
+
+这套方案能在**不退进程**的前提下完成同卡让卡与换权，但还不是「一条 API 做完」。主要缺口：
+
+1. **默认放不干净**  
+   sleep 只 unmap 池内 `weights` / `kv_cache`。HCCL、ACLGraph workspace 要开
+   extra cleanup 才还给 Trainer；开了又拉长 wakeup（毁建通信组、重新
+   `capture_model()`）。  
+   **改进**：通信与图 workspace 做成独立 tag，可按需 sleep、不必整组销毁 HCCL；
+   或提供「只放 workspace、保留通信组」的中间档。
+
+2. **编排步骤多、易漏**  
+   Level 2 必须拆两次 `wake_up`，中间再走 `initialize → reload → finalize`，
+   并自行 `pause_generation` / `reset_prefix_cache`。漏一步会出现半更新权重、
+   旧 prefix 命中、或灌权峰值 OOM。  
+   **改进**：Vime 收成组合接口（例如让卡 → 训练 → 灌权 → 恢复 KV）；引擎侧提供
+   「L2 换权」一条路径，减少调用方拼步骤。
+
+3. **布局与锚点约束重**  
+   不能普通 `load_model`（会换掉 Parameter，图仍钉旧 `data_ptr`）。MoE transpose
+   必须落在 `process_weights_after_loading` + finalize；未 `register_buffer` 的
+   设备张量 Level 2 后会踩非法地址。  
+   **改进**：继续把布局收敛到 process 路径；对未纳入 named buffer / sleep 池的
+   NPU 张量做检测或告警。
+
+4. **可观测性偏粗**  
+   sleep 日志目前主要是总释放量，缺少 `weights` / `kv_cache` / HCCL / workspace
+   分项。同卡 OOM 时不好判断是池内没放干净还是池外泄漏。  
+   **改进**：按 tag 记录 sleep 前后占用。
+
+5. **同卡注定串行**  
+   同一组 NPU 上 Rollout 与 Train 不能重叠，一轮里总有一侧在等。这是同卡本身的
+   限制，不是 sleep 能消掉的。吞吐优先仍应训推分离；Sleep Mode 解决的是「同卡
+   也能换权」，不是「同卡也能并行」。
+
+## 7. 相关链接
 
 - [Sleep Mode Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/sleep_mode.html)
 - 上游 [Sleep Mode](https://docs.vllm.ai/en/latest/features/sleep_mode/)
