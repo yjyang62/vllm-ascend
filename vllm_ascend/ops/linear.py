@@ -456,7 +456,13 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        if "wo_a" in self.prefix and get_ascend_device_type() != AscendDeviceType.A5:
+        reshape_a5_bf16_wo_a = (
+            "wo_a" in self.prefix
+            and get_ascend_device_type() == AscendDeviceType.A5
+            and self.quant_config is None
+            and loaded_weight.dtype == torch.bfloat16
+        )
+        if "wo_a" in self.prefix and (get_ascend_device_type() != AscendDeviceType.A5 or reshape_a5_bf16_wo_a):
             if self.weight.ndim == 2:
                 super().weight_loader(param, loaded_weight)
                 self.weight.data = (
