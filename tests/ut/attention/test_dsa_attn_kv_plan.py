@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 import torch
@@ -39,7 +40,7 @@ def test_non_a5_plan_preserves_shared_kv_runtime_kwargs():
     with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A3):
         plan = get_dsa_attn_kv_plan(_config(True))
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
         plan.add_dsa_sparse_attn_extra_kwargs(kwargs, cu_seqlens_ori_kv=torch.tensor([0, 1]))
         assert "cu_seqlens_ori_kv" in kwargs
 
