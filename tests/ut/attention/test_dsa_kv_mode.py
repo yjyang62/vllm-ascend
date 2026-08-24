@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from types import SimpleNamespace
 
-import torch
-
 from vllm_ascend.attention.dsa_kv_mode import (
     DSV4_EXPLICIT_BF16_KV_KEY,
     record_dsv4_kv_mode,
@@ -13,7 +11,6 @@ from vllm_ascend.attention.dsa_kv_mode import (
 
 def _config(cache_dtype: str = "auto"):
     return SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=512), dtype=torch.bfloat16),
         cache_config=SimpleNamespace(cache_dtype=cache_dtype),
         additional_config={},
     )
