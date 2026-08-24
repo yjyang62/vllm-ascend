@@ -14,14 +14,21 @@
 
 ## 1. 原理
 
-强化学习（PPO / GRPO / RLHF 等）包含两个阶段：
+强化学习（PPO / GRPO / RLHF 等）把 **推（Rollout）** 和 **训（Train）** 拼成一轮循环。
+同卡场景下一轮大致是：
 
-1. **Rollout**：策略模型在 vLLM Ascend 上做自回归生成；
-2. **Train**：Trainer（如 Vime）基于生成样本更新策略参数。
+1. **采样（Rollout）**：Trainer / RolloutManager 下发 prompts；策略模型在 vLLM
+   Ascend 上自回归生成 completions（及 logprobs 等），得到训练样本；
+2. **让卡（Sleep）**：释放推理占用的权重与 KV cache，把同一组 NPU 显存交给训练侧；
+3. **训练（Train）**：Trainer（如 Vime）在同卡上做 forward / backward，按 PPO /
+   GRPO 等更新策略参数；
+4. **换权（Wake）**：把新策略写回推理引擎，恢复 KV，再进入下一轮采样。
 
-**同卡训推**指两个阶段共享同一组 NPU。Rollout 期间引擎占用模型权重与 KV cache；进入 Train 前需释放这部分显存，否则训练侧无法完成 forward / backward。Train 结束后策略参数已更新，须写回推理引擎，供下一轮 Rollout 使用。
+**同卡训推**即上述循环共享同一组 NPU。不让卡则 Train 做不了 backward；训完不换权，
+下一轮仍在用旧策略。
 
-若每次通过销毁并重建 vLLM 进程完成切换，通信组与图捕获等状态均需重建，开销较大。Sleep Mode 在**不退出进程**的前提下完成显存让渡与权重回写：
+若每次通过销毁并重建 vLLM 进程完成切换，通信组与图捕获等状态均需重建，开销较大。
+Sleep Mode 在**不退出进程**的前提下完成显存让渡与权重回写：
 
 > sleep 释放推理显存 → Train → wake 并灌入新权重 → 继续 Rollout。
 
