@@ -41,6 +41,7 @@ from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
     IndexerOverlapPlan,
 )
+from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
@@ -592,6 +593,7 @@ def _make_impl(
             n_local_groups=1,
             window_size=16,
             compress_ratio=1,
+            vllm_config=SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto")),
             wq_a=linear,
             wq_b=linear,
             wkv=linear,
@@ -1065,6 +1067,29 @@ def test_forward_attention_sets_compressed_kv_args(
         assert sparse_kwargs["cmp_sparse_indices"] is topk_indices
     else:
         assert "cmp_sparse_indices" not in sparse_kwargs
+
+
+def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
+    impl = _make_impl()
+    impl.wo_a = SimpleNamespace(weight=torch.randn(1, 2, 2), weight_scale=None)
+    impl.wo_b = lambda x: x
+    o_proj_input = torch.randn(4, 1, 2)
+    output = torch.empty(4, 2)
+    projected = torch.randn(4, 1, 2)
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.get_ascend_device_type", return_value=AscendDeviceType.A5),
+        patch("vllm_ascend.attention.dsa_v1.uses_explicit_bf16_kv", return_value=True),
+        patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        patch("vllm_ascend.attention.dsa_v1.olora_tp_enable", return_value=False),
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul", return_value=projected) as batched,
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_dynamic_mx_quant") as quant,
+    ):
+        impl._forward_o_proj(o_proj_input, output)
+
+    batched.assert_called_once()
+    quant.assert_not_called()
+    torch.testing.assert_close(output, projected.reshape(4, -1))
 
 
 def test_prepared_cache_rejects_multistream_before_cache_access():
