@@ -417,6 +417,43 @@ class TestNPUWorker(TestBase):
             worker.wake_up(tags=["kv_cache"])
             mock_model_runner.post_kv_cache_wake_up.assert_called_once_with()
 
+    @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", return_value=(2000, 4000))
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_sleep_level1_cpu_clones_named_buffers(self, mock_get_config, mock_allocator_class, _mock_mem_info):
+        """Level-1 sleep must CPU-clone named buffers for wake_up restore."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_get_config.return_value = SimpleNamespace(enable_sleep_mode_extra_cleanup=False)
+        mock_allocator = MagicMock()
+        mock_allocator_class.get_instance.return_value = mock_allocator
+
+        model = torch.nn.Module()
+        model.register_buffer("running_mean", torch.tensor([1.0, 2.0, 3.0]))
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = SimpleNamespace(model=model, post_kv_cache_wake_up=MagicMock())
+            worker._sleep_saved_buffers = {}
+            worker.sleep_wakeup_manager = MagicMock()
+
+            worker.sleep(level=1)
+
+            mock_allocator.sleep.assert_called_once_with(offload_tags=("weights",))
+            self.assertIn("running_mean", worker._sleep_saved_buffers)
+            saved = worker._sleep_saved_buffers["running_mean"]
+            self.assertEqual(saved.device.type, "cpu")
+            torch.testing.assert_close(saved, torch.tensor([1.0, 2.0, 3.0]))
+
+            # Simulate allocator/wake path clearing NPU buffer content.
+            model.running_mean.zero_()
+            mock_get_config.return_value = SimpleNamespace(
+                weight_nz_mode=0, enable_sleep_mode_extra_cleanup=False
+            )
+            worker.wake_up(tags=["weights"])
+            torch.testing.assert_close(model.running_mean.cpu(), torch.tensor([1.0, 2.0, 3.0]))
+            self.assertEqual(worker._sleep_saved_buffers, {})
+
     @staticmethod
     def _make_unquantized_moe_model():
         model = torch.nn.Module()
