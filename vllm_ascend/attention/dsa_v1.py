@@ -96,23 +96,6 @@ def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig | None 
     return max(compress_ratio, 1)
 
 
-def _dsa_o_proj_matmul(
-    o_proj_input: torch.Tensor,
-    weight: torch.Tensor,
-    num_groups: int,
-) -> torch.Tensor:
-    """Grouped A5 BF16 o_proj without the quantized batch-matmul kernel."""
-    if weight.ndim == 2:
-        grouped_weight = weight.view(num_groups, -1, weight.shape[-1]).transpose(1, 2)
-    elif weight.ndim == 3 and weight.shape[0] == num_groups:
-        grouped_weight = weight
-        if grouped_weight.shape[1] != o_proj_input.shape[-1]:
-            grouped_weight = grouped_weight.transpose(1, 2)
-    else:
-        raise ValueError(f"Unexpected DSA wo_a weight shape: {tuple(weight.shape)}")
-    return torch.matmul(o_proj_input.transpose(0, 1), grouped_weight).transpose(0, 1)
-
-
 class AscendDSABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -1213,19 +1196,18 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             o_proj_input = self.wo_a(o_proj_input)
             output[...] = self.wo_b(o_proj_input)
         else:
-            if get_ascend_device_type() == AscendDeviceType.A5 and uses_explicit_bf16_kv():
-                o_proj_input = _dsa_o_proj_matmul(o_proj_input, self.wo_a.weight, self.n_local_groups)
-            else:
-                o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                    o_proj_input,
-                    self.wo_a.weight,
-                    bias=None,
-                    scale=None,
-                    perm_x1=(1, 0, 2),
-                    perm_x2=(0, 1, 2),
-                    perm_y=(1, 0, 2),
-                    batch_split_factor=1,
-                )
+            # A5 BF16 wo_a is reshaped to [groups, hidden, rank] at load time,
+            # matching the A3 layout expected by npu_transpose_batchmatmul.
+            o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
+                self.wo_a.weight,
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
             output[...] = self.wo_b(o_proj_input)
         return output

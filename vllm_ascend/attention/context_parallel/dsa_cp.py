@@ -17,7 +17,6 @@ from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_kv_mode import uses_explicit_bf16_kv
 from vllm_ascend.attention.dsa_v1 import (
     _dsa_layout_kv,
-    _dsa_o_proj_matmul,
     _dsa_swa_only_cmp_ratio,
     _has_weight_scale,
     build_dspark_swa_indices,
@@ -1488,15 +1487,10 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 if olora_tp_enable():
                     o_proj_input = self.wo_a(o_proj_input)
-                elif get_ascend_device_type() == AscendDeviceType.A5 and uses_explicit_bf16_kv():
-                    o_proj_input = _dsa_o_proj_matmul(
-                        o_proj_input,
-                        self._get_batched_wo_a_weight(o_proj_groups),
-                        o_proj_groups,
-                    )
                 else:
                     # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
                     # o = torch.einsum("tgd,grd->tgr", o, wo_a)
+                    # A5 BF16 uses the same 3D [groups, hidden, rank] layout.
                     o_proj_input = torch_npu.npu_transpose_batchmatmul(
                         o_proj_input,
                         self._get_batched_wo_a_weight(o_proj_groups),
