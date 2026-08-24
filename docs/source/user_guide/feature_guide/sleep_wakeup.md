@@ -430,14 +430,13 @@ llm.wake_up()        # 无需 reload / layerwise
 当前方案能完成同卡让卡与换权，但仍有两处明显成本与风险。
 
 1. **wakeup 往往要重新组图**  
-   extra cleanup 在 sleep 时会清掉 ACLGraph workspace、失效已捕获图，并重置
-   graph manager。之后必须在 `wake_up(tags=["kv_cache"])`（或未拆 tag 的
-   `wake_up()`）里再走一遍 `capture_model()`。Level 2 换权后布局/数值已变，
-   旧图不能直接复用，这是对的；但同卡每一轮训推都全量构图，唤醒时延会被
-   图捕获主导，尤其是 decode 多 size、MTP / 多图的情况。  
-   **改进**：权重虚地址不变且布局未变时尽量保图；只在 finalize 后布局或
-   capture size 变化时 recapture；图 workspace 与权重/KV 分开 tag，避免
-   「要让卡就必须拆图」。
+   extra cleanup 在 sleep 时会 **销毁 HCCL 通信域**（进程组），把通信占用的
+   显存还给训练侧。ACLGraph 捕获的不只是计算，还有绑在这些通信域上的集合通信。
+   通信域没了，旧图里的 HCCL handle 全部失效，所以 wake 重建通信域之后必须再
+   `capture_model()` 组一遍图——**根因是通信域被清掉，不是权重虚地址变了**。
+   同卡每一轮都走「毁域 → 建域 → 全量构图」，唤醒时延会被图捕获主导。  
+   **改进**：让卡时尽量保留 HCCL 通信域（只放权重/KV / workspace），图就可以
+   复用；若必须放通信显存，再拆域并接受 recapture。
 
 2. **有时会误清不该丢的变量**  
    sleep 按 tag unmap 池内分配，extra cleanup 还会清空 attention workspace、
