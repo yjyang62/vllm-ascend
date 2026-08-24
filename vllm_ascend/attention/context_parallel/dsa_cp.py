@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
@@ -1116,7 +1116,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
         self.attn_sink = kwargs["attn_sink"]
 
-        self.vllm_config = kwargs.get("vllm_config", get_current_vllm_config())
+        self.vllm_config = kwargs["vllm_config"]
 
         # indexer param
         if self.indexer is not None:

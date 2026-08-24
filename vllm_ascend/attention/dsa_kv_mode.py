@@ -27,19 +27,15 @@ def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
     return "bfloat16" if str(cache_dtype).lower() in _BF16_KV_CACHE_DTYPES else "auto"
 
 
-def uses_explicit_bf16_kv(vllm_config=None) -> bool:
-    """Return whether the launch asked for BF16 SparseFlashMla KV on A5."""
+def uses_explicit_bf16_kv(vllm_config) -> bool:
+    """Return whether the launch asked for BF16 SparseFlashMla KV on A5.
+
+    Callers must pass the engine ``vllm_config``. Do not look it up from the
+    process-global current config: that context is only set during
+    ``load_model()`` and a missing lookup would silently pick the FP8 plan.
+    """
     if get_ascend_device_type() != AscendDeviceType.A5:
         return False
-    if vllm_config is None:
-        from vllm.config import get_current_vllm_config
-
-        try:
-            vllm_config = get_current_vllm_config()
-        except AssertionError:
-            # Module inspection and direct unit tests can reach device helpers
-            # without a current vLLM config.
-            return False
     cache_config = getattr(vllm_config, "cache_config", None)
     if cache_config is None:
         return False

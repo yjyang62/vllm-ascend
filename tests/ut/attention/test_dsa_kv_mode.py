@@ -2,6 +2,8 @@
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 from vllm_ascend.attention.dsa_kv_mode import resolve_dsv4_cache_dtype, uses_explicit_bf16_kv
 from vllm_ascend.utils import AscendDeviceType
 
@@ -12,6 +14,11 @@ def _config(cache_dtype: str = "auto"):
 
 def _on(device_type):
     return mock.patch("vllm_ascend.attention.dsa_kv_mode.get_ascend_device_type", return_value=device_type)
+
+
+def test_uses_explicit_bf16_kv_requires_vllm_config():
+    with _on(AscendDeviceType.A5), pytest.raises(TypeError):
+        uses_explicit_bf16_kv()
 
 
 def test_only_explicit_bfloat16_selects_bf16_kv_on_a5():
