@@ -94,10 +94,10 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         n_local_groups: int,
         window_size: int,
         compress_ratio: int,
+        vllm_config: VllmConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        vllm_config: VllmConfig | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -142,11 +142,6 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             and (self.attn_backend.get_name() == "TRITON_MLA" or self.attn_backend.get_name() == "FLASHINFER")
         ):
             cache_config.enable_prefix_caching = False
-
-        if vllm_config is None:
-            vllm_config = extra_impl_args.pop("vllm_config", None)
-        if vllm_config is None:
-            raise TypeError("DSAAttention requires an explicit vllm_config")
 
         impl_cls = cast(type[Any], self.attn_backend.get_impl_cls())
         self.impl = impl_cls(
