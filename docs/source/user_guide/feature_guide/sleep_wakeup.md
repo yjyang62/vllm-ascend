@@ -427,38 +427,30 @@ llm.wake_up()        # 无需 reload / layerwise
 
 ## 6. 不足与改进
 
-这套方案能在**不退进程**的前提下完成同卡让卡与换权，但还不是「一条 API 做完」。主要缺口：
+当前方案能完成同卡让卡与换权，但仍有两处明显成本与风险。
 
-1. **默认放不干净**  
-   sleep 只 unmap 池内 `weights` / `kv_cache`。HCCL、ACLGraph workspace 要开
-   extra cleanup 才还给 Trainer；开了又拉长 wakeup（毁建通信组、重新
-   `capture_model()`）。  
-   **改进**：通信与图 workspace 做成独立 tag，可按需 sleep、不必整组销毁 HCCL；
-   或提供「只放 workspace、保留通信组」的中间档。
+1. **wakeup 往往要重新组图**  
+   extra cleanup 在 sleep 时会清掉 ACLGraph workspace、失效已捕获图，并重置
+   graph manager。之后必须在 `wake_up(tags=["kv_cache"])`（或未拆 tag 的
+   `wake_up()`）里再走一遍 `capture_model()`。Level 2 换权后布局/数值已变，
+   旧图不能直接复用，这是对的；但同卡每一轮训推都全量构图，唤醒时延会被
+   图捕获主导，尤其是 decode 多 size、MTP / 多图的情况。  
+   **改进**：权重虚地址不变且布局未变时尽量保图；只在 finalize 后布局或
+   capture size 变化时 recapture；图 workspace 与权重/KV 分开 tag，避免
+   「要让卡就必须拆图」。
 
-2. **编排步骤多、易漏**  
-   Level 2 必须拆两次 `wake_up`，中间再走 `initialize → reload → finalize`，
-   并自行 `pause_generation` / `reset_prefix_cache`。漏一步会出现半更新权重、
-   旧 prefix 命中、或灌权峰值 OOM。  
-   **改进**：Vime 收成组合接口（例如让卡 → 训练 → 灌权 → 恢复 KV）；引擎侧提供
-   「L2 换权」一条路径，减少调用方拼步骤。
+2. **有时会误清不该丢的变量**  
+   sleep 按 tag unmap 池内分配，extra cleanup 还会清空 attention workspace、
+   重置 graph params。未打 `sleep_persistent`、又没走 `register_buffer` 的
+   设备张量（早期 EPLB `log2phy`、部分 runtime 态）会被丢掉或变成空 storage，
+   wake 后仍按旧引用访问就会踩非法地址或静默算错。清理范围偏「整类抹掉」，
+   缺少白名单。  
+   **改进**：运行时态默认纳入 named buffer 或 `sleep_persistent`；对未登记的
+   NPU 张量告警；cleanup 按对象白名单/黑名单，而不是整份 graph params /
+   workspace 一把清。
 
-3. **布局与锚点约束重**  
-   不能普通 `load_model`（会换掉 Parameter，图仍钉旧 `data_ptr`）。MoE transpose
-   必须落在 `process_weights_after_loading` + finalize；未 `register_buffer` 的
-   设备张量 Level 2 后会踩非法地址。  
-   **改进**：继续把布局收敛到 process 路径；对未纳入 named buffer / sleep 池的
-   NPU 张量做检测或告警。
-
-4. **可观测性偏粗**  
-   sleep 日志目前主要是总释放量，缺少 `weights` / `kv_cache` / HCCL / workspace
-   分项。同卡 OOM 时不好判断是池内没放干净还是池外泄漏。  
-   **改进**：按 tag 记录 sleep 前后占用。
-
-5. **同卡注定串行**  
-   同一组 NPU 上 Rollout 与 Train 不能重叠，一轮里总有一侧在等。这是同卡本身的
-   限制，不是 sleep 能消掉的。吞吐优先仍应训推分离；Sleep Mode 解决的是「同卡
-   也能换权」，不是「同卡也能并行」。
+其它（两次 `wake_up` 易漏、sleep 日志无分项、同卡只能串行）仍然存在，但上面
+两件事是目前最影响稳定性和唤醒时延的。
 
 ## 7. 相关链接
 
