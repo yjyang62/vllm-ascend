@@ -167,6 +167,7 @@ class NPUWorker(WorkerBase):
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         self._pp_send_work: list[Handle] = []
+        self._current_vllm_config_cm = None
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -494,8 +495,7 @@ class NPUWorker(WorkerBase):
         # --kv-cache-memory. Still run profile_run() to compile the model,
         # but skip the memory profiling calculation entirely.
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
-            with set_current_vllm_config(self.vllm_config):
-                self.model_runner.profile_run()
+            self.model_runner.profile_run()
             logger.info(
                 "Initial free memory %.2f GiB, reserved %.2f GiB for KV Cache "
                 "as specified by kv_cache_memory_bytes, skipping memory profiling. "
@@ -516,8 +516,7 @@ class NPUWorker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
-            with set_current_vllm_config(self.vllm_config):
-                self.model_runner.profile_run()
+            self.model_runner.profile_run()
 
             # Record torch peak INSIDE the context and BEFORE graph capture,
             # so that graph pool allocations don't inflate the activation peak.
@@ -624,18 +623,27 @@ class NPUWorker(WorkerBase):
             self.torch_allocated / GiB_bytes,
         )
 
+    def _pin_current_vllm_config(self) -> None:
+        """Keep this worker's config set for the process lifetime.
+
+        CustomOps (RMSNorm, rotary, Linear, MoE) call get_current_vllm_config()
+        from ``__init__``, including when they are created during eager prefill.
+        ``set_current_vllm_config`` restores ``None`` on exit, so wrapping only
+        ``load_model`` is not enough. Pinning once after load avoids wrapping
+        every later entry point. Nested ``with set_current_vllm_config(...)``
+        still restores this pin.
+        """
+        if getattr(self, "_current_vllm_config_cm", None) is not None:
+            return
+        cm = set_current_vllm_config(self.vllm_config)
+        cm.__enter__()
+        self._current_vllm_config_cm = cm
+
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         self.log_memory_stats()
-        with set_current_vllm_config(self.vllm_config):
-            return self._execute_model(scheduler_output)
-
-    def _execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
@@ -701,8 +709,7 @@ class NPUWorker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        with set_current_vllm_config(self.vllm_config):
-            return self.model_runner.sample_tokens(grammar_output)
+        return self.model_runner.sample_tokens(grammar_output)
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -716,6 +723,7 @@ class NPUWorker(WorkerBase):
 
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+        self._pin_current_vllm_config()
 
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (
@@ -749,18 +757,17 @@ class NPUWorker(WorkerBase):
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
 
-        with set_current_vllm_config(self.vllm_config):
-            for size in sorted(warmup_sizes, reverse=True):
-                logger.info("Compile and warming up model for size %d", size)
-                self.model_runner._dummy_run(size)
+        for size in sorted(warmup_sizes, reverse=True):
+            logger.info("Compile and warming up model for size %d", size)
+            self.model_runner._dummy_run(size)
 
-            from vllm_ascend.model_executor.warmup.kernel_warmup import kernel_warmup
+        from vllm_ascend.model_executor.warmup.kernel_warmup import kernel_warmup
 
-            kernel_warmup(self)
+        kernel_warmup(self)
 
-            npugraph_memory_bytes = 0
-            if not self.model_config.enforce_eager:
-                npugraph_memory_bytes = self.model_runner.capture_model()
+        npugraph_memory_bytes = 0
+        if not self.model_config.enforce_eager:
+            npugraph_memory_bytes = self.model_runner.capture_model()
 
         # Suggest an optimal --kv-cache-memory value for future runs.
         # Only emitted when we ran full profiling (kv_cache_memory_bytes was not
@@ -878,12 +885,11 @@ class NPUWorker(WorkerBase):
         # Without force_attention, attn_metadata may be None and attention
         # won't run, making profiling results inaccurate.
         # _dummy_run handles PP internally (intermediate tensors, etc.)
-        with set_current_vllm_config(self.vllm_config):
-            self.model_runner._dummy_run(
-                num_tokens=num_tokens,
-                force_attention=True,  # Critical: ensure attention is executed
-                profile_cpp=True,
-            )
+        self.model_runner._dummy_run(
+            num_tokens=num_tokens,
+            force_attention=True,  # Critical: ensure attention is executed
+            profile_cpp=True,
+        )
 
         # Synchronize after forward to ensure NPU operations complete
         torch.npu.synchronize()
@@ -1060,8 +1066,7 @@ class NPUWorker(WorkerBase):
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        with set_current_vllm_config(self.vllm_config):
-            self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
