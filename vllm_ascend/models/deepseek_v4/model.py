@@ -641,7 +641,6 @@ class DeepseekV4Attention(nn.Module):
             window_size=self.window_size,
             compress_ratio=self.compress_ratio,
             dsa_modules=dsa_modules,
-            vllm_config=vllm_config,
             cache_config=cache_config,
             quant_config=quant_config,
             # prefix=f'{prefix}.attn',
