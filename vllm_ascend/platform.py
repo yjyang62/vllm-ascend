@@ -382,7 +382,7 @@ class NPUPlatform(Platform):
             vllm_config,
             compile_backend=cls.get_compile_backend(),
             enable_shared_expert_dp=ascend_config.enable_shared_expert_dp,
-            enable_dsa_cp=bool((vllm_config.additional_config or {}).get("enable_dsa_cp", False)),
+            enable_dsa_cp=ascend_config.enable_dsa_cp,
         )
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
@@ -960,7 +960,12 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
         )
 
     if model_config and hasattr(model_config.hf_text_config, "index_topk"):
-        vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
+        from vllm_ascend.attention.dsa_kv_mode import resolve_dsv4_cache_dtype
+
+        vllm_config.cache_config.cache_dtype = resolve_dsv4_cache_dtype(
+            vllm_config.cache_config.cache_dtype,
+            str(model_config.dtype).replace("torch.", ""),
+        )
 
     # Update compilation mode in some cases
     enforce_eager = getattr(model_config, "enforce_eager", False)
