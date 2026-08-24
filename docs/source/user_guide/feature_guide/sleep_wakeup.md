@@ -68,9 +68,9 @@ Level 1 调用见文末示例。
 可通过 `additional_config` 打开 `enable_sleep_mode_extra_cleanup`：
 
 - **sleep**：清理 ACLGraph attention workspace 并失效已捕获图；等待 PP 发送完成后
-  同步 NPU，并销毁 HCCL 进程组；
-- **wake**：重建 HCCL、刷新 MoE dispatcher 元数据；在权重与状态就绪后按需
-  `capture_model()` 重新构图。
+  同步 NPU，并销毁 HCCL 进程组（通信域）；
+- **wake**：重建 HCCL、刷新 MoE dispatcher 元数据。通信域已换，图里旧的 HCCL
+  handle 失效，须在权重与 KV 就绪后 `capture_model()` 重新构图。
 
 这是显存占用与唤醒时延的权衡：同卡显存紧张时可开启；更看重唤醒延迟时保持默认关闭。
 
@@ -338,6 +338,15 @@ finalize 保证的是**对象与地址稳定**：数值来自 Trainer，运行�
 ## 4. 具体调用方案
 
 ### 4.1 Vime 编排（推荐）
+
+**Vime** 是 vLLM 社区的 LLM 后训练 / RL 框架
+（[vllm-project/vime](https://github.com/vllm-project/vime)）。训练走 Megatron，
+Rollout 默认走 vLLM；中间用 data buffer 传 prompt、生成结果和 reward。
+同卡场景下 Vime 是**编排方**：决定何时 `sleep` 让卡、何时 `trainer.step()`、
+何时 `wake` 并把新权重灌回引擎。vLLM Ascend 只承接 NPU 上的 sleep 池与权重
+传输，不实现 PPO / GRPO 本身。
+
+同卡 Level 2 一轮里，Vime 侧典型调用顺序：
 
 ```python
 engine.sleep(level=2)
