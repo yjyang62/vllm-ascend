@@ -91,7 +91,7 @@ class DsaAttnKvPlan:
         )
 
 
-def get_dsa_attn_kv_plan(vllm_config=None) -> DsaAttnKvPlan:
+def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
     """Return the explicit A5 BF16 or upstream-compatible FP8 DSA plan."""
     if get_ascend_device_type() != AscendDeviceType.A5:
         return DsaAttnKvPlan(

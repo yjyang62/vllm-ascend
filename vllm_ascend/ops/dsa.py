@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
-from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -74,6 +74,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         window_size: int,
         compress_ratio: int,
         dsa_modules: DSAModules,
+        vllm_config: VllmConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -127,6 +128,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            vllm_config=vllm_config,
             # extra
             wq_a=self.wq_a,
             wq_b=self.wq_b,
@@ -143,7 +145,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             swa_cache_layer=self.swa_cache_layer,
         )
 
-        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
