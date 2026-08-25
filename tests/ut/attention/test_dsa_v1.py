@@ -45,6 +45,14 @@ from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
+def _mock_dsa_kv_plan(**method_returns) -> MagicMock:
+    plan = MagicMock()
+    plan.layout_kv = "PA_ND"
+    for name, value in method_returns.items():
+        getattr(plan, name).return_value = value
+    return plan
+
+
 def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
     model_config = SimpleNamespace(
         hf_config=SimpleNamespace(
@@ -131,22 +139,17 @@ def test_build_sas_metadata_parameters_cache_and_builder_buffer(
     cu_seqlens_cmp_kv = torch.tensor([0, 2, 4], dtype=torch.int32)
     generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
     metadata_op = MagicMock(return_value=generated_metadata)
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_metadata_op=metadata_op,
+        get_dsa_sparse_attn_metadata_kwargs={"device": "cpu"},
+    )
 
     with (
         patch(
             "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
             return_value=2,
         ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_op",
-            return_value=metadata_op,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_kwargs",
-            return_value={"device": "cpu"},
-        ),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
     ):
         result = builder._build_sas_metadata(
             metadata_cache=metadata_cache,
@@ -265,10 +268,11 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
             "vllm_ascend.attention.dsa_v1.split_decodes_and_prefills",
             return_value=(2, 0, 3, 0) if num_prefills == 0 else (1, 1, 1, 2),
         ),
-        patch.object(
-            DeviceOperator,
-            "format_dsa_slot_mapping",
-            return_value=torch.zeros((3, 2), dtype=torch.int32),
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan",
+            return_value=_mock_dsa_kv_plan(
+                format_dsa_slot_mapping=torch.zeros((3, 2), dtype=torch.int32),
+            ),
         ),
         patch.object(
             DeviceOperator,
@@ -377,10 +381,11 @@ def test_build_classifies_short_speculative_extends_as_decodes(
             "vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled",
             return_value=False,
         ),
-        patch.object(
-            DeviceOperator,
-            "format_dsa_slot_mapping",
-            return_value=torch.zeros((14, 2), dtype=torch.int32),
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan",
+            return_value=_mock_dsa_kv_plan(
+                format_dsa_slot_mapping=torch.zeros((14, 2), dtype=torch.int32),
+            ),
         ),
         patch(
             "vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa",
@@ -501,6 +506,10 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
     decode_cu_seqlens_cmp_kv = torch.tensor([0, 2, 4], dtype=torch.int32)
     generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
     metadata_op = MagicMock(return_value=generated_metadata)
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_metadata_op=metadata_op,
+        get_dsa_sparse_attn_metadata_kwargs={"device": "cpu"},
+    )
     cos = torch.ones((3, 1, 1, 2))
     sin = torch.zeros((3, 1, 1, 2))
 
@@ -515,16 +524,7 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
             "get_dsa_decode_cu_seqlens_cmp_kv",
             return_value=decode_cu_seqlens_cmp_kv,
         ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_op",
-            return_value=metadata_op,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_kwargs",
-            return_value={"device": "cpu"},
-        ),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
     ):
         metadata = builder.build_req_metadata_for_drafting(
             draft_index=1,
@@ -725,6 +725,12 @@ def test_forward_attention_routes_unified_req_metadata(
     def add_extra_kwargs(extra_kwargs: dict[str, Any], **kwargs) -> None:
         extra_kwargs.update(kwargs)
 
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_op=sparse_attn_op,
+        get_dsa_sparse_attn_base_kwargs={},
+    )
+    plan.add_dsa_sparse_attn_extra_kwargs.side_effect = add_extra_kwargs
+
     with (
         patch.object(
             DeviceOperator,
@@ -743,21 +749,7 @@ def test_forward_attention_routes_unified_req_metadata(
             "_mla_prolog_multistream",
             return_value=(q, torch.empty(0), None),
         ) as mla_prolog,
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_op",
-            return_value=sparse_attn_op,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_base_kwargs",
-            return_value={},
-        ),
-        patch.object(
-            DeviceOperator,
-            "add_dsa_sparse_attn_extra_kwargs",
-            side_effect=add_extra_kwargs,
-        ),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
         patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
     ):
@@ -855,8 +847,9 @@ class TestAscendDSACompressedCacheRouting:
         kv_cache = (torch.empty(0),)
         compress_kv_cache = torch.empty(0)
         state_cache = torch.empty(0)
+        plan = _mock_dsa_kv_plan()
 
-        with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
+        with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan):
             actual = impl._maybe_update_compressed_caches_and_select_topk(
                 layer_name="model.layers.0.self_attn.attn",
                 hidden_states=hidden_states,
@@ -886,7 +879,7 @@ class TestAscendDSACompressedCacheRouting:
             state_cache=state_cache,
             metadata=compressor_metadata,
         )
-        scatter.assert_called_once_with(
+        plan.dsa_kv_compress_scatter.assert_called_once_with(
             compress_kv_cache,
             compressed_kv,
             compress_slot_mapping,
@@ -911,8 +904,9 @@ class TestAscendDSACompressedCacheRouting:
         hidden_states = torch.ones((1, 4))
         state_cache = torch.empty(0)
         compress_kv_cache = torch.empty(0)
+        plan = _mock_dsa_kv_plan()
 
-        with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
+        with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan):
             actual = impl._maybe_update_compressed_caches_and_select_topk(
                 layer_name="layer",
                 hidden_states=hidden_states,
@@ -932,14 +926,14 @@ class TestAscendDSACompressedCacheRouting:
                 state_cache=state_cache,
                 metadata=compressor_metadata,
             )
-            scatter.assert_called_once_with(
+            plan.dsa_kv_compress_scatter.assert_called_once_with(
                 compress_kv_cache,
                 compressed_kv,
                 compress_slot_mapping,
             )
         else:
             impl.compressor.assert_not_called()
-            scatter.assert_not_called()
+            plan.dsa_kv_compress_scatter.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -999,6 +993,12 @@ def test_forward_attention_sets_compressed_kv_args(
     def add_extra_kwargs(extra_kwargs: dict[str, Any], **kwargs) -> None:
         extra_kwargs.update(kwargs)
 
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_op=sparse_attn_op,
+        get_dsa_sparse_attn_base_kwargs={},
+    )
+    plan.add_dsa_sparse_attn_extra_kwargs.side_effect = add_extra_kwargs
+
     with (
         patch.object(
             DeviceOperator,
@@ -1022,21 +1022,7 @@ def test_forward_attention_sets_compressed_kv_args(
             "_maybe_update_compressed_caches_and_select_topk",
             return_value=topk_indices,
         ) as update_compressed_caches,
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_op",
-            return_value=sparse_attn_op,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_base_kwargs",
-            return_value={},
-        ),
-        patch.object(
-            DeviceOperator,
-            "add_dsa_sparse_attn_extra_kwargs",
-            side_effect=add_extra_kwargs,
-        ),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
         patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
     ):
