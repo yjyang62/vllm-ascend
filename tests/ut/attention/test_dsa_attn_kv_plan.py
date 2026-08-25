@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
+import pytest
 import torch
 
 from vllm_ascend.attention.dsa_attn_kv_plan import (
@@ -16,6 +17,11 @@ from vllm_ascend.utils import AscendDeviceType
 
 def _config(use_bf16: bool):
     return SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16" if use_bf16 else "auto"))
+
+
+def test_get_dsa_attn_kv_plan_requires_vllm_config():
+    with pytest.raises(TypeError):
+        get_dsa_attn_kv_plan()
 
 
 def test_a5_fp8_plan_uses_flat_shared_kv():
