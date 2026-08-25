@@ -211,6 +211,10 @@ TITLES = {
         "zh": "ShortRequestFirst 预填充调度",
     },
     "user_guide/feature_guide/sleep_mode.md": {"en": "Sleep Mode", "zh": "休眠模式"},
+    "user_guide/feature_guide/sleep_wakeup.md": {
+        "en": "Colocated Sleep Mode: Free Memory, Reload In Place",
+        "zh": "同卡训推的 Sleep Mode：让出显存，原地换权",
+    },
     "user_guide/feature_guide/speculative_decoding.md": {"en": "Speculative Decoding", "zh": "推测解码"},
     "user_guide/feature_guide/structured_output.md": {"en": "Structured Output", "zh": "结构化输出"},
     "user_guide/feature_guide/ucm_deployment.md": {"en": "UCM Deployment", "zh": "UCM 部署"},
