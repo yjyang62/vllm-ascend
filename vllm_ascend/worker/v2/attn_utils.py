@@ -659,31 +659,16 @@ def _allocate_kv_cache(
         ):
             has_mamba = any(isinstance(layer_kv_cache_spec[ln], MambaSpec) for ln in kv_cache_tensor.shared_by)
             has_hidden = any(is_hidden_state_cache_spec(layer_kv_cache_spec[ln]) for ln in kv_cache_tensor.shared_by)
-            if vllm_config.kv_transfer_config is None:
-                tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
-            else:
-                tensor = torch.zeros(
-                    kv_cache_tensor.size + alignment,
-                    dtype=torch.int8,
-                    device=device,
-                )
-                tensor = _align_memory(tensor, alignment)[: kv_cache_tensor.size]
+            tensor = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)
 
             if has_mamba and has_hidden:
                 # Keep Mamba and hidden-state dumps on separate physical buffers
                 # so float32 SSM writes cannot corrupt bfloat16 hidden states.
                 for layer_name in kv_cache_tensor.shared_by:
                     if is_hidden_state_cache_spec(layer_kv_cache_spec[layer_name]):
-                        if vllm_config.kv_transfer_config is None:
-                            hidden_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
-                        else:
-                            hidden_tensor = torch.zeros(
-                                kv_cache_tensor.size + alignment,
-                                dtype=torch.int8,
-                                device=device,
-                            )
-                            hidden_tensor = _align_memory(hidden_tensor, alignment)[: kv_cache_tensor.size]
-                        kv_cache_raw_tensors[layer_name] = hidden_tensor
+                        kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(
+                            kv_cache_tensor.size, alignment, device
+                        )
                     else:
                         kv_cache_raw_tensors[layer_name] = tensor
             else:

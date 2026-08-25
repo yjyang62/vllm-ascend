@@ -16,7 +16,8 @@
 #
 """Ascend MRV2 thin wrapper around upstream ExtractHiddenStatesSpeculator.
 
-Requires upstream vLLM PR #49811 (``vllm.v1.worker.gpu.spec_decode.extract_hidden_states``).
+Depends on ``vllm.v1.worker.gpu.spec_decode.extract_hidden_states``
+(upstream vLLM PR #49811).
 """
 
 import torch

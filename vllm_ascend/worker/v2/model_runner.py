@@ -130,9 +130,8 @@ class NPUModelRunner(GPUModelRunner):
         # so here we just call init_speculator to reinitialize speculator.
         self.speculator: AscendEagleSpeculator | AscendExtractHiddenStatesSpeculator | None = None
         if self.speculative_config is not None and (not self.use_spec_pp or self.is_last_pp_rank):
-            # Parent GPUModelRunner only enables aux hidden outputs for a fixed
-            # method allow-list; older pinned vLLM builds omit
-            # extract_hidden_states. Ensure MRV2 always requests them here.
+            # Ensure aux hidden outputs for extract_hidden_states (defensive if
+            # parent allow-list omits the method on older pins).
             if self.speculative_config.method == "extract_hidden_states":
                 self.use_aux_hidden_state_outputs = True
             self.speculator = init_speculator(self.vllm_config, self.device)
