@@ -1029,7 +1029,7 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
         )
 
     if model_config and hasattr(model_config.hf_text_config, "index_topk"):
-        from vllm_ascend.attention.dsa_kv_mode import resolve_dsv4_cache_dtype
+        from vllm_ascend.attention.dsa_attn_kv_plan import resolve_dsv4_cache_dtype
 
         vllm_config.cache_config.cache_dtype = resolve_dsv4_cache_dtype(
             vllm_config.cache_config.cache_dtype,

@@ -19,8 +19,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
-from vllm_ascend.attention.dsa_kv_mode import uses_explicit_bf16_kv
+from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan, uses_explicit_bf16_kv
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_pcp,

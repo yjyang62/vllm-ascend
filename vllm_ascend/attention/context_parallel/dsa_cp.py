@@ -14,8 +14,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
-from vllm_ascend.attention.dsa_kv_mode import uses_explicit_bf16_kv
+from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan, uses_explicit_bf16_kv
 from vllm_ascend.attention.dsa_v1 import (
     _dsa_layout_kv,
     _dsa_swa_only_cmp_ratio,
