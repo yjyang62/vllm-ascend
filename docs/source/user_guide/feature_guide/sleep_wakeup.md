@@ -1,9 +1,10 @@
 # 同卡训推的 Sleep Mode：让出显存，原地换权
 
 > **说明**  
-> 本文讲 RL / 同卡训推下的 **Sleep Mode 流程与原理**。Vime 复用上游 vLLM
-> 的 sleep / wake，Level 2 灌权重时走 `initialize → reload → finalize`；
-> Ascend 承接 NPU 内存与权重传输。基础 API 见
+> 本文面向同卡 RL：先用 [§1 背景](#1-背景) 交代强化学习和 Vime，再讲
+> **Sleep Mode 流程与原理**。Vime 复用上游 vLLM 的 sleep / wake，Level 2
+> 灌权重时走 `initialize → reload → finalize`；Ascend 承接 NPU 内存与权重
+> 传输。基础 API 见
 > [Sleep Mode Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/sleep_mode.html)。
 >
 > 上游参考：
@@ -12,10 +13,64 @@
 > - [Layerwise (Re)loading](https://docs.vllm.ai/en/latest/training/layerwise/)
 > - Ascend 示例：`examples/rl/rlhf_http_hccl.py`、`examples/rl/rlhf_http_npu_ipc.py`
 
-## 1. 原理
+## 1. 背景
 
-强化学习（PPO / GRPO / RLHF 等）把 **推（Rollout）** 和 **训（Train）** 拼成一轮循环。
-同卡场景下一轮大致是：
+后面各节默认读者已经知道：大模型强化学习为什么要拆成「推」和「训」，以及
+Vime 在这条流水线里站哪一层。若已熟悉 PPO / GRPO 与训推框架，可从
+[§2 原理](#2-原理) 直接看 Sleep Mode。
+
+### 1.1 强化学习：训和推
+
+预训练让模型学会「下一个 token」。对齐、解题、按偏好生成，通常再做
+**强化学习后训练**（RLHF、PPO、GRPO 等）。一轮可以想成：
+
+1. 给当前策略一批 prompt（题目、对话、指令）；
+2. 模型自回归写出回答（completion），并记下 logprob；
+3. 用奖励模型、规则或 verifier 打分，再换成 advantage；
+4. 用这些样本做 backward，更新策略参数；
+5. 换成新策略，再生成，循环多轮。
+
+第 2 步是 **Rollout（推）**：长序列自回归，适合 vLLM 这类推理引擎。
+第 4 步是 **Train（训）**：要梯度、优化器状态，适合 Megatron 等训练栈。
+两边并行切分和显存形态往往不同，所以工程上拆成两个角色，而不是一个
+`forward` 包打天下。
+
+部署上常见两种：
+
+| | 训推分离 | 同卡训推（colocated） |
+| --- | --- | --- |
+| 卡 | 训练一组 NPU、推理一组 NPU | **同一组 NPU** 轮流给训和推 |
+| 优点 | 可并行、互不抢显存 | 省卡，单机也能跑 RL |
+| 代价 | 要更多设备 | 推完必须让出显存给训，训完要把新权写回推 |
+
+本文从 §2 起只展开 **同卡**：Sleep Mode 用来「让卡 + 原地换权」。
+
+### 1.2 Vime 框架
+
+**Vime**（[vllm-project/vime](https://github.com/vllm-project/vime)）是 vLLM
+社区的 LLM 后训练框架：把 slime 的训练范式接到 vLLM 的 rollout 上，拼成一条
+RL 流水线。可以把它理解成**调度器**，不是又一个推理引擎。
+
+三块分工：
+
+| 模块 | 做什么 |
+| --- | --- |
+| **Training（Megatron）** | 从 data buffer 读样本，做 PPO / GRPO 等，更新参数 |
+| **Rollout（vLLM + router）** | 用当前策略生成 completions / logprobs，并拿到 reward |
+| **Data buffer** | 管 prompt、自定义数据和生成结果，在训和推之间倒手 |
+
+训练参数走 Megatron；vLLM 侧选项加 `--vllm-` 前缀透传。默认是训推分离
+（训练卡和 rollout 卡分开）；加 `--colocate` 则落到同卡。Ascend 上对应
+**vime-ascend**：训练走 MindSpeed / Megatron，推理走 vLLM Ascend。
+
+同卡时 Vime 负责**时机**：何时让 vLLM sleep、何时 `trainer.step()`、何时
+wake 并把新权重灌回。算法本身在 Vime / Megatron；本文从 §2 起只讲引擎侧
+Sleep Mode。
+
+## 2. 原理
+
+[§1](#1-背景) 说明了训、推为何拆开，以及 Vime 负责编排。同卡下一轮落到引擎上，
+就是下面四步：
 
 1. **采样（Rollout）**：Trainer / RolloutManager 下发 prompts；策略模型在 vLLM
    Ascend 上自回归生成 completions（及 logprobs 等），得到训练样本；
@@ -40,7 +95,7 @@ Sleep Mode 在**不退出进程**的前提下完成显存让渡与权重回写�
 
 启用 `enable_sleep_mode` 后，权重与 KV 分配进入 sleep 内存池；显存让渡与恢复通过对池内 handle 的 **unmap / remap** 完成，由 Vime 调用上游控制面接口。
 
-### 1.1 Level 1 与 Level 2
+### 2.1 Level 1 与 Level 2
 
 引擎提供两级 sleep，差别主要在**权重怎么处理**：
 
@@ -62,7 +117,7 @@ Level 1 权重不变时，`wake_up()` 后即可继续推理。
 因此下文流程图与 layerwise 展开都只画 **Level 2**——这是 Vime 换权路径；
 Level 1 调用见文末示例。
 
-### 1.2 `enable_sleep_mode_extra_cleanup`
+### 2.2 `enable_sleep_mode_extra_cleanup`
 
 默认 sleep 仅释放 sleep 内存池管理的分配。同卡 RL 若需进一步把显存归还训练侧，
 可通过 `additional_config` 打开 `enable_sleep_mode_extra_cleanup`：
@@ -74,7 +129,7 @@ Level 1 调用见文末示例。
 
 这是显存占用与唤醒时延的权衡：同卡显存紧张时可开启；更看重唤醒延迟时保持默认关闭。
 
-## 2. 整体流程（Level 2）
+## 3. 整体流程（Level 2）
 
 同卡换权按时间顺序可概括为五步：
 
@@ -164,9 +219,9 @@ sequenceDiagram
 sleep(level=2) → Train → wake(weights) → initialize/reload/finalize → wake(kv_cache) → Rollout
 ```
 
-## 3. 原理展开
+## 4. 原理展开
 
-### 3.1 内存池与 tag
+### 4.1 内存池与 tag
 
 启用 `enable_sleep_mode` 后，模型权重与 KV cache 不走普通 NPU 分配器，而在
 **sleep 内存池**中分配。Ascend 实现为 `CaMemAllocator`（上游 GPU 侧为 CuMem）。
@@ -221,7 +276,7 @@ sleep: CPU clone ──► wake: copy_ 回原 buffer
 个别既不能丢、也不适合走 named buffer 备份的分配，可打 `sleep_persistent` tag，
 sleep 时保持 mapped。
 
-### 3.2 Level 2 灌权重：`initialize → reload → finalize`
+### 4.2 Level 2 灌权重：`initialize → reload → finalize`
 
 Level 2 丢掉的是**权重内容**，不是 Parameter 对象。若醒来后再普通 `load_model`，
 `process_weights_after_loading` 常会**换掉** Parameter，ACLGraph 仍钉着旧
@@ -335,18 +390,11 @@ finalize 保证的是**对象与地址稳定**：数值来自 Trainer，运行�
 `process_weights_after_loading`，地址来自 initialize 保存的锚点。三段缺一，
 就又容易退回「在 wake 里补转置」之类的旁路。
 
-## 4. 具体调用方案
+## 5. 具体调用方案
 
-### 4.1 Vime 编排（推荐）
+### 5.1 Vime 编排（推荐）
 
-**Vime** 是 vLLM 社区的 LLM 后训练 / RL 框架
-（[vllm-project/vime](https://github.com/vllm-project/vime)）。训练走 Megatron，
-Rollout 默认走 vLLM；中间用 data buffer 传 prompt、生成结果和 reward。
-同卡场景下 Vime 是**编排方**：决定何时 `sleep` 让卡、何时 `trainer.step()`、
-何时 `wake` 并把新权重灌回引擎。vLLM Ascend 只承接 NPU 上的 sleep 池与权重
-传输，不实现 PPO / GRPO 本身。
-
-同卡 Level 2 一轮里，Vime 侧典型调用顺序：
+Vime 是编排方（角色见 [1.2](#12-vime-框架)）。同卡 Level 2 一轮里，典型调用顺序：
 
 ```python
 engine.sleep(level=2)
@@ -368,7 +416,7 @@ engine.wake_up(tags=["kv_cache"])
 - Level 2 后按需 `reset_prefix_cache`，避免沿用旧权重下的 prefix；
 - 关闭 FRACTAL_NZ（`VLLM_ASCEND_ENABLE_NZ=0`，`weight_nz_mode=0`）。
 
-### 4.2 Online HTTP（dev mode）
+### 5.2 Online HTTP（dev mode）
 
 ```bash
 export VLLM_SERVER_DEV_MODE=1
@@ -392,7 +440,7 @@ curl -X POST 'http://127.0.0.1:8000/wake_up?tags=kv_cache'
 curl -X GET  'http://127.0.0.1:8000/is_sleeping'
 ```
 
-### 4.3 离线 Python API
+### 5.3 离线 Python API
 
 ```python
 from vllm import LLM
@@ -409,7 +457,7 @@ llm.collective_rpc("reload_weights", kwargs={"weights_path": "Qwen/Qwen2.5-0.5B-
 llm.wake_up(tags=["kv_cache"])
 ```
 
-### 4.4 Level 1：同权重快速让卡
+### 5.4 Level 1：同权重快速让卡
 
 ```python
 llm.sleep(level=1)   # weights → CPU，kv 丢弃
@@ -417,7 +465,7 @@ llm.sleep(level=1)   # weights → CPU，kv 丢弃
 llm.wake_up()        # 无需 reload / layerwise
 ```
 
-## 5. 实践补充
+## 6. 实践补充
 
 1. **Sleep ≠ Weight Transfer ≠ Pause**  
    显存让渡、权重字节、在飞请求窗口是三件事，组合用。
@@ -427,14 +475,14 @@ llm.wake_up()        # 无需 reload / layerwise
    `wake_up` 只负责 remap / buffer / 通信 / 图。
 
 3. **extra cleanup**  
-   见 [1.2](#12-enable_sleep_mode_extra_cleanup)：更低 sleep 显存 ↔ 更长 wakeup。
+   见 [2.2](#22-enable_sleep_mode_extra_cleanup)：更低 sleep 显存 ↔ 更长 wakeup。
 
 4. **管理接口仅限 `VLLM_SERVER_DEV_MODE=1`**，内网使用。
 
 5. **与 DP Router 的边界**  
    Sleep / 权重同步直连 Engine；请求落 DP 仍走 Router。
 
-## 6. 不足与改进
+## 7. 不足与改进
 
 当前方案能完成同卡让卡与换权，但仍有两处明显成本与风险。
 
@@ -460,8 +508,9 @@ llm.wake_up()        # 无需 reload / layerwise
 其它（两次 `wake_up` 易漏、sleep 日志无分项、同卡只能串行）仍然存在，但上面
 两件事是目前最影响稳定性和唤醒时延的。
 
-## 7. 相关链接
+## 8. 相关链接
 
+- [Vime](https://github.com/vllm-project/vime)（RL 编排；Ascend 上为 vime-ascend）
 - [Sleep Mode Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/sleep_mode.html)
 - 上游 [Sleep Mode](https://docs.vllm.ai/en/latest/features/sleep_mode/)
 - 上游 [Layerwise (Re)loading](https://docs.vllm.ai/en/latest/training/layerwise/)
