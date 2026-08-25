@@ -87,11 +87,11 @@ def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
 
 
-def _dsa_layout_kv(vllm_config: VllmConfig | None = None) -> str:
+def _dsa_layout_kv(vllm_config: VllmConfig) -> str:
     return get_dsa_attn_kv_plan(vllm_config).layout_kv
 
 
-def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig | None = None) -> int:
+def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int:
     """BF16 SWA-only attention takes no compressed stream; otherwise keep main's value."""
     if uses_explicit_bf16_kv(vllm_config) and compress_ratio <= 1:
         return 0
@@ -1051,7 +1051,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
-        if self.multistream_dsv4_dsa_overlap and uses_explicit_bf16_kv():
+        if self.multistream_dsv4_dsa_overlap and uses_explicit_bf16_kv(self.vllm_config):
             self.multistream_dsv4_dsa_overlap = False
 
     def _get_layer_metadata(
