@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+from contextlib import ExitStack
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -15,6 +17,24 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.utils import AscendDeviceType
+
+_DSA_C_ASCEND_OPS = (
+    "npu_sparse_attn_sharedkv",
+    "npu_sparse_attn_sharedkv_metadata",
+    "npu_kv_quant_sparse_attn_sharedkv",
+    "npu_kv_quant_sparse_attn_sharedkv_metadata",
+    "kv_compress_epilog",
+    "npu_scatter_nd_update_v2",
+)
+
+
+@pytest.fixture(autouse=True)
+def _stub_dsa_c_ascend_ops():
+    # CPU images do not register these custom ops on torch.ops._C_ascend.
+    with ExitStack() as stack:
+        for name in _DSA_C_ASCEND_OPS:
+            stack.enter_context(mock.patch.object(torch.ops._C_ascend, name, create=True, new=MagicMock()))
+        yield
 
 
 def _config(use_bf16: bool):
