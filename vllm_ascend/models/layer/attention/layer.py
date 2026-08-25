@@ -19,7 +19,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.dsa_kv_mode import uses_explicit_bf16_kv
+from vllm_ascend.attention.dsa_attn_kv_plan import uses_explicit_bf16_kv
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC128Backend,
