@@ -257,6 +257,13 @@ def graph_capture(device: torch.device):
     graph_capture_context = GraphCaptureContext(torch.npu.Stream(device=device))
     stream = graph_capture_context.stream
 
+    # FULL decode recapture's first kernel is often SparseAttnSharedkvMetadata,
+    # which calls aclrtAllocatorGetByStream on this freshly created capture
+    # stream before any other malloc. Register it here, outside torch.npu.graph.
+    from vllm_ascend.device_allocator.sleep_mem_optimized import register_npu_stream
+
+    register_npu_stream(stream)
+
     # we use nullcontext now
     maybe_ca_context = nullcontext()
 

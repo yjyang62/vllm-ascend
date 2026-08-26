@@ -23,6 +23,7 @@ from vllm_ascend.device_allocator.sleep_mem_optimized import (
     AclGraphSleepWakeupManager,
     HcclSleepWakeupManager,
     SleepWakeupManager,
+    register_npu_stream,
 )
 
 
@@ -107,6 +108,21 @@ def test_hccl_wakeup_restores_and_refreshes_moe_groups():
     mock_refresh.assert_called_once_with()
 
 
+def test_register_npu_stream_allocates_on_target_stream():
+    stream = object()
+    dummy = MagicMock()
+    with (
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.stream", return_value=nullcontext()) as mock_stream_ctx,
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.empty", return_value=dummy) as mock_empty,
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.current_device", return_value=0),
+    ):
+        register_npu_stream(stream)
+
+    mock_stream_ctx.assert_called_once_with(stream)
+    mock_empty.assert_called_once()
+    dummy.zero_.assert_called_once_with()
+
+
 def test_wakeup_recreates_update_stream_before_aclgraph():
     old_stream = object()
     new_stream = object()
@@ -120,6 +136,7 @@ def test_wakeup_recreates_update_stream_before_aclgraph():
     allocator = MagicMock()
     mem_pool = MagicMock()
     allocator.allocator_and_pools = {"weights": (mem_pool, MagicMock())}
+    dummy = MagicMock()
 
     with (
         patch("vllm_ascend.device_allocator.sleep_mem_optimized.CaMemAllocator.get_instance", return_value=allocator),
@@ -128,12 +145,15 @@ def test_wakeup_recreates_update_stream_before_aclgraph():
             "vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.memory.use_mem_pool",
             return_value=nullcontext(),
         ) as mock_use_pool,
-        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.empty"),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.stream", return_value=nullcontext()) as mock_stream_ctx,
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.empty", return_value=dummy),
         patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.current_device", return_value=0),
     ):
         manager.wakeup()
 
     mock_use_pool.assert_called_once_with(mem_pool)
+    mock_stream_ctx.assert_called_once_with(new_stream)
+    dummy.zero_.assert_called_once_with()
     assert model_runner.update_stream is new_stream
     assert model_runner.drafter.update_stream is new_stream
     assert model_runner.speculator.update_stream is new_stream
