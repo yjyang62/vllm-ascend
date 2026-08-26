@@ -189,6 +189,7 @@ class TestCompressorStateCache:
 
         assert isinstance(spec, AscendCompressorStateSpec)
         assert spec.max_admission_blocks_per_request(8192, 36864) == expected_blocks
+        assert spec.max_admission_blocks_per_request(8192, 32768) == expected_blocks
         assert spec.max_admission_blocks_per_request(0, 36864) == expected_blocks
         assert spec.max_memory_usage_bytes(vllm_config) == expected_blocks * spec.page_size_bytes
         assert swa_formula_blocks > expected_blocks

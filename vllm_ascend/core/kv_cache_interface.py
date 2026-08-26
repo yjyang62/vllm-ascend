@@ -234,14 +234,15 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
 @dataclass(frozen=True, kw_only=True)
 class AscendCompressorStateSpec(AscendSlidingWindowMLASpec):
-    """Compressor state is a fixed-size SSM, not chunked-prefill SWA.
+    """DSV4 compressor state and SWA caches are fixed-size SSMs.
 
     Vanilla SlidingWindowSpec charges ``sliding_window - 1 + max_in_flight``
-    per request. That in-flight term is a process-wide token budget, and the
-    compressor only keeps ``coff * compress_ratio`` state rows. Using the SWA
-    formula makes startup ``get_max_concurrency_for_kv_cache_config`` report
-    ~1x at max_model_len while runtime can still admit tens of shorter
-    requests (the DSV4 1.13x-vs-36x gap).
+    per request. That in-flight term is a process-wide token budget. DSV4
+    compressor state only keeps ``coff * compress_ratio`` rows, and DSV4 SWA
+    only keeps ``sliding_window`` tokens even for a 32K sequence. Using the
+    vanilla formula makes startup ``get_max_concurrency_for_kv_cache_config``
+    report ~1.13x at max_model_len while runtime still admits ~36 concurrent
+    32K requests.
     """
 
     def max_admission_blocks_per_request(
