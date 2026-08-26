@@ -138,11 +138,3 @@ def test_propose_requires_aux_hidden_states():
             seeds=torch.empty(0),
         )
 
-
-def test_npu_model_runner_enables_aux_hidden_for_extract_hidden_states():
-    """Document the MRV2 contract: extract_hidden_states needs aux outputs."""
-    speculative_config = SimpleNamespace(method="extract_hidden_states")
-    use_aux_hidden_state_outputs = False
-    if speculative_config.method == "extract_hidden_states":
-        use_aux_hidden_state_outputs = True
-    assert use_aux_hidden_state_outputs is True
