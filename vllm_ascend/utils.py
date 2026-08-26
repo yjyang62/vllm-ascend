@@ -76,6 +76,9 @@ _IS_VL_MODEL = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
+# Live dummy tensors that keep a stream bound to the default caching allocator.
+# Keyed by the underlying CANN stream handle so wrapper Stream objects can change.
+_STREAM_ALLOCATOR_KEEPALIVES: dict[int, torch.Tensor] = {}
 _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
 _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
@@ -957,24 +960,55 @@ def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
     return torch.npu.stream(target_stream)
 
 
+def _stream_allocator_keepalive_key(stream: torch.npu.Stream) -> int:
+    handle = getattr(stream, "npu_stream", None)
+    if isinstance(handle, int):
+        return handle
+    if handle is not None:
+        try:
+            return int(handle)
+        except (TypeError, ValueError):
+            pass
+    stream_id = getattr(stream, "stream_id", None)
+    if isinstance(stream_id, int):
+        return stream_id
+    return id(stream)
+
+
 def register_npu_stream(stream: torch.npu.Stream | None) -> None:
-    """Bind ``stream`` to the default caching allocator.
+    """Bind ``stream`` to the default caching allocator and keep it bound.
 
     ``torch.npu.Stream()`` does not register the handle. PTA looks up the
     allocator with ``aclrtAllocatorGetByStream`` on the *current* stream of
-    the first kernel, so the dummy tensor must be created inside
-    ``torch.npu.stream(stream)``. Do this *before* ``torch.npu.graph()``.
+    the first kernel (FULL recapture's SparseAttnSharedkvMetadata), so the
+    dummy tensor must be created inside ``torch.npu.stream(stream)``.
+
+    Do this *before* ``torch.npu.graph()``. Keep the dummy alive: recapture
+    calls ``empty_cache()`` inside ``graph_capture()``, which would otherwise
+    drop the only allocation on that stream and unbind it again.
 
     Never allocate inside a CaMem weights/kv MemPool: a 1-byte tensor is
     rounded to a 2 MiB caching block and OOMs a packed pool.
+
+    Always allocate, even if this stream was registered earlier: recapture
+    runs empty_cache() after the first bind, and a second call (from SAS
+    metadata) must rebind the stream.
     """
     if stream is None:
         return
+    key = _stream_allocator_keepalive_key(stream)
     device = f"npu:{torch.npu.current_device()}"
     with torch.npu.stream(stream):
         dummy = torch.empty(1, dtype=torch.uint8, device=device)
-        dummy.zero_()
-        del dummy
+        dummy.fill_(1)
+    _STREAM_ALLOCATOR_KEEPALIVES[key] = dummy
+
+
+def release_npu_stream_keepalive(stream: torch.npu.Stream | None) -> None:
+    """Drop the dummy that kept ``stream`` registered with the allocator."""
+    if stream is None:
+        return
+    _STREAM_ALLOCATOR_KEEPALIVES.pop(_stream_allocator_keepalive_key(stream), None)
 
 
 def create_hccl_pg_options(group_name: str):

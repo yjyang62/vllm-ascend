@@ -15,6 +15,7 @@
 
 import math
 import os
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest import mock
 
@@ -500,3 +501,35 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     ascend_config.scheduler_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+def test_register_npu_stream_keeps_dummy_until_released():
+    stream = SimpleNamespace(npu_stream=0xABC)
+    dummy = mock.MagicMock()
+    utils._STREAM_ALLOCATOR_KEEPALIVES.clear()
+    try:
+        with (
+            mock.patch("vllm_ascend.utils.torch.npu.stream", return_value=nullcontext()) as mock_stream_ctx,
+            mock.patch("vllm_ascend.utils.torch.npu.current_device", return_value=0),
+            mock.patch("vllm_ascend.utils.torch.empty", return_value=dummy),
+        ):
+            utils.register_npu_stream(stream)
+            utils.register_npu_stream(stream)
+
+        assert mock_stream_ctx.call_count == 2
+        dummy.fill_.assert_called_with(1)
+        assert dummy.fill_.call_count == 2
+        assert utils._STREAM_ALLOCATOR_KEEPALIVES[0xABC] is dummy
+
+        utils.release_npu_stream_keepalive(stream)
+        assert 0xABC not in utils._STREAM_ALLOCATOR_KEEPALIVES
+    finally:
+        utils._STREAM_ALLOCATOR_KEEPALIVES.clear()
+
+
+def test_register_npu_stream_skips_none():
+    utils._STREAM_ALLOCATOR_KEEPALIVES.clear()
+    with mock.patch("vllm_ascend.utils.torch.empty") as mock_empty:
+        utils.register_npu_stream(None)
+    mock_empty.assert_not_called()
+    assert utils._STREAM_ALLOCATOR_KEEPALIVES == {}

@@ -185,6 +185,7 @@ from vllm_ascend.utils import (
     lmhead_tp_enable,
     oproj_tp_enable,
     register_npu_stream,
+    release_npu_stream_keepalive,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
@@ -237,7 +238,7 @@ class GraphCaptureContext:
 
 
 @contextmanager
-def graph_capture(device: torch.device):
+def graph_capture(device: torch.device, graph_capture_context: GraphCaptureContext | None = None):
     """
     `graph_capture` is a context manager which should surround the code that
     is capturing the NPU graph. Its main purpose is to ensure that the
@@ -251,12 +252,15 @@ def graph_capture(device: torch.device):
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
     """
-    graph_capture_context = GraphCaptureContext(torch.npu.Stream(device=device))
+    if graph_capture_context is None:
+        graph_capture_context = GraphCaptureContext(torch.npu.Stream(device=device))
     stream = graph_capture_context.stream
 
     # FULL decode recapture's first kernel is SparseAttnSharedkvMetadata on
     # this freshly created capture stream. Register it with the default
-    # allocator *on that stream* before any captured op.
+    # allocator *on that stream* and keep the dummy alive: capture_model
+    # calls empty_cache() after entering this context, which would otherwise
+    # drop the only allocation on the stream and unbind it again.
     register_npu_stream(stream)
 
     # we use nullcontext now
@@ -268,8 +272,11 @@ def graph_capture(device: torch.device):
     if curr_stream != stream:
         stream.wait_stream(curr_stream)
 
-    with torch.npu.stream(stream), maybe_ca_context:
-        yield graph_capture_context
+    try:
+        with torch.npu.stream(stream), maybe_ca_context:
+            yield graph_capture_context
+    finally:
+        release_npu_stream_keepalive(stream)
 
 
 def get_tp_context(drafter):

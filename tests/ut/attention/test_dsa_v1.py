@@ -181,6 +181,7 @@ def test_build_sas_metadata_parameters_cache_and_builder_buffer(
             "get_dsa_sparse_attn_metadata_kwargs",
             return_value={"device": "cpu"},
         ),
+        patch("vllm_ascend.attention.dsa_v1.register_npu_stream") as mock_register,
     ):
         result = builder._build_sas_metadata(
             metadata_cache=metadata_cache,
@@ -206,6 +207,7 @@ def test_build_sas_metadata_parameters_cache_and_builder_buffer(
     assert result is builder.sas_metadata_buffer
     assert cached_result is builder.sas_metadata_buffer
     assert torch.equal(builder.sas_metadata_buffer, generated_metadata)
+    mock_register.assert_called_once()
     metadata_op.assert_called_once()
     call_kwargs = metadata_op.call_args.kwargs
     assert call_kwargs["device"] == "cpu"
@@ -559,6 +561,7 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
             "get_dsa_sparse_attn_metadata_kwargs",
             return_value={"device": "cpu"},
         ),
+        patch("vllm_ascend.attention.dsa_v1.register_npu_stream") as mock_register,
     ):
         metadata = builder.build_req_metadata_for_drafting(
             draft_index=1,
@@ -567,6 +570,7 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
             sin=sin,
         )
 
+    mock_register.assert_called_once()
     call_kwargs = metadata_op.call_args.kwargs
     assert call_kwargs["max_seqlen_q"] == 2
     assert call_kwargs["max_seqlen_kv"] == 9

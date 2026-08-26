@@ -44,6 +44,7 @@ from vllm_ascend.utils import (
     olora_tp_enable,
     oproj_tp_enable,
     register_npu_stream,
+    release_npu_stream_keepalive,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -76,6 +77,8 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
 def reset_dsv4_dsa_overlap_stream() -> None:
     """Drop the cached DSA overlap stream after sleep/ACL-graph teardown."""
     global _DSV4_DSA_OVERLAP_STREAM
+    if _DSV4_DSA_OVERLAP_STREAM is not None:
+        release_npu_stream_keepalive(_DSV4_DSA_OVERLAP_STREAM)
     _DSV4_DSA_OVERLAP_STREAM = None
 
 
@@ -83,9 +86,12 @@ def recreate_dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     """Create a fresh overlap stream and register it on that stream.
 
     Must run on wakeup *before* ``capture_model()``, using the default
-    caching allocator (not the packed CaMem weights pool).
+    caching allocator (not the packed CaMem weights pool). Keep the dummy
+    allocation alive so capture_model's empty_cache cannot unbind it.
     """
     global _DSV4_DSA_OVERLAP_STREAM
+    if _DSV4_DSA_OVERLAP_STREAM is not None:
+        release_npu_stream_keepalive(_DSV4_DSA_OVERLAP_STREAM)
     _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
     register_npu_stream(_DSV4_DSA_OVERLAP_STREAM)
     return _DSV4_DSA_OVERLAP_STREAM
@@ -616,6 +622,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cmp_ratio = 1 if self.compressor_ratio <= 1 else 4 if self.compressor_ratio == 4 else 128
             metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+            # Recapture's first AICPU kernel on the capture stream. Bind the
+            # stream after capture_model's empty_cache() and immediately before
+            # SparseAttnSharedkvMetadata, or aclrtAllocatorGetByStream fails.
+            register_npu_stream(torch.npu.current_stream())
             sas_metadata = metadata_op(
                 **metadata_kwargs,
                 num_heads_q=n_local_heads,
@@ -900,6 +910,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
+        register_npu_stream(torch.npu.current_stream())
         sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=n_local_heads,
