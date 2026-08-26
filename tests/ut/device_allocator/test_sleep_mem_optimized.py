@@ -83,6 +83,7 @@ def test_acl_graph_sleep_resets_dsv4_dsa_overlap_stream():
 def test_wakeup_recreates_dsv4_dsa_overlap_stream_before_aclgraph():
     model_runner = MagicMock()
     model_runner.use_aclgraph = True
+    model_runner.update_stream = None
     manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
     calls: list[str] = []
     manager.hccl.wakeup = MagicMock(side_effect=lambda: calls.append("hccl"))
@@ -97,6 +98,40 @@ def test_wakeup_recreates_dsv4_dsa_overlap_stream_before_aclgraph():
     mock_recreate.assert_called_once_with()
     manager.acl_graph.wakeup.assert_called_once_with(None)
     assert calls == ["hccl", "stream", "acl"]
+
+
+def test_wakeup_recreates_update_stream_before_aclgraph():
+    old_stream = object()
+    new_stream = object()
+    model_runner = MagicMock()
+    model_runner.use_aclgraph = True
+    model_runner.update_stream = old_stream
+    model_runner.drafter.update_stream = old_stream
+    model_runner.speculator.update_stream = old_stream
+    manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
+    manager.hccl.wakeup = MagicMock()
+    manager.acl_graph.wakeup = MagicMock()
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.recreate_dsv4_dsa_overlap_stream"),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.Stream", return_value=new_stream),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.register_npu_stream",
+            return_value=True,
+        ) as mock_register,
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.memory.use_mem_pool",
+            return_value=nullcontext(),
+        ) as mock_use_pool,
+    ):
+        manager.wakeup()
+
+    mock_use_pool.assert_not_called()
+    mock_register.assert_called_once_with(new_stream)
+    assert model_runner.update_stream is new_stream
+    assert model_runner.drafter.update_stream is new_stream
+    assert model_runner.speculator.update_stream is new_stream
+    manager.acl_graph.wakeup.assert_called_once_with(None)
 
 
 def test_sleep_wakeup_manager_skips_acl_sleep_when_aclgraph_disabled():

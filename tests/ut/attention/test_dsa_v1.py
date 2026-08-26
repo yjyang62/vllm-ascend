@@ -64,6 +64,23 @@ def test_recreate_dsv4_dsa_overlap_stream_registers_on_that_stream():
     mock_register.assert_called_once_with(new_stream)
 
 
+def test_recreate_dsv4_dsa_overlap_stream_falls_back_to_default():
+    import vllm_ascend.attention.dsa_v1 as dsa_v1
+
+    side_stream = object()
+    default_stream = object()
+    dsa_v1._DSV4_DSA_OVERLAP_STREAM = None
+    with (
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu.Stream", return_value=side_stream),
+        patch("vllm_ascend.attention.dsa_v1.register_npu_stream", return_value=False),
+        patch("vllm_ascend.attention.dsa_v1.default_npu_stream", return_value=default_stream),
+    ):
+        result = recreate_dsv4_dsa_overlap_stream()
+
+    assert result is default_stream
+    assert dsa_v1._DSV4_DSA_OVERLAP_STREAM is default_stream
+
+
 def test_dsv4_dsa_overlap_stream_registers_when_cache_is_empty():
     import vllm_ascend.attention.dsa_v1 as dsa_v1
 

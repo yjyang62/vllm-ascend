@@ -185,9 +185,9 @@ from vllm_ascend.utils import (
     lmhead_tp_enable,
     oproj_tp_enable,
     register_npu_stream,
-    release_npu_stream_keepalive,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    stream_for_aclgraph_capture,
     vllm_version_is,
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
@@ -247,20 +247,21 @@ def graph_capture(device: torch.device, graph_capture_context: GraphCaptureConte
     necessary data for the graph capture. Currently, it only contains the
     stream that the graph capture is running on. This stream is set to the
     current NPU stream when the context manager is entered and reset to the
-    default stream when the context manager is exited. This is to ensure that
-    the graph capture is running on a separate stream from the default stream,
-    in order to explicitly distinguish the kernels to capture
-    from other kernels possibly launched on background in the default stream.
+    default stream when the context manager is exited. The capture stream is
+    either a dedicated side stream registered with CANN's allocator via
+    ``aclrtAllocatorRegister``, or the default stream if that copy fails.
+    A bare ``torch.npu.Stream()`` is never used: AICPU kernels such as
+    SparseAttnSharedkvMetadata call ``aclrtAllocatorGetByStream`` and crash
+    with "The stream is not registered with any allocator".
     """
     if graph_capture_context is None:
-        graph_capture_context = GraphCaptureContext(torch.npu.Stream(device=device))
+        # Never capture on a bare torch.npu.Stream(): CANN's
+        # aclrtAllocatorGetByStream map does not include it, and FULL decode
+        # recapture's first kernel (SparseAttnSharedkvMetadata) then fails with
+        # "The stream is not registered with any allocator" (stream_id ~35).
+        # Register a dedicated side stream, or fall back to the default stream.
+        graph_capture_context = GraphCaptureContext(stream_for_aclgraph_capture(device))
     stream = graph_capture_context.stream
-
-    # FULL decode recapture's first kernel is SparseAttnSharedkvMetadata on
-    # this freshly created capture stream. Register it with the default
-    # allocator *on that stream* and keep the dummy alive: capture_model
-    # calls empty_cache() after entering this context, which would otherwise
-    # drop the only allocation on the stream and unbind it again.
     register_npu_stream(stream)
 
     # we use nullcontext now
@@ -272,11 +273,8 @@ def graph_capture(device: torch.device, graph_capture_context: GraphCaptureConte
     if curr_stream != stream:
         stream.wait_stream(curr_stream)
 
-    try:
-        with torch.npu.stream(stream), maybe_ca_context:
-            yield graph_capture_context
-    finally:
-        release_npu_stream_keepalive(stream)
+    with torch.npu.stream(stream), maybe_ca_context:
+        yield graph_capture_context
 
 
 def get_tp_context(drafter):

@@ -15,7 +15,6 @@
 
 import math
 import os
-from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest import mock
 
@@ -503,33 +502,54 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
 
 
-def test_register_npu_stream_keeps_dummy_until_released():
-    stream = SimpleNamespace(npu_stream=0xABC)
-    dummy = mock.MagicMock()
-    utils._STREAM_ALLOCATOR_KEEPALIVES.clear()
-    try:
-        with (
-            mock.patch("vllm_ascend.utils.torch.npu.stream", return_value=nullcontext()) as mock_stream_ctx,
-            mock.patch("vllm_ascend.utils.torch.npu.current_device", return_value=0),
-            mock.patch("vllm_ascend.utils.torch.empty", return_value=dummy),
-        ):
-            utils.register_npu_stream(stream)
-            utils.register_npu_stream(stream)
+def test_register_npu_stream_copies_default_allocator():
+    target = SimpleNamespace(npu_stream=0x35)
+    default = SimpleNamespace(npu_stream=0x1)
+    desc = object()
+    acl_rt = SimpleNamespace(
+        allocator_get_by_stream=mock.Mock(return_value=[desc, 0]),
+        allocator_register=mock.Mock(return_value=0),
+    )
+    with (
+        mock.patch("vllm_ascend.utils.default_npu_stream", return_value=default),
+        mock.patch("vllm_ascend.utils._acl_rt_module", return_value=acl_rt),
+        mock.patch("vllm_ascend.utils.torch.empty") as mock_empty,
+    ):
+        assert utils.register_npu_stream(target) is True
 
-        assert mock_stream_ctx.call_count == 2
-        dummy.fill_.assert_called_with(1)
-        assert dummy.fill_.call_count == 2
-        assert utils._STREAM_ALLOCATOR_KEEPALIVES[0xABC] is dummy
-
-        utils.release_npu_stream_keepalive(stream)
-        assert 0xABC not in utils._STREAM_ALLOCATOR_KEEPALIVES
-    finally:
-        utils._STREAM_ALLOCATOR_KEEPALIVES.clear()
+    mock_empty.assert_not_called()
+    acl_rt.allocator_get_by_stream.assert_called_once_with(0x1)
+    acl_rt.allocator_register.assert_called_once_with(0x35, desc)
 
 
 def test_register_npu_stream_skips_none():
-    utils._STREAM_ALLOCATOR_KEEPALIVES.clear()
     with mock.patch("vllm_ascend.utils.torch.empty") as mock_empty:
-        utils.register_npu_stream(None)
+        assert utils.register_npu_stream(None) is False
     mock_empty.assert_not_called()
-    assert utils._STREAM_ALLOCATOR_KEEPALIVES == {}
+
+
+def test_register_npu_stream_same_as_default_is_success():
+    stream = SimpleNamespace(npu_stream=0x1)
+    acl_rt = SimpleNamespace(
+        allocator_get_by_stream=mock.Mock(),
+        allocator_register=mock.Mock(),
+    )
+    with (
+        mock.patch("vllm_ascend.utils.default_npu_stream", return_value=stream),
+        mock.patch("vllm_ascend.utils._acl_rt_module", return_value=acl_rt),
+    ):
+        assert utils.register_npu_stream(stream) is True
+    acl_rt.allocator_get_by_stream.assert_not_called()
+    acl_rt.allocator_register.assert_not_called()
+
+
+def test_stream_for_aclgraph_capture_falls_back_to_default_when_register_fails():
+    default = SimpleNamespace(npu_stream=0x1)
+    side = SimpleNamespace(npu_stream=0x35)
+    with (
+        mock.patch("vllm_ascend.utils.default_npu_stream", return_value=default),
+        mock.patch("vllm_ascend.utils.torch.npu.Stream", return_value=side),
+        mock.patch("vllm_ascend.utils.register_npu_stream", side_effect=lambda stream: stream is default),
+    ):
+        result = utils.stream_for_aclgraph_capture()
+    assert result is default
