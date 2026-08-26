@@ -70,6 +70,17 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     return _DSV4_DSA_OVERLAP_STREAM
 
 
+def reset_dsv4_dsa_overlap_stream() -> None:
+    """Drop the cached DSA overlap stream after sleep/ACL-graph teardown.
+
+    Sleep + CaMem teardown invalidates stream↔allocator registration. Reusing
+    the pre-sleep aux stream during FULL ACL-graph recapture fails with
+    ``aclrtAllocatorGetByStream`` / ``SparseAttnSharedkvMetadata`` errors.
+    """
+    global _DSV4_DSA_OVERLAP_STREAM
+    _DSV4_DSA_OVERLAP_STREAM = None
+
+
 def _is_w8a8_dynamic(linear) -> bool:
     """True iff ``linear`` is wired up with ``AscendW8A8DynamicLinearMethod``."""
     quant_method = getattr(linear, "quant_method", None)

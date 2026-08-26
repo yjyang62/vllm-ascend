@@ -62,6 +62,24 @@ def test_acl_graph_wakeup_waits_for_kv_cache_tag():
     model_runner.capture_model.assert_called_once_with()
 
 
+def test_acl_graph_sleep_resets_dsv4_dsa_overlap_stream():
+    model_runner = MagicMock()
+    manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+
+    with (
+        patch.object(AclGraphSleepWakeupManager, "clear_all_attention_workspaces") as mock_clear,
+        patch.object(AclGraphSleepWakeupManager, "reset_all_graph_params") as mock_reset,
+        patch.object(AclGraphSleepWakeupManager, "reset_model_runner_graph_manager") as mock_mgr,
+        patch("vllm_ascend.attention.dsa_v1.reset_dsv4_dsa_overlap_stream") as mock_stream,
+    ):
+        manager.sleep()
+
+    mock_clear.assert_called_once_with()
+    mock_reset.assert_called_once_with()
+    mock_mgr.assert_called_once_with(model_runner)
+    mock_stream.assert_called_once_with()
+
+
 def test_sleep_wakeup_manager_skips_acl_sleep_when_aclgraph_disabled():
     model_runner = MagicMock()
     model_runner.use_aclgraph = False

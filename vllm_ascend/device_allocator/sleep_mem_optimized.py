@@ -117,6 +117,11 @@ class AclGraphSleepWakeupManager:
         self.clear_all_attention_workspaces()
         self.reset_all_graph_params()
         self.reset_model_runner_graph_manager(self._model_runner_getter())
+        # Recreate DSA aux stream after wakeup; pre-sleep Stream handles are
+        # no longer registered with the post-CaMem allocator.
+        from vllm_ascend.attention.dsa_v1 import reset_dsv4_dsa_overlap_stream
+
+        reset_dsv4_dsa_overlap_stream()
 
     def wakeup(self, tags: list[str] | None = None) -> None:
         if tags is not None and "kv_cache" not in tags:

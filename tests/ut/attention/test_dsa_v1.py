@@ -27,6 +27,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
+    reset_dsv4_dsa_overlap_stream,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -34,6 +35,15 @@ from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
     IndexerOverlapPlan,
 )
+
+
+def test_reset_dsv4_dsa_overlap_stream_clears_cached_stream():
+    import vllm_ascend.attention.dsa_v1 as dsa_v1
+
+    sentinel = object()
+    dsa_v1._DSV4_DSA_OVERLAP_STREAM = sentinel
+    reset_dsv4_dsa_overlap_stream()
+    assert dsa_v1._DSV4_DSA_OVERLAP_STREAM is None
 
 
 def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
