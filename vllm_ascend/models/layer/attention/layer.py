@@ -49,10 +49,11 @@ def get_dsv4_block_sizes(use_a5_bf16_kv: bool = False):
         64: [[64, 64, 4, 8], [8448, 65536]],
         32: [[32, 32, 2, 4], [4224, 32768]],
     }
-    if use_a5_bf16_kv and get_ascend_device_type() in {AscendDeviceType.A5}:
-        return _DSV4_BLOCK_SIZES_A5_BF16
     if get_ascend_device_type() in {AscendDeviceType.A5}:
-        return _DSV4_BLOCK_SIZES_A5
+        if use_a5_bf16_kv:
+            return _DSV4_BLOCK_SIZES_A5_BF16
+        else:
+            return _DSV4_BLOCK_SIZES_A5
     else:
         return _DSV4_BLOCK_SIZES
 
