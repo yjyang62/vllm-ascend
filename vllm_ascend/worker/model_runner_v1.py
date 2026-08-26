@@ -131,10 +131,6 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
-from vllm_ascend.device_allocator.camem import (
-    register_npu_stream_allocator,
-    unregister_npu_stream_allocator,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
@@ -256,10 +252,6 @@ def graph_capture(device: torch.device):
     """
     graph_capture_context = GraphCaptureContext(torch.npu.Stream(device=device))
     stream = graph_capture_context.stream
-    # FULL graph recapture after extra sleep cleanup creates a fresh stream.
-    # Register it before DSV4's AICPU metadata operator queries the stream's
-    # allocator through aclrtAllocatorGetByStream.
-    stream_allocator_registered = register_npu_stream_allocator(stream)
 
     # we use nullcontext now
     maybe_ca_context = nullcontext()
@@ -270,16 +262,8 @@ def graph_capture(device: torch.device):
     if curr_stream != stream:
         stream.wait_stream(curr_stream)
 
-    try:
-        with torch.npu.stream(stream), maybe_ca_context:
-            yield graph_capture_context
-    finally:
-        if stream_allocator_registered:
-            # AICPU launches are asynchronous. Keep the allocator registration
-            # alive until every capture-stream task has finished; otherwise a
-            # queued SparseAttnSharedkvMetadata can query CANN after unregister.
-            stream.synchronize()
-            unregister_npu_stream_allocator(stream)
+    with torch.npu.stream(stream), maybe_ca_context:
+        yield graph_capture_context
 
 
 def get_tp_context(drafter):

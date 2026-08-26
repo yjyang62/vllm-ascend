@@ -28,7 +28,6 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device_allocator.camem import register_npu_stream_allocator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -71,13 +70,18 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     return _DSV4_DSA_OVERLAP_STREAM
 
 
-def ensure_dsa_metadata_stream_registered() -> None:
-    """Fail early when an AICPU metadata op has no allocator-bound stream."""
-    if not register_npu_stream_allocator(torch.npu.current_stream()):
-        raise RuntimeError(
-            "The DSA metadata stream is not registered with a CANN allocator. "
-            "SparseAttnSharedkvMetadata cannot run safely."
-        )
+def run_dsa_metadata_op(metadata_op: Any, **kwargs: Any) -> torch.Tensor:
+    """Run AICPU metadata on PTA's allocator-registered default stream."""
+    current_stream = torch.npu.current_stream()
+    default_stream = torch.npu.default_stream()
+    if current_stream == default_stream:
+        return metadata_op(**kwargs)
+
+    default_stream.wait_stream(current_stream)
+    with torch.npu.stream(default_stream):
+        metadata = metadata_op(**kwargs)
+    current_stream.wait_stream(default_stream)
+    return metadata
 
 
 def _is_w8a8_dynamic(linear) -> bool:
@@ -605,8 +609,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cmp_ratio = 1 if self.compressor_ratio <= 1 else 4 if self.compressor_ratio == 4 else 128
             metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
-            ensure_dsa_metadata_stream_registered()
-            sas_metadata = metadata_op(
+            sas_metadata = run_dsa_metadata_op(
+                metadata_op,
                 **metadata_kwargs,
                 num_heads_q=n_local_heads,
                 num_heads_kv=1,
@@ -890,8 +894,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
-        ensure_dsa_metadata_stream_registered()
-        sas_metadata = metadata_op(
+        sas_metadata = run_dsa_metadata_op(
+            metadata_op,
             **metadata_kwargs,
             num_heads_q=n_local_heads,
             num_heads_kv=1,

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -27,7 +28,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
-    ensure_dsa_metadata_stream_registered,
+    run_dsa_metadata_op,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -37,12 +38,23 @@ from vllm_ascend.models.deepseek_v4.indexer import (
 )
 
 
-def test_ensure_dsa_metadata_stream_registered_fails_early():
+def test_run_dsa_metadata_op_uses_default_stream_and_orders_work():
+    current_stream = MagicMock()
+    default_stream = MagicMock()
+    metadata = object()
+    metadata_op = MagicMock(return_value=metadata)
     with (
-        patch("vllm_ascend.attention.dsa_v1.register_npu_stream_allocator", return_value=False),
-        pytest.raises(RuntimeError, match="SparseAttnSharedkvMetadata"),
+        patch("vllm_ascend.attention.dsa_v1.torch.npu.current_stream", return_value=current_stream),
+        patch("vllm_ascend.attention.dsa_v1.torch.npu.default_stream", return_value=default_stream),
+        patch("vllm_ascend.attention.dsa_v1.torch.npu.stream", return_value=nullcontext()) as mock_stream,
     ):
-        ensure_dsa_metadata_stream_registered()
+        result = run_dsa_metadata_op(metadata_op, value=1)
+
+    assert result is metadata
+    default_stream.wait_stream.assert_called_once_with(current_stream)
+    mock_stream.assert_called_once_with(default_stream)
+    metadata_op.assert_called_once_with(value=1)
+    current_stream.wait_stream.assert_called_once_with(default_stream)
 
 
 def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:

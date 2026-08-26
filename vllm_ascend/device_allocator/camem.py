@@ -16,7 +16,6 @@
 #
 # CANN-mem-based pytorch pluggable allocator to implement sleep mode.
 #
-import ctypes
 import dataclasses
 import gc
 import os
@@ -74,125 +73,6 @@ except ImportError as e:
 
 # py_device, py_alignedSize, py_d_mem, py_p_memHandle
 HandleType = tuple[int, int, int, int]
-
-
-def _stream_handle(stream: Any) -> int | None:
-    handle = getattr(stream, "npu_stream", None)
-    if handle is None:
-        return None
-    try:
-        value = int(handle)
-    except (TypeError, ValueError):
-        return None
-    return value if value else None
-
-
-def _load_stream_allocator_api() -> tuple[Any, Any, Any] | None:
-    """Load CANN stream allocator APIs without requiring an extension rebuild."""
-    library_path = find_loaded_library("libascendcl") or "libascendcl.so"
-    try:
-        library = ctypes.CDLL(library_path)
-        get_by_stream = library.aclrtAllocatorGetByStream
-        register = library.aclrtAllocatorRegister
-        unregister = library.aclrtAllocatorUnregister
-    except (OSError, AttributeError) as exc:
-        logger.warning("CANN stream allocator APIs are unavailable: %s", exc)
-        return None
-
-    pointer = ctypes.c_void_p
-    get_by_stream.argtypes = [
-        pointer,
-        ctypes.POINTER(pointer),
-        ctypes.POINTER(pointer),
-        ctypes.POINTER(pointer),
-        ctypes.POINTER(pointer),
-        ctypes.POINTER(pointer),
-        ctypes.POINTER(pointer),
-    ]
-    get_by_stream.restype = ctypes.c_int
-    register.argtypes = [pointer, pointer]
-    register.restype = ctypes.c_int
-    unregister.argtypes = [pointer]
-    unregister.restype = ctypes.c_int
-    return get_by_stream, register, unregister
-
-
-def _register_stream_allocator(source_handle: int, target_handle: int) -> int:
-    api = _load_stream_allocator_api()
-    if api is None:
-        return -1
-    get_by_stream, register, _ = api
-    allocator_desc = ctypes.c_void_p()
-    allocator = ctypes.c_void_p()
-    alloc_func = ctypes.c_void_p()
-    free_func = ctypes.c_void_p()
-    alloc_advise_func = ctypes.c_void_p()
-    get_addr_from_block_func = ctypes.c_void_p()
-    error_code = get_by_stream(
-        ctypes.c_void_p(source_handle),
-        ctypes.byref(allocator_desc),
-        ctypes.byref(allocator),
-        ctypes.byref(alloc_func),
-        ctypes.byref(free_func),
-        ctypes.byref(alloc_advise_func),
-        ctypes.byref(get_addr_from_block_func),
-    )
-    if error_code != 0:
-        return error_code
-    return register(ctypes.c_void_p(target_handle), allocator_desc)
-
-
-def _unregister_stream_allocator(stream_handle: int) -> int:
-    api = _load_stream_allocator_api()
-    if api is None:
-        return -1
-    _, _, unregister = api
-    return unregister(ctypes.c_void_p(stream_handle))
-
-
-def register_npu_stream_allocator(stream: Any) -> bool:
-    """Bind a torch NPU stream to PTA's default CANN allocator.
-
-    A stream created after sleep cleanup is not necessarily present in CANN's
-    stream-to-allocator map. AICPU operators query that map and fail with
-    ``aclrtAllocatorGetByStream`` when ACL graph recapture uses such a stream.
-    """
-    if stream is None:
-        return False
-
-    default_stream = torch.npu.default_stream()
-    source_handle = _stream_handle(default_stream)
-    target_handle = _stream_handle(stream)
-    if source_handle is None or target_handle is None:
-        return False
-    if source_handle == target_handle:
-        return True
-
-    error_code = _register_stream_allocator(source_handle, target_handle)
-    if error_code != 0:
-        logger.warning(
-            "Failed to register NPU stream %#x with the default CANN allocator (error code: %s).",
-            target_handle,
-            error_code,
-        )
-        return False
-    return True
-
-
-def unregister_npu_stream_allocator(stream: Any) -> None:
-    """Remove a registration created by :func:`register_npu_stream_allocator`."""
-    if stream is None:
-        return
-    stream_handle = _stream_handle(stream)
-    if stream_handle is None:
-        return
-    error_code = _unregister_stream_allocator(stream_handle)
-    if error_code != 0:
-        logger.warning(
-            "Failed to unregister NPU stream %#x from the CANN allocator (error code: %s).",
-            stream_handle,
-            error_code,
-        )
 
 
 @dataclasses.dataclass

@@ -13,7 +13,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,9 +24,7 @@ from vllm_ascend.device_allocator.camem import (
     CaMemAllocator,
     create_and_map,
     get_pluggable_allocator,
-    register_npu_stream_allocator,
     unmap_and_release,
-    unregister_npu_stream_allocator,
 )
 
 
@@ -40,49 +37,6 @@ def dummy_free(ptr):
 
 
 class TestCaMem(PytestBase):
-    def test_register_npu_stream_allocator_copies_default_registration(self):
-        default_stream = SimpleNamespace(npu_stream=11)
-        target_stream = SimpleNamespace(npu_stream=22)
-        with (
-            patch("vllm_ascend.device_allocator.camem.torch.npu.default_stream", return_value=default_stream),
-            patch(
-                "vllm_ascend.device_allocator.camem._register_stream_allocator",
-                return_value=0,
-            ) as mock_register,
-        ):
-            assert register_npu_stream_allocator(target_stream)
-
-        mock_register.assert_called_once_with(11, 22)
-
-    def test_register_npu_stream_allocator_skips_default_stream(self):
-        default_stream = SimpleNamespace(npu_stream=11)
-        with (
-            patch("vllm_ascend.device_allocator.camem.torch.npu.default_stream", return_value=default_stream),
-            patch("vllm_ascend.device_allocator.camem._register_stream_allocator") as mock_register,
-        ):
-            assert register_npu_stream_allocator(default_stream)
-
-        mock_register.assert_not_called()
-
-    def test_register_npu_stream_allocator_reports_registration_failure(self):
-        default_stream = SimpleNamespace(npu_stream=11)
-        target_stream = SimpleNamespace(npu_stream=22)
-        with (
-            patch("vllm_ascend.device_allocator.camem.torch.npu.default_stream", return_value=default_stream),
-            patch("vllm_ascend.device_allocator.camem._register_stream_allocator", return_value=1),
-        ):
-            assert not register_npu_stream_allocator(target_stream)
-
-    def test_unregister_npu_stream_allocator_uses_stream_handle(self):
-        target_stream = SimpleNamespace(npu_stream=22)
-        with patch(
-            "vllm_ascend.device_allocator.camem._unregister_stream_allocator",
-            return_value=0,
-        ) as mock_unregister:
-            unregister_npu_stream_allocator(target_stream)
-
-        mock_unregister.assert_called_once_with(22)
-
     @pytest.mark.parametrize(
         "handle",
         [

@@ -15,8 +15,8 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
-    ensure_dsa_metadata_stream_registered,
     get_dspark_sparse_sas_window,
+    run_dsa_metadata_op,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -537,8 +537,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_seqlens_cmp_kv = (
             None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
-        ensure_dsa_metadata_stream_registered()
-        sas_metadata = metadata_op(
+        sas_metadata = run_dsa_metadata_op(
+            metadata_op,
             **metadata_kwargs,
             num_heads_q=num_heads,
             num_heads_kv=1,
@@ -988,8 +988,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 kw["cmp_ratio"] = cmp_ratio
                 kw["has_cmp_kv"] = False
 
-            ensure_dsa_metadata_stream_registered()
-            metadata = metadata_op(**kw)
+            metadata = run_dsa_metadata_op(metadata_op, **kw)
         self.common_ratio_to_sas_metadata[cache_key] = metadata
         self.req_sas_metadata[:1024] = metadata
         return self.req_sas_metadata[:1024]
