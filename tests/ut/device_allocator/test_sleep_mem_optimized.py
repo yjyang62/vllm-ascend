@@ -133,13 +133,9 @@ def test_wakeup_recreates_update_stream_before_aclgraph():
     model_runner.speculator.update_stream = old_stream
     manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
     manager.acl_graph.wakeup = MagicMock()
-    allocator = MagicMock()
-    mem_pool = MagicMock()
-    allocator.allocator_and_pools = {"weights": (mem_pool, MagicMock())}
     dummy = MagicMock()
 
     with (
-        patch("vllm_ascend.device_allocator.sleep_mem_optimized.CaMemAllocator.get_instance", return_value=allocator),
         patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.Stream", return_value=new_stream),
         patch(
             "vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.memory.use_mem_pool",
@@ -151,7 +147,7 @@ def test_wakeup_recreates_update_stream_before_aclgraph():
     ):
         manager.wakeup()
 
-    mock_use_pool.assert_called_once_with(mem_pool)
+    mock_use_pool.assert_not_called()
     mock_stream_ctx.assert_called_once_with(new_stream)
     dummy.zero_.assert_called_once_with()
     assert model_runner.update_stream is new_stream

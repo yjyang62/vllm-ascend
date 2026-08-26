@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
-from contextlib import nullcontext
 from dataclasses import fields
 from typing import Any
 
@@ -30,23 +29,24 @@ from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 
 from vllm_ascend.compilation import acl_graph
-from vllm_ascend.device_allocator.camem import CaMemAllocator
 
 
-def register_npu_stream(stream: Any, mem_pool: Any | None = None) -> None:
-    """Bind ``stream`` to an allocator by malloc'ing on that stream.
+def register_npu_stream(stream: Any) -> None:
+    """Bind ``stream`` to the default caching allocator.
 
     ``torch.npu.Stream()`` does not register the handle. PTA looks up the
     allocator with ``aclrtAllocatorGetByStream`` on the *current* stream of
     the first kernel, so the dummy tensor must be created inside
-    ``torch.npu.stream(stream)``. Allocating on the default stream only
-    registers the default stream.
+    ``torch.npu.stream(stream)``.
+
+    Do not allocate inside the CaMem weights/kv MemPool: that pool is already
+    packed after wakeup, and a 1-byte tensor is rounded up to a 2 MiB caching
+    block, which OOMs while the default allocator still has free memory.
     """
     if stream is None:
         return
     device = f"npu:{torch.npu.current_device()}"
-    pool_ctx = torch.npu.memory.use_mem_pool(mem_pool) if mem_pool is not None else nullcontext()
-    with pool_ctx, torch.npu.stream(stream):
+    with torch.npu.stream(stream):
         dummy = torch.empty(1, dtype=torch.uint8, device=device)
         dummy.zero_()
         del dummy
@@ -90,10 +90,8 @@ class SleepWakeupManager:
         """Create a new FULL-graph update stream and register it on that stream."""
         if model_runner is None or getattr(model_runner, "update_stream", None) is None:
             return
-        data = CaMemAllocator.get_instance().allocator_and_pools.get("weights")
-        mem_pool = data[0] if isinstance(data, tuple | list) else data
         new_stream = torch.npu.Stream()
-        register_npu_stream(new_stream, mem_pool=mem_pool)
+        register_npu_stream(new_stream)
         model_runner.update_stream = new_stream
         for owner_name in ("drafter", "speculator"):
             owner = getattr(model_runner, owner_name, None)
