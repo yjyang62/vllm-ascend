@@ -34,6 +34,9 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
+    dsv4_dsa_overlap_stream,
+    recreate_dsv4_dsa_overlap_stream,
+    reset_dsv4_dsa_overlap_stream,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -42,6 +45,63 @@ from vllm_ascend.models.deepseek_v4.indexer import (
     IndexerOverlapPlan,
 )
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+
+
+def test_reset_dsv4_dsa_overlap_stream_clears_cached_stream():
+    import vllm_ascend.attention.dsa_v1 as dsa_v1
+
+    sentinel = object()
+    dsa_v1._DSV4_DSA_OVERLAP_STREAM = sentinel
+    reset_dsv4_dsa_overlap_stream()
+    assert dsa_v1._DSV4_DSA_OVERLAP_STREAM is None
+
+
+def test_recreate_dsv4_dsa_overlap_stream_registers_on_that_stream():
+    import vllm_ascend.attention.dsa_v1 as dsa_v1
+
+    new_stream = object()
+    dsa_v1._DSV4_DSA_OVERLAP_STREAM = None
+    with (
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu.Stream", return_value=new_stream),
+        patch("vllm_ascend.attention.dsa_v1.register_npu_stream") as mock_register,
+    ):
+        result = recreate_dsv4_dsa_overlap_stream()
+
+    assert result is new_stream
+    assert dsa_v1._DSV4_DSA_OVERLAP_STREAM is new_stream
+    mock_register.assert_called_once_with(new_stream)
+
+
+def test_recreate_dsv4_dsa_overlap_stream_falls_back_to_default():
+    import vllm_ascend.attention.dsa_v1 as dsa_v1
+
+    side_stream = object()
+    default_stream = object()
+    dsa_v1._DSV4_DSA_OVERLAP_STREAM = None
+    with (
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu.Stream", return_value=side_stream),
+        patch("vllm_ascend.attention.dsa_v1.register_npu_stream", return_value=False),
+        patch("vllm_ascend.attention.dsa_v1.default_npu_stream", return_value=default_stream),
+    ):
+        result = recreate_dsv4_dsa_overlap_stream()
+
+    assert result is default_stream
+    assert dsa_v1._DSV4_DSA_OVERLAP_STREAM is default_stream
+
+
+def test_dsv4_dsa_overlap_stream_registers_when_cache_is_empty():
+    import vllm_ascend.attention.dsa_v1 as dsa_v1
+
+    new_stream = object()
+    dsa_v1._DSV4_DSA_OVERLAP_STREAM = None
+    with (
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu.Stream", return_value=new_stream),
+        patch("vllm_ascend.attention.dsa_v1.register_npu_stream") as mock_register,
+    ):
+        result = dsv4_dsa_overlap_stream()
+
+    assert result is new_stream
+    mock_register.assert_called_once_with(new_stream)
 
 
 def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
@@ -146,6 +206,7 @@ def test_build_sas_metadata_parameters_cache_and_builder_buffer(
             "get_dsa_sparse_attn_metadata_kwargs",
             return_value={"device": "cpu"},
         ),
+        patch("vllm_ascend.attention.dsa_v1.register_npu_stream") as mock_register,
     ):
         result = builder._build_sas_metadata(
             metadata_cache=metadata_cache,
@@ -172,6 +233,7 @@ def test_build_sas_metadata_parameters_cache_and_builder_buffer(
     assert cached_result is builder.sas_metadata_buffer
     assert torch.equal(builder.sas_metadata_buffer, generated_metadata)
     metadata_op.assert_called_once()
+    mock_register.assert_called_once()
     call_kwargs = metadata_op.call_args.kwargs
     assert call_kwargs["device"] == "cpu"
     assert call_kwargs["num_heads_q"] == 32
@@ -524,6 +586,7 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
             "get_dsa_sparse_attn_metadata_kwargs",
             return_value={"device": "cpu"},
         ),
+        patch("vllm_ascend.attention.dsa_v1.register_npu_stream") as mock_register,
     ):
         metadata = builder.build_req_metadata_for_drafting(
             draft_index=1,
@@ -532,6 +595,7 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
             sin=sin,
         )
 
+    mock_register.assert_called_once()
     call_kwargs = metadata_op.call_args.kwargs
     assert call_kwargs["max_seqlen_q"] == 2
     assert call_kwargs["max_seqlen_kv"] == 9

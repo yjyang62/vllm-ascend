@@ -41,6 +41,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp_with_o_proj_tp,
     get_ascend_device_type,
     olora_tp_enable,
+    register_npu_stream,
 )
 
 if TYPE_CHECKING:
@@ -541,6 +542,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_seqlens_cmp_kv = (
             None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
+        register_npu_stream(torch.npu.current_stream())
         sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=num_heads,
@@ -991,6 +993,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 kw["cmp_ratio"] = cmp_ratio
                 kw["has_cmp_kv"] = False
 
+            register_npu_stream(torch.npu.current_stream())
             metadata = metadata_op(**kw)
         self.common_ratio_to_sas_metadata[cache_key] = metadata
         self.req_sas_metadata[:1024] = metadata
