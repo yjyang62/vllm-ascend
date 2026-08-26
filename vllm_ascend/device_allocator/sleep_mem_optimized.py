@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, MutableMapping
+from contextlib import nullcontext
 from dataclasses import fields
 from typing import Any
 
@@ -29,6 +30,7 @@ from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 
 from vllm_ascend.compilation import acl_graph
+from vllm_ascend.device_allocator.camem import CaMemAllocator
 
 
 class SleepWakeupManager:
@@ -60,8 +62,26 @@ class SleepWakeupManager:
     def wakeup(self, tags: list[str] | None = None) -> None:
         self.hccl.wakeup()
         model_runner = self._model_runner_getter()
+        self._recreate_update_stream(model_runner)
         if model_runner.use_aclgraph:
             self.acl_graph.wakeup(tags)
+
+    @staticmethod
+    def _recreate_update_stream(model_runner: Any) -> None:
+        """Replay load_model's ``torch.npu.Stream()`` inside the existing CaMem pool."""
+        if model_runner is None or getattr(model_runner, "update_stream", None) is None:
+            return
+        data = CaMemAllocator.get_instance().allocator_and_pools.get("weights")
+        mem_pool = data[0] if isinstance(data, tuple | list) else data
+        context = torch.npu.memory.use_mem_pool(mem_pool) if mem_pool is not None else nullcontext()
+        with context:
+            model_runner.update_stream = torch.npu.Stream()
+            dummy = torch.empty(1, dtype=torch.uint8, device=f"npu:{torch.npu.current_device()}")
+            del dummy
+        for owner_name in ("drafter", "speculator"):
+            owner = getattr(model_runner, owner_name, None)
+            if owner is not None and getattr(owner, "update_stream", None) is not None:
+                owner.update_stream = model_runner.update_stream
 
 
 class AclGraphSleepWakeupManager:
