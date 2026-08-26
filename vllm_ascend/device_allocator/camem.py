@@ -58,6 +58,7 @@ try:
     from vllm_ascend.vllm_ascend_C import (  # type: ignore # noqa: F401
         init_module,
         python_create_and_map,
+        python_register_stream_allocator,
         python_unmap_and_release,
     )
 
@@ -67,12 +68,54 @@ except ImportError as e:
     logger.warning("Failed to import vllm_ascend_C:%s. Sleep mode will be disabled. ", e)
     init_module = None
     python_create_and_map = None
+    python_register_stream_allocator = None
     python_unmap_and_release = None
     lib_name = None
     libcudart = None
 
 # py_device, py_alignedSize, py_d_mem, py_p_memHandle
 HandleType = tuple[int, int, int, int]
+
+
+def _stream_handle(stream: Any) -> int | None:
+    handle = getattr(stream, "npu_stream", None)
+    if handle is None:
+        return None
+    try:
+        value = int(handle)
+    except (TypeError, ValueError):
+        return None
+    return value if value else None
+
+
+def register_npu_stream_allocator(stream: Any) -> bool:
+    """Bind a torch NPU stream to PTA's default CANN allocator.
+
+    A stream created after sleep cleanup is not necessarily present in CANN's
+    stream-to-allocator map. AICPU operators query that map and fail with
+    ``aclrtAllocatorGetByStream`` when ACL graph recapture uses such a stream.
+    """
+    if stream is None or python_register_stream_allocator is None:
+        return False
+
+    default_stream = torch.npu.default_stream()
+    source_handle = _stream_handle(default_stream)
+    target_handle = _stream_handle(stream)
+    if source_handle is None or target_handle is None:
+        return False
+    if source_handle == target_handle:
+        return True
+
+    error_code = python_register_stream_allocator(source_handle, target_handle)
+    if error_code != 0:
+        logger.warning(
+            "Failed to register NPU stream %#x with the default CANN allocator "
+            "(error code: %s).",
+            target_handle,
+            error_code,
+        )
+        return False
+    return True
 
 
 @dataclasses.dataclass

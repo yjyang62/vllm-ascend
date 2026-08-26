@@ -142,6 +142,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     update_sparse_kv_offload_metadata,
 )
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+from vllm_ascend.device_allocator.camem import register_npu_stream_allocator
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -252,6 +253,10 @@ def graph_capture(device: torch.device):
     """
     graph_capture_context = GraphCaptureContext(torch.npu.Stream(device=device))
     stream = graph_capture_context.stream
+    # FULL graph recapture after extra sleep cleanup creates a fresh stream.
+    # Register it before DSV4's AICPU metadata operator queries the stream's
+    # allocator through aclrtAllocatorGetByStream.
+    register_npu_stream_allocator(stream)
 
     # we use nullcontext now
     maybe_ca_context = nullcontext()
@@ -3582,6 +3587,7 @@ class NPUModelRunner(GPUModelRunner):
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
+            register_npu_stream_allocator(self.update_stream)
             self.model = ACLGraphWrapper(
                 self.model,
                 self.vllm_config,

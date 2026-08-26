@@ -25,6 +25,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device_allocator.camem import register_npu_stream_allocator
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -536,6 +537,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_seqlens_cmp_kv = (
             None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
+        register_npu_stream_allocator(torch.npu.current_stream())
         sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=num_heads,
@@ -986,6 +988,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 kw["cmp_ratio"] = cmp_ratio
                 kw["has_cmp_kv"] = False
 
+            register_npu_stream_allocator(torch.npu.current_stream())
             metadata = metadata_op(**kw)
         self.common_ratio_to_sas_metadata[cache_key] = metadata
         self.req_sas_metadata[:1024] = metadata
