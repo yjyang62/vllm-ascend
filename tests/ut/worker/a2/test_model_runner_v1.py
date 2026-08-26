@@ -25,6 +25,8 @@ def test_graph_capture_registers_and_unregisters_capture_stream():
     capture_stream = MagicMock()
     current_stream = MagicMock()
     device = MagicMock()
+    cleanup_calls: list[str] = []
+    capture_stream.synchronize.side_effect = lambda: cleanup_calls.append("synchronize")
     with (
         patch("vllm_ascend.worker.model_runner_v1.torch.npu.Stream", return_value=capture_stream),
         patch("vllm_ascend.worker.model_runner_v1.torch.npu.current_stream", return_value=current_stream),
@@ -33,14 +35,19 @@ def test_graph_capture_registers_and_unregisters_capture_stream():
             "vllm_ascend.worker.model_runner_v1.register_npu_stream_allocator",
             return_value=True,
         ) as mock_register,
-        patch("vllm_ascend.worker.model_runner_v1.unregister_npu_stream_allocator") as mock_unregister,
+        patch(
+            "vllm_ascend.worker.model_runner_v1.unregister_npu_stream_allocator",
+            side_effect=lambda stream: cleanup_calls.append("unregister"),
+        ) as mock_unregister,
         graph_capture(device) as context,
     ):
         assert context.stream is capture_stream
 
     mock_register.assert_called_once_with(capture_stream)
+    capture_stream.synchronize.assert_called_once_with()
     mock_unregister.assert_called_once_with(capture_stream)
     capture_stream.wait_stream.assert_called_once_with(current_stream)
+    assert cleanup_calls == ["synchronize", "unregister"]
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):

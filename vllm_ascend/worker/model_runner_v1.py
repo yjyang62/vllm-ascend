@@ -275,6 +275,10 @@ def graph_capture(device: torch.device):
             yield graph_capture_context
     finally:
         if stream_allocator_registered:
+            # AICPU launches are asynchronous. Keep the allocator registration
+            # alive until every capture-stream task has finished; otherwise a
+            # queued SparseAttnSharedkvMetadata can query CANN after unregister.
+            stream.synchronize()
             unregister_npu_stream_allocator(stream)
 
 
