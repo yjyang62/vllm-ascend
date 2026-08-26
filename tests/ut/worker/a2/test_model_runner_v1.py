@@ -34,9 +34,9 @@ def test_graph_capture_registers_and_unregisters_capture_stream():
             return_value=True,
         ) as mock_register,
         patch("vllm_ascend.worker.model_runner_v1.unregister_npu_stream_allocator") as mock_unregister,
+        graph_capture(device) as context,
     ):
-        with graph_capture(device) as context:
-            assert context.stream is capture_stream
+        assert context.stream is capture_stream
 
     mock_register.assert_called_once_with(capture_stream)
     mock_unregister.assert_called_once_with(capture_stream)

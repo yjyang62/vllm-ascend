@@ -38,9 +38,11 @@ from vllm_ascend.models.deepseek_v4.indexer import (
 
 
 def test_ensure_dsa_metadata_stream_registered_fails_early():
-    with patch("vllm_ascend.attention.dsa_v1.register_npu_stream_allocator", return_value=False):
-        with pytest.raises(RuntimeError, match="SparseAttnSharedkvMetadata"):
-            ensure_dsa_metadata_stream_registered()
+    with (
+        patch("vllm_ascend.attention.dsa_v1.register_npu_stream_allocator", return_value=False),
+        pytest.raises(RuntimeError, match="SparseAttnSharedkvMetadata"),
+    ):
+        ensure_dsa_metadata_stream_registered()
 
 
 def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:

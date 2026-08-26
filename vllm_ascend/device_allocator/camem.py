@@ -60,6 +60,7 @@ try:
         python_create_and_map,
         python_unmap_and_release,
     )
+
     try:
         from vllm_ascend.vllm_ascend_C import (  # type: ignore # noqa: F401
             python_register_stream_allocator,
