@@ -184,8 +184,10 @@ from vllm_ascend.utils import (
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
     oproj_tp_enable,
+    register_npu_stream,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    stream_for_aclgraph_capture,
     vllm_version_is,
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
@@ -236,7 +238,7 @@ class GraphCaptureContext:
 
 
 @contextmanager
-def graph_capture(device: torch.device):
+def graph_capture(device: torch.device, graph_capture_context: GraphCaptureContext | None = None):
     """
     `graph_capture` is a context manager which should surround the code that
     is capturing the NPU graph. Its main purpose is to ensure that the
@@ -245,13 +247,22 @@ def graph_capture(device: torch.device):
     necessary data for the graph capture. Currently, it only contains the
     stream that the graph capture is running on. This stream is set to the
     current NPU stream when the context manager is entered and reset to the
-    default stream when the context manager is exited. This is to ensure that
-    the graph capture is running on a separate stream from the default stream,
-    in order to explicitly distinguish the kernels to capture
-    from other kernels possibly launched on background in the default stream.
+    default stream when the context manager is exited. The capture stream is
+    either a dedicated side stream registered with CANN's allocator via
+    ``aclrtAllocatorRegister``, or the default stream if that copy fails.
+    A bare ``torch.npu.Stream()`` is never used: AICPU kernels such as
+    SparseAttnSharedkvMetadata call ``aclrtAllocatorGetByStream`` and crash
+    with "The stream is not registered with any allocator".
     """
-    graph_capture_context = GraphCaptureContext(torch.npu.Stream(device=device))
+    if graph_capture_context is None:
+        # Never capture on a bare torch.npu.Stream(): CANN's
+        # aclrtAllocatorGetByStream map does not include it, and FULL decode
+        # recapture's first kernel (SparseAttnSharedkvMetadata) then fails with
+        # "The stream is not registered with any allocator" (stream_id ~35).
+        # Register a dedicated side stream, or fall back to the default stream.
+        graph_capture_context = GraphCaptureContext(stream_for_aclgraph_capture(device))
     stream = graph_capture_context.stream
+    register_npu_stream(stream)
 
     # we use nullcontext now
     maybe_ca_context = nullcontext()

@@ -38,11 +38,13 @@ from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
+    default_npu_stream,
     get_ascend_device_type,
     get_potential_max_tokens,
     npu_stream_switch,
     olora_tp_enable,
     oproj_tp_enable,
+    register_npu_stream,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -66,7 +68,30 @@ _DSV4_DSA_OVERLAP_STREAM = None
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     global _DSV4_DSA_OVERLAP_STREAM
     if _DSV4_DSA_OVERLAP_STREAM is None:
-        _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
+        # Never return a bare Stream(): CANN's allocator map does not include
+        # it, and AICPU kernels fail aclrtAllocatorGetByStream.
+        return recreate_dsv4_dsa_overlap_stream()
+    return _DSV4_DSA_OVERLAP_STREAM
+
+
+def reset_dsv4_dsa_overlap_stream() -> None:
+    """Drop the cached DSA overlap stream after sleep/ACL-graph teardown."""
+    global _DSV4_DSA_OVERLAP_STREAM
+    _DSV4_DSA_OVERLAP_STREAM = None
+
+
+def recreate_dsv4_dsa_overlap_stream() -> torch.npu.Stream:
+    """Create a fresh overlap stream and register it with CANN's allocator map.
+
+    Must run on wakeup *before* ``capture_model()``. ``torch.npu.Stream()``
+    does not call ``aclrtAllocatorRegister``; dummy ``torch.empty`` does not
+    either. Copy the default stream's allocator onto this stream.
+    """
+    global _DSV4_DSA_OVERLAP_STREAM
+    _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
+    if not register_npu_stream(_DSV4_DSA_OVERLAP_STREAM):
+        _DSV4_DSA_OVERLAP_STREAM = default_npu_stream()
+        register_npu_stream(_DSV4_DSA_OVERLAP_STREAM)
     return _DSV4_DSA_OVERLAP_STREAM
 
 
@@ -595,6 +620,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cmp_ratio = 1 if self.compressor_ratio <= 1 else 4 if self.compressor_ratio == 4 else 128
             metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+            # Recapture's first AICPU kernel on the capture stream. Copy the
+            # default stream's CANN allocator onto this stream immediately
+            # before SparseAttnSharedkvMetadata. torch.empty does not populate
+            # aclrtAllocatorGetByStream's map.
+            register_npu_stream(torch.npu.current_stream())
             sas_metadata = metadata_op(
                 **metadata_kwargs,
                 num_heads_q=n_local_heads,
@@ -879,6 +909,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
+        register_npu_stream(torch.npu.current_stream())
         sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=n_local_heads,

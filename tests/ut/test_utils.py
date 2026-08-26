@@ -500,3 +500,56 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     ascend_config.scheduler_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+def test_register_npu_stream_copies_default_allocator():
+    target = SimpleNamespace(npu_stream=0x35)
+    default = SimpleNamespace(npu_stream=0x1)
+    desc = object()
+    acl_rt = SimpleNamespace(
+        allocator_get_by_stream=mock.Mock(return_value=[desc, 0]),
+        allocator_register=mock.Mock(return_value=0),
+    )
+    with (
+        mock.patch("vllm_ascend.utils.default_npu_stream", return_value=default),
+        mock.patch("vllm_ascend.utils._acl_rt_module", return_value=acl_rt),
+        mock.patch("vllm_ascend.utils.torch.empty") as mock_empty,
+    ):
+        assert utils.register_npu_stream(target) is True
+
+    mock_empty.assert_not_called()
+    acl_rt.allocator_get_by_stream.assert_called_once_with(0x1)
+    acl_rt.allocator_register.assert_called_once_with(0x35, desc)
+
+
+def test_register_npu_stream_skips_none():
+    with mock.patch("vllm_ascend.utils.torch.empty") as mock_empty:
+        assert utils.register_npu_stream(None) is False
+    mock_empty.assert_not_called()
+
+
+def test_register_npu_stream_same_as_default_is_success():
+    stream = SimpleNamespace(npu_stream=0x1)
+    acl_rt = SimpleNamespace(
+        allocator_get_by_stream=mock.Mock(),
+        allocator_register=mock.Mock(),
+    )
+    with (
+        mock.patch("vllm_ascend.utils.default_npu_stream", return_value=stream),
+        mock.patch("vllm_ascend.utils._acl_rt_module", return_value=acl_rt),
+    ):
+        assert utils.register_npu_stream(stream) is True
+    acl_rt.allocator_get_by_stream.assert_not_called()
+    acl_rt.allocator_register.assert_not_called()
+
+
+def test_stream_for_aclgraph_capture_falls_back_to_default_when_register_fails():
+    default = SimpleNamespace(npu_stream=0x1)
+    side = SimpleNamespace(npu_stream=0x35)
+    with (
+        mock.patch("vllm_ascend.utils.default_npu_stream", return_value=default),
+        mock.patch("vllm_ascend.utils.torch.npu.Stream", return_value=side),
+        mock.patch("vllm_ascend.utils.register_npu_stream", side_effect=lambda stream: stream is default),
+    ):
+        result = utils.stream_for_aclgraph_capture()
+    assert result is default
