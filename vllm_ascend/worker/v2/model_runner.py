@@ -41,9 +41,6 @@ from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner,
     sort_batch_req_ids,
 )
-from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
-    ExtractHiddenStatesSpeculator,
-)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -128,7 +125,7 @@ class NPUModelRunner(GPUModelRunner):
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle.speculator
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
-        self.speculator: AscendEagleSpeculator | ExtractHiddenStatesSpeculator | None = None
+        self.speculator: AscendEagleSpeculator | None = None
         if self.speculative_config is not None and (not self.use_spec_pp or self.is_last_pp_rank):
             self.speculator = init_speculator(self.vllm_config, self.device)
             # Shared update_stream: main model (ModelAclGraphManager) and draft
