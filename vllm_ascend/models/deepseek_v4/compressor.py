@@ -37,7 +37,7 @@ from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import AscendCompressorStateSpec
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
@@ -60,7 +60,7 @@ class AscendCompressorStateCache(CompressorStateCache):
         pads = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
-        return AscendSlidingWindowMLASpec(
+        return AscendCompressorStateSpec(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.state_dim,

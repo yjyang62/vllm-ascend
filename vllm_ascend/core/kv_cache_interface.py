@@ -232,6 +232,35 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class AscendCompressorStateSpec(AscendSlidingWindowMLASpec):
+    """Compressor state is a fixed-size SSM, not chunked-prefill SWA.
+
+    Vanilla SlidingWindowSpec charges ``sliding_window - 1 + max_in_flight``
+    per request. That in-flight term is a process-wide token budget, and the
+    compressor only keeps ``coff * compress_ratio`` state rows. Using the SWA
+    formula makes startup ``get_max_concurrency_for_kv_cache_config`` report
+    ~1x at max_model_len while runtime can still admit tens of shorter
+    requests (the DSV4 1.13x-vs-36x gap).
+    """
+
+    def max_admission_blocks_per_request(
+        self,
+        max_in_flight_tokens: int,
+        max_model_len: int,
+    ) -> int:
+        del max_in_flight_tokens
+        num_tokens = min(self.sliding_window, max_model_len)
+        return cdiv(num_tokens, self.block_size) + 1
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_blocks = self.max_admission_blocks_per_request(
+            max_in_flight_tokens=0,
+            max_model_len=vllm_config.model_config.max_model_len,
+        )
+        return max_blocks * self.page_size_bytes
+
+
 def register_ascend_kv_cache_specs() -> None:
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
@@ -245,6 +274,11 @@ def register_ascend_kv_cache_specs() -> None:
     )
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendSlidingWindowMLASpec,
+        manager_class=SlidingWindowManager,
+        uniform_type_base_spec=SlidingWindowMLASpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendCompressorStateSpec,
         manager_class=SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
     )

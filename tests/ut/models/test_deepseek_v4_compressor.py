@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm_ascend.attention import dsa_attn_kv_plan
+from vllm_ascend.core.kv_cache_interface import AscendCompressorStateSpec
 from vllm_ascend.models.deepseek_v4.compressor import (
     AscendCompressorMetadata,
     AscendCompressorStateCache,
@@ -158,7 +159,37 @@ class TestCompressorStateCache:
 
         spec = cache.get_kv_cache_spec(vllm_config)
 
+        assert isinstance(spec, AscendCompressorStateSpec)
         assert spec.block_size == 8
         assert spec.head_size == state_dim
         assert spec.sliding_window == 64
         assert spec.page_size_padded == DSV4_BLOCK_SIZES[128][1][padding_index]
+
+    def test_compressor_state_admission_ignores_in_flight_tokens(self):
+        from vllm.utils.math_utils import cdiv
+
+        from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
+
+        cache = AscendCompressorStateCache.__new__(AscendCompressorStateCache)
+        cache.state_dim = 2 * 256
+        cache.compress_ratio = 4
+        cache.block_size = 8
+        cache.dtype = torch.float32
+        cache.sliding_window = 8
+        vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
+            model_config=SimpleNamespace(max_model_len=36864),
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+            max_in_flight_tokens=8192,
+        )
+
+        spec = cache.get_kv_cache_spec(vllm_config)
+        expected_blocks = cdiv(cache.sliding_window, cache.block_size) + 1
+        swa_formula_blocks = cdiv(min(cache.sliding_window - 1 + 8192, 36864), cache.block_size) + 1
+
+        assert isinstance(spec, AscendCompressorStateSpec)
+        assert spec.max_admission_blocks_per_request(8192, 36864) == expected_blocks
+        assert spec.max_admission_blocks_per_request(0, 36864) == expected_blocks
+        assert spec.max_memory_usage_bytes(vllm_config) == expected_blocks * spec.page_size_bytes
+        assert swa_formula_blocks > expected_blocks
+        assert spec.page_size_padded == DSV4_BLOCK_SIZES[128][1][0]
