@@ -29,27 +29,7 @@ from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 
 from vllm_ascend.compilation import acl_graph
-
-
-def register_npu_stream(stream: Any) -> None:
-    """Bind ``stream`` to the default caching allocator.
-
-    ``torch.npu.Stream()`` does not register the handle. PTA looks up the
-    allocator with ``aclrtAllocatorGetByStream`` on the *current* stream of
-    the first kernel, so the dummy tensor must be created inside
-    ``torch.npu.stream(stream)``.
-
-    Do not allocate inside the CaMem weights/kv MemPool: that pool is already
-    packed after wakeup, and a 1-byte tensor is rounded up to a 2 MiB caching
-    block, which OOMs while the default allocator still has free memory.
-    """
-    if stream is None:
-        return
-    device = f"npu:{torch.npu.current_device()}"
-    with torch.npu.stream(stream):
-        dummy = torch.empty(1, dtype=torch.uint8, device=device)
-        dummy.zero_()
-        del dummy
+from vllm_ascend.utils import default_npu_stream, register_npu_stream
 
 
 class SleepWakeupManager:
@@ -80,6 +60,11 @@ class SleepWakeupManager:
 
     def wakeup(self, tags: list[str] | None = None) -> None:
         self.hccl.wakeup()
+        # Recreate+CANN-register before recapture. torch.npu.Stream() is not
+        # in aclrtAllocatorGetByStream's map; dummy torch.empty is not either.
+        from vllm_ascend.attention.dsa_v1 import recreate_dsv4_dsa_overlap_stream
+
+        recreate_dsv4_dsa_overlap_stream()
         model_runner = self._model_runner_getter()
         self._recreate_update_stream(model_runner)
         if model_runner.use_aclgraph:
@@ -87,11 +72,13 @@ class SleepWakeupManager:
 
     @staticmethod
     def _recreate_update_stream(model_runner: Any) -> None:
-        """Create a new FULL-graph update stream and register it on that stream."""
+        """Create a new FULL-graph update stream and CANN-register it."""
         if model_runner is None or getattr(model_runner, "update_stream", None) is None:
             return
         new_stream = torch.npu.Stream()
-        register_npu_stream(new_stream)
+        if not register_npu_stream(new_stream):
+            new_stream = default_npu_stream()
+            register_npu_stream(new_stream)
         model_runner.update_stream = new_stream
         for owner_name in ("drafter", "speculator"):
             owner = getattr(model_runner, owner_name, None)
@@ -152,6 +139,9 @@ class AclGraphSleepWakeupManager:
         self.clear_all_attention_workspaces()
         self.reset_all_graph_params()
         self.reset_model_runner_graph_manager(self._model_runner_getter())
+        from vllm_ascend.attention.dsa_v1 import reset_dsv4_dsa_overlap_stream
+
+        reset_dsv4_dsa_overlap_stream()
 
     def wakeup(self, tags: list[str] | None = None) -> None:
         if tags is not None and "kv_cache" not in tags:

@@ -957,6 +957,273 @@ def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
     return torch.npu.stream(target_stream)
 
 
+_ACL_SUCCESS = 0
+_ASCENDCL_SO_CANDIDATES = (
+    "libascendcl.so",
+    os.path.join(os.environ.get("ASCEND_HOME_PATH", ""), "lib64", "libascendcl.so"),
+    os.path.join(os.environ.get("ASCEND_TOOLKIT_HOME", ""), "lib64", "libascendcl.so"),
+    "/usr/local/Ascend/ascend-toolkit/latest/lib64/libascendcl.so",
+)
+_ASCENDCL_CDLL = None
+_ASCENDCL_CDLL_LOADED = False
+
+
+def npu_stream_acl_handle(stream: Any) -> int | None:
+    """Return the CANN ``aclrtStream`` pointer for a torch NPU stream wrapper."""
+    if stream is None:
+        return None
+    handle = getattr(stream, "npu_stream", None)
+    if handle is None:
+        handle = getattr(stream, "cuda_stream", None)
+    if handle is None:
+        return None
+    try:
+        value = int(handle)
+    except (TypeError, ValueError):
+        return None
+    return value if value != 0 else None
+
+
+def default_npu_stream() -> Any:
+    """Return PTA's default stream, not whatever ``current_stream()`` is now."""
+    default_fn = getattr(torch.npu, "default_stream", None)
+    if callable(default_fn):
+        try:
+            return default_fn()
+        except Exception:
+            pass
+    return torch.npu.current_stream()
+
+
+def _acl_rt_module() -> Any | None:
+    try:
+        import acl.rt as acl_rt
+
+        return acl_rt
+    except ImportError:
+        return None
+
+
+def _load_ascendcl() -> Any | None:
+    """Load libascendcl.so once for ctypes fallbacks."""
+    global _ASCENDCL_CDLL, _ASCENDCL_CDLL_LOADED
+    if _ASCENDCL_CDLL_LOADED:
+        return _ASCENDCL_CDLL
+    _ASCENDCL_CDLL_LOADED = True
+    import ctypes
+
+    seen: set[str] = set()
+    candidates = list(_ASCENDCL_SO_CANDIDATES)
+    try:
+        from ctypes.util import find_library
+
+        found = find_library("ascendcl")
+        if found:
+            candidates.insert(0, found)
+    except Exception:
+        pass
+    try:
+        with open("/proc/self/maps") as maps:
+            for line in maps:
+                if "libascendcl.so" not in line or "/" not in line:
+                    continue
+                path = line[line.index("/") :].strip().split(" ", 1)[0]
+                if path:
+                    candidates.insert(0, path)
+                    break
+    except OSError:
+        pass
+    for path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        try:
+            _ASCENDCL_CDLL = ctypes.CDLL(path)
+            return _ASCENDCL_CDLL
+        except OSError:
+            continue
+    _ASCENDCL_CDLL = None
+    return None
+
+
+def _unpack_allocator_get_by_stream(result: Any) -> tuple[Any, int]:
+    """Normalize acl.rt.allocator_get_by_stream return to ``(desc, ret)``."""
+    if result is None:
+        return None, -1
+    if isinstance(result, (list, tuple)):
+        if not result:
+            return None, -1
+        last = result[-1]
+        if isinstance(last, int) and len(result) >= 2:
+            return result[0], last
+        return result[0], _ACL_SUCCESS
+    if isinstance(result, int):
+        if result == 0:
+            return None, -1
+        return result, _ACL_SUCCESS
+    return result, _ACL_SUCCESS
+
+
+def _python_allocator_desc_for_stream(stream_handle: int) -> Any | None:
+    acl_rt = _acl_rt_module()
+    get_by_stream = getattr(acl_rt, "allocator_get_by_stream", None) if acl_rt is not None else None
+    if get_by_stream is None:
+        return None
+    try:
+        desc, ret = _unpack_allocator_get_by_stream(get_by_stream(stream_handle))
+    except Exception as exc:
+        logger.debug("acl.rt.allocator_get_by_stream failed: %s", exc)
+        return None
+    if ret != _ACL_SUCCESS or desc in (None, 0):
+        return None
+    return desc
+
+
+def _python_allocator_register(stream_handle: int, desc: Any) -> bool:
+    acl_rt = _acl_rt_module()
+    register = getattr(acl_rt, "allocator_register", None) if acl_rt is not None else None
+    if register is None:
+        return False
+    try:
+        ret = register(stream_handle, desc)
+    except Exception as exc:
+        logger.debug("acl.rt.allocator_register failed: %s", exc)
+        return False
+    return ret == _ACL_SUCCESS
+
+
+def _ctypes_allocator_desc_for_stream(stream_handle: int) -> Any | None:
+    import ctypes
+
+    lib = _load_ascendcl()
+    if lib is None or not hasattr(lib, "aclrtAllocatorGetByStream"):
+        return None
+    stream_p = ctypes.c_void_p(stream_handle)
+    desc = ctypes.c_void_p()
+    get_fn = lib.aclrtAllocatorGetByStream
+    get_fn.restype = ctypes.c_int
+    alloc = ctypes.c_void_p()
+    alloc_fn = ctypes.c_void_p()
+    free_fn = ctypes.c_void_p()
+    advise_fn = ctypes.c_void_p()
+    get_addr_fn = ctypes.c_void_p()
+    try:
+        ret = get_fn(
+            stream_p,
+            ctypes.byref(desc),
+            ctypes.byref(alloc),
+            ctypes.byref(alloc_fn),
+            ctypes.byref(free_fn),
+            ctypes.byref(advise_fn),
+            ctypes.byref(get_addr_fn),
+        )
+        if ret == _ACL_SUCCESS and desc.value:
+            return desc.value
+    except TypeError:
+        pass
+    desc = ctypes.c_void_p()
+    try:
+        ret = get_fn(stream_p, ctypes.byref(desc))
+    except TypeError:
+        return None
+    if ret == _ACL_SUCCESS and desc.value:
+        return desc.value
+    return None
+
+
+def _ctypes_allocator_register(stream_handle: int, desc: Any) -> bool:
+    import ctypes
+
+    lib = _load_ascendcl()
+    if lib is None or not hasattr(lib, "aclrtAllocatorRegister"):
+        return False
+    register_fn = lib.aclrtAllocatorRegister
+    register_fn.restype = ctypes.c_int
+    try:
+        desc_p = ctypes.c_void_p(int(desc))
+    except (TypeError, ValueError):
+        desc_p = desc
+    try:
+        ret = register_fn(ctypes.c_void_p(stream_handle), desc_p)
+    except Exception as exc:
+        logger.debug("aclrtAllocatorRegister failed: %s", exc)
+        return False
+    return ret == _ACL_SUCCESS
+
+
+def register_npu_stream(stream: torch.npu.Stream | None) -> bool:
+    """Copy the default stream's CANN allocator onto ``stream``.
+
+    ``aclrtAllocatorGetByStream`` looks up a *user* allocator in CANN's
+    per-stream map. ``torch.npu.Stream()`` does not insert that mapping, and
+    ``torch.empty`` on the stream does not either. AICPU ops such as
+    SparseAttnSharedkvMetadata then fail with ``The stream is not registered
+    with any allocator``.
+
+    PTA registers the default stream at init. Copy that descriptor onto the
+    target stream with ``aclrtAllocatorRegister``. Never allocate inside a
+    CaMem weights/kv MemPool: a 1-byte tensor is rounded to a 2 MiB block and
+    OOMs a packed pool.
+
+    Returns True if the target stream is already the default stream or the
+    CANN register succeeded.
+    """
+    if stream is None:
+        return False
+    dst = npu_stream_acl_handle(stream)
+    src = npu_stream_acl_handle(default_npu_stream())
+    if dst is None:
+        return False
+    if src is not None and src == dst:
+        return True
+    if src is None:
+        logger.warning("Cannot copy CANN allocator: default NPU stream has no handle.")
+        return False
+    desc = _python_allocator_desc_for_stream(src)
+    if desc is not None and _python_allocator_register(dst, desc):
+        return True
+    desc = _ctypes_allocator_desc_for_stream(src)
+    if desc is not None and _ctypes_allocator_register(dst, desc):
+        return True
+    logger.warning(
+        "aclrtAllocatorRegister failed for stream handle %#x (default %#x). "
+        "AICPU kernels on this stream may hit "
+        "'The stream is not registered with any allocator'.",
+        dst,
+        src,
+    )
+    return False
+
+
+def stream_for_aclgraph_capture(device: torch.device | None = None) -> torch.npu.Stream:
+    """Return a capture stream that CANN's allocator map knows about.
+
+    A bare ``torch.npu.Stream()`` is *not* registered. Extra-cleanup wakeup
+    skips process warmup and FULL decode recapture's first kernel is
+    SparseAttnSharedkvMetadata on that fresh stream (stream_id ~35), which
+    then fails ``aclrtAllocatorGetByStream``.
+
+    Prefer a dedicated side stream after a successful CANN register. If that
+    copy fails, capture on the default stream PTA registered at init.
+    ``capture_model`` already synchronizes before dummy_run, so the default
+    stream is idle.
+    """
+    default_stream = default_npu_stream()
+    try:
+        side_stream = torch.npu.Stream(device=device) if device is not None else torch.npu.Stream()
+    except Exception:
+        register_npu_stream(default_stream)
+        return default_stream
+    if register_npu_stream(side_stream):
+        return side_stream
+    logger.warning(
+        "Capturing ACL graphs on the default NPU stream because the dedicated "
+        "capture stream could not be registered with CANN's allocator."
+    )
+    register_npu_stream(default_stream)
+    return default_stream
+
+
 def create_hccl_pg_options(group_name: str):
     options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
     hccl_config = get_hccl_config_for_pg_options(group_name) or {}

@@ -108,19 +108,48 @@ def test_hccl_wakeup_restores_and_refreshes_moe_groups():
     mock_refresh.assert_called_once_with()
 
 
-def test_register_npu_stream_allocates_on_target_stream():
-    stream = object()
-    dummy = MagicMock()
-    with (
-        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.stream", return_value=nullcontext()) as mock_stream_ctx,
-        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.empty", return_value=dummy) as mock_empty,
-        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.current_device", return_value=0),
-    ):
-        register_npu_stream(stream)
+def test_register_npu_stream_is_utils_cann_register():
+    from vllm_ascend.utils import register_npu_stream as utils_register
 
-    mock_stream_ctx.assert_called_once_with(stream)
-    mock_empty.assert_called_once()
-    dummy.zero_.assert_called_once_with()
+    assert register_npu_stream is utils_register
+
+
+def test_acl_graph_sleep_resets_dsv4_dsa_overlap_stream():
+    model_runner = MagicMock()
+    manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+
+    with (
+        patch.object(AclGraphSleepWakeupManager, "clear_all_attention_workspaces") as mock_clear,
+        patch.object(AclGraphSleepWakeupManager, "reset_all_graph_params") as mock_reset,
+        patch.object(AclGraphSleepWakeupManager, "reset_model_runner_graph_manager") as mock_mgr,
+        patch("vllm_ascend.attention.dsa_v1.reset_dsv4_dsa_overlap_stream") as mock_stream,
+    ):
+        manager.sleep()
+
+    mock_clear.assert_called_once_with()
+    mock_reset.assert_called_once_with()
+    mock_mgr.assert_called_once_with(model_runner)
+    mock_stream.assert_called_once_with()
+
+
+def test_wakeup_recreates_dsv4_dsa_overlap_stream_before_aclgraph():
+    model_runner = MagicMock()
+    model_runner.use_aclgraph = True
+    model_runner.update_stream = None
+    manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
+    calls: list[str] = []
+    manager.hccl.wakeup = MagicMock(side_effect=lambda: calls.append("hccl"))
+    manager.acl_graph.wakeup = MagicMock(side_effect=lambda tags=None: calls.append("acl"))
+
+    with patch(
+        "vllm_ascend.attention.dsa_v1.recreate_dsv4_dsa_overlap_stream",
+        side_effect=lambda: calls.append("stream"),
+    ) as mock_recreate:
+        manager.wakeup()
+
+    mock_recreate.assert_called_once_with()
+    manager.acl_graph.wakeup.assert_called_once_with(None)
+    assert calls == ["hccl", "stream", "acl"]
 
 
 def test_wakeup_recreates_update_stream_before_aclgraph():
@@ -132,24 +161,25 @@ def test_wakeup_recreates_update_stream_before_aclgraph():
     model_runner.drafter.update_stream = old_stream
     model_runner.speculator.update_stream = old_stream
     manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
+    manager.hccl.wakeup = MagicMock()
     manager.acl_graph.wakeup = MagicMock()
-    dummy = MagicMock()
 
     with (
+        patch("vllm_ascend.attention.dsa_v1.recreate_dsv4_dsa_overlap_stream"),
         patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.Stream", return_value=new_stream),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.register_npu_stream",
+            return_value=True,
+        ) as mock_register,
         patch(
             "vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.memory.use_mem_pool",
             return_value=nullcontext(),
         ) as mock_use_pool,
-        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.stream", return_value=nullcontext()) as mock_stream_ctx,
-        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.empty", return_value=dummy),
-        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.current_device", return_value=0),
     ):
         manager.wakeup()
 
     mock_use_pool.assert_not_called()
-    mock_stream_ctx.assert_called_once_with(new_stream)
-    dummy.zero_.assert_called_once_with()
+    mock_register.assert_called_once_with(new_stream)
     assert model_runner.update_stream is new_stream
     assert model_runner.drafter.update_stream is new_stream
     assert model_runner.speculator.update_stream is new_stream
