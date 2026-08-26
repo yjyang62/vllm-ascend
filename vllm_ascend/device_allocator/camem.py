@@ -109,8 +109,7 @@ def register_npu_stream_allocator(stream: Any) -> bool:
     error_code = python_register_stream_allocator(source_handle, target_handle)
     if error_code != 0:
         logger.warning(
-            "Failed to register NPU stream %#x with the default CANN allocator "
-            "(error code: %s).",
+            "Failed to register NPU stream %#x with the default CANN allocator (error code: %s).",
             target_handle,
             error_code,
         )
