@@ -184,6 +184,7 @@ from vllm_ascend.utils import (
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
     oproj_tp_enable,
+    register_npu_stream,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
@@ -252,6 +253,11 @@ def graph_capture(device: torch.device):
     """
     graph_capture_context = GraphCaptureContext(torch.npu.Stream(device=device))
     stream = graph_capture_context.stream
+
+    # FULL decode recapture's first kernel is SparseAttnSharedkvMetadata on
+    # this freshly created capture stream. Register it with the default
+    # allocator *on that stream* before any captured op.
+    register_npu_stream(stream)
 
     # we use nullcontext now
     maybe_ca_context = nullcontext()

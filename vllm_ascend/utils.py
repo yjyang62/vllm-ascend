@@ -957,6 +957,26 @@ def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
     return torch.npu.stream(target_stream)
 
 
+def register_npu_stream(stream: torch.npu.Stream | None) -> None:
+    """Bind ``stream`` to the default caching allocator.
+
+    ``torch.npu.Stream()`` does not register the handle. PTA looks up the
+    allocator with ``aclrtAllocatorGetByStream`` on the *current* stream of
+    the first kernel, so the dummy tensor must be created inside
+    ``torch.npu.stream(stream)``. Do this *before* ``torch.npu.graph()``.
+
+    Never allocate inside a CaMem weights/kv MemPool: a 1-byte tensor is
+    rounded to a 2 MiB caching block and OOMs a packed pool.
+    """
+    if stream is None:
+        return
+    device = f"npu:{torch.npu.current_device()}"
+    with torch.npu.stream(stream):
+        dummy = torch.empty(1, dtype=torch.uint8, device=device)
+        dummy.zero_()
+        del dummy
+
+
 def create_hccl_pg_options(group_name: str):
     options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
     hccl_config = get_hccl_config_for_pg_options(group_name) or {}

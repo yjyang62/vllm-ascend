@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -28,6 +27,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
+    dsv4_dsa_overlap_stream,
     recreate_dsv4_dsa_overlap_stream,
     reset_dsv4_dsa_overlap_stream,
 )
@@ -48,25 +48,35 @@ def test_reset_dsv4_dsa_overlap_stream_clears_cached_stream():
     assert dsa_v1._DSV4_DSA_OVERLAP_STREAM is None
 
 
-def test_recreate_dsv4_dsa_overlap_stream_allocates_on_that_stream():
+def test_recreate_dsv4_dsa_overlap_stream_registers_on_that_stream():
     import vllm_ascend.attention.dsa_v1 as dsa_v1
 
     new_stream = object()
     dsa_v1._DSV4_DSA_OVERLAP_STREAM = None
-    dummy = MagicMock()
     with (
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu.Stream", return_value=new_stream),
-        patch("vllm_ascend.attention.dsa_v1.torch.npu.stream", return_value=nullcontext()) as mock_stream_ctx,
-        patch("vllm_ascend.attention.dsa_v1.torch.empty", return_value=dummy) as mock_empty,
-        patch("vllm_ascend.attention.dsa_v1.torch.npu.current_device", return_value=0),
+        patch("vllm_ascend.attention.dsa_v1.register_npu_stream") as mock_register,
     ):
         result = recreate_dsv4_dsa_overlap_stream()
 
     assert result is new_stream
     assert dsa_v1._DSV4_DSA_OVERLAP_STREAM is new_stream
-    mock_stream_ctx.assert_called_once_with(new_stream)
-    mock_empty.assert_called_once()
-    dummy.zero_.assert_called_once_with()
+    mock_register.assert_called_once_with(new_stream)
+
+
+def test_dsv4_dsa_overlap_stream_registers_when_cache_is_empty():
+    import vllm_ascend.attention.dsa_v1 as dsa_v1
+
+    new_stream = object()
+    dsa_v1._DSV4_DSA_OVERLAP_STREAM = None
+    with (
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu.Stream", return_value=new_stream),
+        patch("vllm_ascend.attention.dsa_v1.register_npu_stream") as mock_register,
+    ):
+        result = dsv4_dsa_overlap_stream()
+
+    assert result is new_stream
+    mock_register.assert_called_once_with(new_stream)
 
 
 def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:

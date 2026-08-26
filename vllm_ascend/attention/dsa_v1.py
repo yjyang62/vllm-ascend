@@ -43,6 +43,7 @@ from vllm_ascend.utils import (
     npu_stream_switch,
     olora_tp_enable,
     oproj_tp_enable,
+    register_npu_stream,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -63,26 +64,12 @@ DSA_METADATA_BUFFER_SIZE = 1024
 _DSV4_DSA_OVERLAP_STREAM = None
 
 
-def _register_stream_with_allocator(stream: torch.npu.Stream) -> None:
-    """Bind ``stream`` to PTA's allocator via a malloc on that stream.
-
-    ``torch.npu.Stream()`` does not register the handle. CANN looks up the
-    allocator with ``aclrtAllocatorGetByStream`` on the *current* stream of the
-    first kernel, so the dummy tensor must be created inside
-    ``torch.npu.stream(stream)``. Do this *before* ACL-graph capture; a malloc
-    inside ``torch.npu.graph()`` would be recorded into the graph.
-    """
-    device = torch.device(f"npu:{torch.npu.current_device()}")
-    with torch.npu.stream(stream):
-        dummy = torch.empty(1, dtype=torch.uint8, device=device)
-        dummy.zero_()
-        del dummy
-
-
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     global _DSV4_DSA_OVERLAP_STREAM
     if _DSV4_DSA_OVERLAP_STREAM is None:
-        _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
+        # Never return a bare Stream(): PTA will fail aclrtAllocatorGetByStream
+        # on the first kernel (FULL recapture / SparseAttnSharedkvMetadata).
+        return recreate_dsv4_dsa_overlap_stream()
     return _DSV4_DSA_OVERLAP_STREAM
 
 
@@ -93,15 +80,14 @@ def reset_dsv4_dsa_overlap_stream() -> None:
 
 
 def recreate_dsv4_dsa_overlap_stream() -> torch.npu.Stream:
-    """Create a fresh overlap stream and register it with the allocator.
+    """Create a fresh overlap stream and register it on that stream.
 
-    Must run on wakeup *before* ``capture_model()``. Setting the cache to
-    ``None`` alone lazy-creates the stream inside FULL recapture, where the
-    first kernel hits ``aclrtAllocatorGetByStream`` on an unregistered handle.
+    Must run on wakeup *before* ``capture_model()``, using the default
+    caching allocator (not the packed CaMem weights pool).
     """
     global _DSV4_DSA_OVERLAP_STREAM
     _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
-    _register_stream_with_allocator(_DSV4_DSA_OVERLAP_STREAM)
+    register_npu_stream(_DSV4_DSA_OVERLAP_STREAM)
     return _DSV4_DSA_OVERLAP_STREAM
 
 
