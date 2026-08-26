@@ -1,3 +1,4 @@
+import ctypes
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias
@@ -70,33 +71,64 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     return _DSV4_DSA_OVERLAP_STREAM
 
 
-def run_dsa_metadata_op(metadata_op: Any, **kwargs: Any) -> torch.Tensor:
-    """Run AICPU metadata on PTA's allocator-registered default stream."""
+def _stream_handle(stream: torch.npu.Stream) -> int:
+    handle = getattr(stream, "npu_stream", None)
+    if handle is None:
+        raise RuntimeError("NPU stream does not expose a CANN stream handle.")
+    return int(handle)
+
+
+def ensure_dsa_metadata_stream_registered() -> None:
+    """Copy PTA's default allocator registration to the active metadata stream."""
+    if not torch.npu.is_available():
+        return
     current_stream = torch.npu.current_stream()
     default_stream = torch.npu.default_stream()
     if current_stream == default_stream:
-        return metadata_op(**kwargs)
+        return
 
-    default_stream.wait_stream(current_stream)
-    with torch.npu.stream(default_stream):
-        metadata = metadata_op(**kwargs)
-    current_stream.wait_stream(default_stream)
-    return metadata
+    try:
+        library = ctypes.CDLL("libascendcl.so")
+        get_by_stream = library.aclrtAllocatorGetByStream
+        register = library.aclrtAllocatorRegister
+    except (OSError, AttributeError) as exc:
+        raise RuntimeError("CANN stream allocator APIs are unavailable.") from exc
 
+    pointer = ctypes.c_void_p
+    get_by_stream.argtypes = [
+        pointer,
+        ctypes.POINTER(pointer),
+        ctypes.POINTER(pointer),
+        ctypes.POINTER(pointer),
+        ctypes.POINTER(pointer),
+        ctypes.POINTER(pointer),
+        ctypes.POINTER(pointer),
+    ]
+    get_by_stream.restype = ctypes.c_int
+    register.argtypes = [pointer, pointer]
+    register.restype = ctypes.c_int
 
-def copy_dsa_metadata_to_buffer(buffer: torch.Tensor, metadata: torch.Tensor) -> torch.Tensor:
-    """Copy AICPU metadata using the same default stream as its producer."""
-    current_stream = torch.npu.current_stream()
-    default_stream = torch.npu.default_stream()
-    if current_stream == default_stream:
-        buffer[:DSA_METADATA_BUFFER_SIZE].copy_(metadata[:DSA_METADATA_BUFFER_SIZE])
-        return buffer
+    allocator_desc = pointer()
+    allocator = pointer()
+    alloc_func = pointer()
+    free_func = pointer()
+    alloc_advise_func = pointer()
+    get_addr_from_block_func = pointer()
+    get_error = get_by_stream(
+        pointer(_stream_handle(default_stream)),
+        ctypes.byref(allocator_desc),
+        ctypes.byref(allocator),
+        ctypes.byref(alloc_func),
+        ctypes.byref(free_func),
+        ctypes.byref(alloc_advise_func),
+        ctypes.byref(get_addr_from_block_func),
+    )
+    if get_error != 0:
+        raise RuntimeError(f"Cannot query the default stream CANN allocator (error code: {get_error}).")
 
-    default_stream.wait_stream(current_stream)
-    with torch.npu.stream(default_stream):
-        buffer[:DSA_METADATA_BUFFER_SIZE].copy_(metadata[:DSA_METADATA_BUFFER_SIZE])
-    current_stream.wait_stream(default_stream)
-    return buffer
+    register_error = register(pointer(_stream_handle(current_stream)), allocator_desc)
+    if register_error != 0:
+        raise RuntimeError(f"Cannot register the DSA metadata stream allocator (error code: {register_error}).")
 
 
 def _is_w8a8_dynamic(linear) -> bool:
@@ -624,8 +656,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cmp_ratio = 1 if self.compressor_ratio <= 1 else 4 if self.compressor_ratio == 4 else 128
             metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
-            sas_metadata = run_dsa_metadata_op(
-                metadata_op,
+            ensure_dsa_metadata_stream_registered()
+            sas_metadata = metadata_op(
                 **metadata_kwargs,
                 num_heads_q=n_local_heads,
                 num_heads_kv=1,
@@ -651,7 +683,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             metadata_cache[layer_name] = sas_metadata
 
-        return copy_dsa_metadata_to_buffer(self.sas_metadata_buffer, sas_metadata)
+        self.sas_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
+        return self.sas_metadata_buffer
 
     def _build_qli_metadata(
         self,
@@ -685,7 +718,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             metadata_cache["qli"] = qli_metadata
 
-        return copy_dsa_metadata_to_buffer(self.qli_metadata_buffer, qli_metadata)
+        self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
+        return self.qli_metadata_buffer
 
     def build_req_metadata(
         self,
@@ -907,8 +941,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
-        sas_metadata = run_dsa_metadata_op(
-            metadata_op,
+        ensure_dsa_metadata_stream_registered()
+        sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=n_local_heads,
             num_heads_kv=1,
@@ -933,7 +967,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
         if not has_prefill:
             assert self.spec_sas_metadata is not None
-            sas_metadata = copy_dsa_metadata_to_buffer(self.spec_sas_metadata[draft_index - 1], sas_metadata)
+            self.spec_sas_metadata[draft_index - 1][:DSA_METADATA_BUFFER_SIZE].copy_(
+                sas_metadata[:DSA_METADATA_BUFFER_SIZE]
+            )
+            sas_metadata = self.spec_sas_metadata[draft_index - 1]
 
         assert self.spec_slot_mapping is not None
         slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]

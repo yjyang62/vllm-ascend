@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -28,8 +27,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
-    copy_dsa_metadata_to_buffer,
-    run_dsa_metadata_op,
+    ensure_dsa_metadata_stream_registered,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -39,42 +37,17 @@ from vllm_ascend.models.deepseek_v4.indexer import (
 )
 
 
-def test_run_dsa_metadata_op_uses_default_stream_and_orders_work():
+def test_dsa_metadata_registration_fails_when_cann_api_is_unavailable():
     current_stream = MagicMock()
     default_stream = MagicMock()
-    metadata = object()
-    metadata_op = MagicMock(return_value=metadata)
     with (
+        patch("vllm_ascend.attention.dsa_v1.torch.npu.is_available", return_value=True),
         patch("vllm_ascend.attention.dsa_v1.torch.npu.current_stream", return_value=current_stream),
         patch("vllm_ascend.attention.dsa_v1.torch.npu.default_stream", return_value=default_stream),
-        patch("vllm_ascend.attention.dsa_v1.torch.npu.stream", return_value=nullcontext()) as mock_stream,
+        patch("vllm_ascend.attention.dsa_v1.ctypes.CDLL", side_effect=OSError),
+        pytest.raises(RuntimeError, match="allocator APIs are unavailable"),
     ):
-        result = run_dsa_metadata_op(metadata_op, value=1)
-
-    assert result is metadata
-    default_stream.wait_stream.assert_called_once_with(current_stream)
-    mock_stream.assert_called_once_with(default_stream)
-    metadata_op.assert_called_once_with(value=1)
-    current_stream.wait_stream.assert_called_once_with(default_stream)
-
-
-def test_copy_dsa_metadata_to_buffer_uses_default_stream_and_orders_work():
-    current_stream = MagicMock()
-    default_stream = MagicMock()
-    buffer = MagicMock()
-    metadata = MagicMock()
-    with (
-        patch("vllm_ascend.attention.dsa_v1.torch.npu.current_stream", return_value=current_stream),
-        patch("vllm_ascend.attention.dsa_v1.torch.npu.default_stream", return_value=default_stream),
-        patch("vllm_ascend.attention.dsa_v1.torch.npu.stream", return_value=nullcontext()) as mock_stream,
-    ):
-        result = copy_dsa_metadata_to_buffer(buffer, metadata)
-
-    assert result is buffer
-    default_stream.wait_stream.assert_called_once_with(current_stream)
-    mock_stream.assert_called_once_with(default_stream)
-    buffer.__getitem__.assert_called_once_with(slice(None, DSA_METADATA_BUFFER_SIZE, None))
-    current_stream.wait_stream.assert_called_once_with(default_stream)
+        ensure_dsa_metadata_stream_registered()
 
 
 def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
