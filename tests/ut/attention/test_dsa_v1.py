@@ -27,7 +27,6 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
-    ensure_dsa_metadata_stream_registered,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -35,19 +34,6 @@ from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
     IndexerOverlapPlan,
 )
-
-
-def test_dsa_metadata_registration_fails_when_cann_api_is_unavailable():
-    current_stream = MagicMock()
-    default_stream = MagicMock()
-    with (
-        patch("vllm_ascend.attention.dsa_v1.torch.npu.is_available", return_value=True),
-        patch("vllm_ascend.attention.dsa_v1.torch.npu.current_stream", return_value=current_stream),
-        patch("vllm_ascend.attention.dsa_v1.torch.npu.default_stream", return_value=default_stream),
-        patch("vllm_ascend.attention.dsa_v1.ctypes.CDLL", side_effect=OSError),
-        pytest.raises(RuntimeError, match="allocator APIs are unavailable"),
-    ):
-        ensure_dsa_metadata_stream_registered()
 
 
 def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:

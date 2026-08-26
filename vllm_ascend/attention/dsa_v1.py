@@ -1,4 +1,3 @@
-import ctypes
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias
@@ -69,66 +68,6 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     if _DSV4_DSA_OVERLAP_STREAM is None:
         _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
     return _DSV4_DSA_OVERLAP_STREAM
-
-
-def _stream_handle(stream: torch.npu.Stream) -> int:
-    handle = getattr(stream, "npu_stream", None)
-    if handle is None:
-        raise RuntimeError("NPU stream does not expose a CANN stream handle.")
-    return int(handle)
-
-
-def ensure_dsa_metadata_stream_registered() -> None:
-    """Copy PTA's default allocator registration to the active metadata stream."""
-    if not torch.npu.is_available():
-        return
-    current_stream = torch.npu.current_stream()
-    default_stream = torch.npu.default_stream()
-    if current_stream == default_stream:
-        return
-
-    try:
-        library = ctypes.CDLL("libascendcl.so")
-        get_by_stream = library.aclrtAllocatorGetByStream
-        register = library.aclrtAllocatorRegister
-    except (OSError, AttributeError) as exc:
-        raise RuntimeError("CANN stream allocator APIs are unavailable.") from exc
-
-    pointer = ctypes.c_void_p
-    get_by_stream.argtypes = [
-        pointer,
-        ctypes.POINTER(pointer),
-        ctypes.POINTER(pointer),
-        ctypes.POINTER(pointer),
-        ctypes.POINTER(pointer),
-        ctypes.POINTER(pointer),
-        ctypes.POINTER(pointer),
-    ]
-    get_by_stream.restype = ctypes.c_int
-    register.argtypes = [pointer, pointer]
-    register.restype = ctypes.c_int
-
-    allocator_desc = pointer()
-    allocator = pointer()
-    alloc_func = pointer()
-    free_func = pointer()
-    alloc_advise_func = pointer()
-    get_addr_from_block_func = pointer()
-    get_error = get_by_stream(
-        pointer(_stream_handle(default_stream)),
-        ctypes.byref(allocator_desc),
-        ctypes.byref(allocator),
-        ctypes.byref(alloc_func),
-        ctypes.byref(free_func),
-        ctypes.byref(alloc_advise_func),
-        ctypes.byref(get_addr_from_block_func),
-    )
-    if get_error != 0:
-        raise RuntimeError(f"Cannot query the default stream CANN allocator (error code: {get_error}).")
-
-    register_error = register(pointer(_stream_handle(current_stream)), allocator_desc)
-    if register_error != 0:
-        raise RuntimeError(f"Cannot register the DSA metadata stream allocator (error code: {register_error}).")
 
 
 def _is_w8a8_dynamic(linear) -> bool:
@@ -656,7 +595,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cmp_ratio = 1 if self.compressor_ratio <= 1 else 4 if self.compressor_ratio == 4 else 128
             metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
-            ensure_dsa_metadata_stream_registered()
             sas_metadata = metadata_op(
                 **metadata_kwargs,
                 num_heads_q=n_local_heads,
@@ -941,7 +879,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
-        ensure_dsa_metadata_stream_registered()
         sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=n_local_heads,
