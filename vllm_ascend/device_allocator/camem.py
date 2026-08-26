@@ -16,8 +16,8 @@
 #
 # CANN-mem-based pytorch pluggable allocator to implement sleep mode.
 #
-import dataclasses
 import ctypes
+import dataclasses
 import gc
 import os
 from collections.abc import Callable
