@@ -63,6 +63,22 @@ DSA_METADATA_BUFFER_SIZE = 1024
 _DSV4_DSA_OVERLAP_STREAM = None
 
 
+def _register_stream_with_allocator(stream: torch.npu.Stream) -> None:
+    """Bind ``stream`` to PTA's allocator via a malloc on that stream.
+
+    ``torch.npu.Stream()`` does not register the handle. CANN looks up the
+    allocator with ``aclrtAllocatorGetByStream`` on the *current* stream of the
+    first kernel, so the dummy tensor must be created inside
+    ``torch.npu.stream(stream)``. Do this *before* ACL-graph capture; a malloc
+    inside ``torch.npu.graph()`` would be recorded into the graph.
+    """
+    device = torch.device(f"npu:{torch.npu.current_device()}")
+    with torch.npu.stream(stream):
+        dummy = torch.empty(1, dtype=torch.uint8, device=device)
+        dummy.zero_()
+        del dummy
+
+
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     global _DSV4_DSA_OVERLAP_STREAM
     if _DSV4_DSA_OVERLAP_STREAM is None:
@@ -71,14 +87,22 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
 
 
 def reset_dsv4_dsa_overlap_stream() -> None:
-    """Drop the cached DSA overlap stream after sleep/ACL-graph teardown.
-
-    Sleep + CaMem teardown invalidates stream↔allocator registration. Reusing
-    the pre-sleep aux stream during FULL ACL-graph recapture fails with
-    ``aclrtAllocatorGetByStream`` / ``SparseAttnSharedkvMetadata`` errors.
-    """
+    """Drop the cached DSA overlap stream after sleep/ACL-graph teardown."""
     global _DSV4_DSA_OVERLAP_STREAM
     _DSV4_DSA_OVERLAP_STREAM = None
+
+
+def recreate_dsv4_dsa_overlap_stream() -> torch.npu.Stream:
+    """Create a fresh overlap stream and register it with the allocator.
+
+    Must run on wakeup *before* ``capture_model()``. Setting the cache to
+    ``None`` alone lazy-creates the stream inside FULL recapture, where the
+    first kernel hits ``aclrtAllocatorGetByStream`` on an unregistered handle.
+    """
+    global _DSV4_DSA_OVERLAP_STREAM
+    _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
+    _register_stream_with_allocator(_DSV4_DSA_OVERLAP_STREAM)
+    return _DSV4_DSA_OVERLAP_STREAM
 
 
 def _is_w8a8_dynamic(linear) -> bool:

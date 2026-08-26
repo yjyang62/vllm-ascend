@@ -80,6 +80,25 @@ def test_acl_graph_sleep_resets_dsv4_dsa_overlap_stream():
     mock_stream.assert_called_once_with()
 
 
+def test_wakeup_recreates_dsv4_dsa_overlap_stream_before_aclgraph():
+    model_runner = MagicMock()
+    model_runner.use_aclgraph = True
+    manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
+    calls: list[str] = []
+    manager.hccl.wakeup = MagicMock(side_effect=lambda: calls.append("hccl"))
+    manager.acl_graph.wakeup = MagicMock(side_effect=lambda tags=None: calls.append("acl"))
+
+    with patch(
+        "vllm_ascend.attention.dsa_v1.recreate_dsv4_dsa_overlap_stream",
+        side_effect=lambda: calls.append("stream"),
+    ) as mock_recreate:
+        manager.wakeup()
+
+    mock_recreate.assert_called_once_with()
+    manager.acl_graph.wakeup.assert_called_once_with(None)
+    assert calls == ["hccl", "stream", "acl"]
+
+
 def test_sleep_wakeup_manager_skips_acl_sleep_when_aclgraph_disabled():
     model_runner = MagicMock()
     model_runner.use_aclgraph = False
