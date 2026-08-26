@@ -68,8 +68,8 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffe
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
-from vllm_ascend.worker.v2.spec_decode.extract_hidden_states.speculator import (
-    AscendExtractHiddenStatesSpeculator,
+from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
+    ExtractHiddenStatesSpeculator,
 )
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
@@ -128,11 +128,13 @@ class NPUModelRunner(GPUModelRunner):
         # we define AscendEagleSpeculator in vllm_ascend.worker.v2.spec_decode.eagle.speculator
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
-        self.speculator: AscendEagleSpeculator | AscendExtractHiddenStatesSpeculator | None = None
+        self.speculator: AscendEagleSpeculator | ExtractHiddenStatesSpeculator | None = None
         if self.speculative_config is not None and (not self.use_spec_pp or self.is_last_pp_rank):
             self.speculator = init_speculator(self.vllm_config, self.device)
             # Shared update_stream: main model (ModelAclGraphManager) and draft
             # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
+            # extract_hidden_states does not capture ACL graphs but still receives
+            # the attribute for a uniform assignment path.
             self.speculator.update_stream = self.update_stream
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.

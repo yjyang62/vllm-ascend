@@ -386,7 +386,7 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 > [!NOTE]
 > Model Runner V2 support reuses upstream vLLM's `ExtractHiddenStatesSpeculator`
 > ([PR #49811](https://github.com/vllm-project/vllm/pull/49811)). Ascend only
-> adds dispatch, aux-hidden enabling, and NPU KV allocate/reshape for
+> adds `init_speculator` dispatch and NPU KV allocate/reshape for
 > `HiddenStateCacheSpec`.
 
 - Offline inference

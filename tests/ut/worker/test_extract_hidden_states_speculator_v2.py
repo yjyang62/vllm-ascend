@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""Unit tests for Ascend ExtractHiddenStatesSpeculator (Model Runner V2).
+"""Unit tests for MRV2 extract_hidden_states dispatch (upstream speculator).
 
-Covers Ascend init_speculator dispatch and upstream propose() behavior
-(vLLM PR #49811).
+Covers Ascend init_speculator returning upstream ExtractHiddenStatesSpeculator
+and upstream propose() behavior (vLLM PR #49811).
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ from typing import Any, cast
 import pytest
 import torch
 import vllm.v1.worker.gpu.spec_decode.extract_hidden_states as upstream_spec_module
+from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
+    ExtractHiddenStatesSpeculator,
+)
 
 from vllm_ascend.worker.v2.spec_decode import init_speculator
-from vllm_ascend.worker.v2.spec_decode.extract_hidden_states.speculator import (
-    AscendExtractHiddenStatesSpeculator,
-)
 
 
 class _RecordingModel(torch.nn.Module):
@@ -34,7 +34,7 @@ def test_init_requires_greedy_draft_sampling():
     )
 
     with pytest.raises(ValueError, match="only supports draft_sample_method='greedy'"):
-        AscendExtractHiddenStatesSpeculator(vllm_config, torch.device("cpu"))
+        ExtractHiddenStatesSpeculator(vllm_config, torch.device("cpu"))
 
 
 def test_init_speculator_dispatches_extract_hidden_states(monkeypatch):
@@ -48,7 +48,7 @@ def test_init_speculator_dispatches_extract_hidden_states(monkeypatch):
         return config, target_device
 
     monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.extract_hidden_states.speculator.AscendExtractHiddenStatesSpeculator",
+        "vllm.v1.worker.gpu.spec_decode.extract_hidden_states.ExtractHiddenStatesSpeculator",
         fake_speculator,
     )
 
@@ -65,7 +65,7 @@ def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
     monkeypatch.setattr(upstream_spec_module, "set_forward_context", fake_set_forward_context)
 
     layer_name = "cache_only_layers.2"
-    speculator = object.__new__(AscendExtractHiddenStatesSpeculator)
+    speculator = object.__new__(ExtractHiddenStatesSpeculator)
     speculator.vllm_config = cast(Any, SimpleNamespace())
     speculator.num_hidden_states = 2
     speculator.hidden_states = torch.zeros(4, 2, 3)
@@ -90,7 +90,7 @@ def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
     }
     last_sampled = torch.tensor([[10], [11], [12]], dtype=torch.int64)
 
-    draft_tokens = AscendExtractHiddenStatesSpeculator.propose(
+    draft_tokens = ExtractHiddenStatesSpeculator.propose(
         speculator,
         input_batch=input_batch,
         attn_metadata=attn_metadata,
@@ -118,12 +118,12 @@ def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
 
 
 def test_propose_requires_aux_hidden_states():
-    speculator = object.__new__(AscendExtractHiddenStatesSpeculator)
+    speculator = object.__new__(ExtractHiddenStatesSpeculator)
     speculator.num_hidden_states = 2
     input_batch = cast(Any, SimpleNamespace(idx_mapping=torch.tensor([0], dtype=torch.int32)))
 
     with pytest.raises(ValueError, match="aux_hidden_states are required"):
-        AscendExtractHiddenStatesSpeculator.propose(
+        ExtractHiddenStatesSpeculator.propose(
             speculator,
             input_batch=input_batch,
             attn_metadata={},
@@ -137,4 +137,3 @@ def test_propose_requires_aux_hidden_states():
             temperature=torch.empty(0),
             seeds=torch.empty(0),
         )
-
