@@ -125,7 +125,22 @@ class AclGraphSleepWakeupManager:
             return
         model_runner = self._model_runner_getter()
         with set_current_vllm_config(self.vllm_config):
+            self.warm_up_before_capture(model_runner)
             model_runner.capture_model()
+
+    @staticmethod
+    def warm_up_before_capture(model_runner: Any) -> None:
+        """Run one eager forward before recapture, like a cold start does.
+
+        A cold start always executes the model eagerly before capturing, so
+        capture-time work such as DSA's AICPU metadata operator has already
+        run once on the default stream. Recapture skips that, leaving the
+        capture stream as the first executor of those operators.
+        """
+        capture_sizes = model_runner.compilation_config.cudagraph_capture_sizes
+        if not capture_sizes:
+            return
+        model_runner._dummy_run(max(capture_sizes))
 
 
 class HcclSleepWakeupManager:

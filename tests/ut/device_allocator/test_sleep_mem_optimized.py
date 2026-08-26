@@ -62,6 +62,29 @@ def test_acl_graph_wakeup_waits_for_kv_cache_tag():
     model_runner.capture_model.assert_called_once_with()
 
 
+def test_acl_graph_wakeup_runs_eager_warmup_before_capture():
+    calls: list[str] = []
+    model_runner = MagicMock()
+    model_runner.compilation_config.cudagraph_capture_sizes = [1, 8, 32]
+    model_runner._dummy_run.side_effect = lambda size: calls.append(f"dummy_run:{size}")
+    model_runner.capture_model.side_effect = lambda: calls.append("capture")
+    manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+
+    with patch("vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config", return_value=nullcontext()):
+        manager.wakeup()
+
+    assert calls == ["dummy_run:32", "capture"]
+
+
+def test_acl_graph_warmup_is_skipped_without_capture_sizes():
+    model_runner = MagicMock()
+    model_runner.compilation_config.cudagraph_capture_sizes = []
+
+    AclGraphSleepWakeupManager.warm_up_before_capture(model_runner)
+
+    model_runner._dummy_run.assert_not_called()
+
+
 def test_sleep_wakeup_manager_skips_acl_sleep_when_aclgraph_disabled():
     model_runner = MagicMock()
     model_runner.use_aclgraph = False
