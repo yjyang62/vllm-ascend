@@ -84,6 +84,21 @@ def run_dsa_metadata_op(metadata_op: Any, **kwargs: Any) -> torch.Tensor:
     return metadata
 
 
+def copy_dsa_metadata_to_buffer(buffer: torch.Tensor, metadata: torch.Tensor) -> torch.Tensor:
+    """Copy AICPU metadata using the same default stream as its producer."""
+    current_stream = torch.npu.current_stream()
+    default_stream = torch.npu.default_stream()
+    if current_stream == default_stream:
+        buffer[:DSA_METADATA_BUFFER_SIZE].copy_(metadata[:DSA_METADATA_BUFFER_SIZE])
+        return buffer
+
+    default_stream.wait_stream(current_stream)
+    with torch.npu.stream(default_stream):
+        buffer[:DSA_METADATA_BUFFER_SIZE].copy_(metadata[:DSA_METADATA_BUFFER_SIZE])
+    current_stream.wait_stream(default_stream)
+    return buffer
+
+
 def _is_w8a8_dynamic(linear) -> bool:
     """True iff ``linear`` is wired up with ``AscendW8A8DynamicLinearMethod``."""
     quant_method = getattr(linear, "quant_method", None)
@@ -636,8 +651,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             metadata_cache[layer_name] = sas_metadata
 
-        self.sas_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
-        return self.sas_metadata_buffer
+        return copy_dsa_metadata_to_buffer(self.sas_metadata_buffer, sas_metadata)
 
     def _build_qli_metadata(
         self,
@@ -671,8 +685,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             metadata_cache["qli"] = qli_metadata
 
-        self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
-        return self.qli_metadata_buffer
+        return copy_dsa_metadata_to_buffer(self.qli_metadata_buffer, qli_metadata)
 
     def build_req_metadata(
         self,
@@ -920,10 +933,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
         if not has_prefill:
             assert self.spec_sas_metadata is not None
-            self.spec_sas_metadata[draft_index - 1][:DSA_METADATA_BUFFER_SIZE].copy_(
-                sas_metadata[:DSA_METADATA_BUFFER_SIZE]
-            )
-            sas_metadata = self.spec_sas_metadata[draft_index - 1]
+            sas_metadata = copy_dsa_metadata_to_buffer(self.spec_sas_metadata[draft_index - 1], sas_metadata)
 
         assert self.spec_slot_mapping is not None
         slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]

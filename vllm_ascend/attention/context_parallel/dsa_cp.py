@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
+    copy_dsa_metadata_to_buffer,
     get_dspark_sparse_sas_window,
     run_dsa_metadata_op,
 )
@@ -990,8 +991,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
             metadata = run_dsa_metadata_op(metadata_op, **kw)
         self.common_ratio_to_sas_metadata[cache_key] = metadata
-        self.req_sas_metadata[:1024] = metadata
-        return self.req_sas_metadata[:1024]
+        return copy_dsa_metadata_to_buffer(self.req_sas_metadata, metadata)
 
     def _build_qli_metadata(self, query_start_loc, seq_lens, seq_lens_q, num_reqs):
         if self.compressor_ratio != 4:
