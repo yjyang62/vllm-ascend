@@ -19,6 +19,8 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
+from vllm.config import CUDAGraphMode
+
 from vllm_ascend.device_allocator.sleep_mem_optimized import (
     AclGraphSleepWakeupManager,
     HcclSleepWakeupManager,
@@ -65,24 +67,34 @@ def test_acl_graph_wakeup_waits_for_kv_cache_tag():
 def test_acl_graph_wakeup_runs_eager_warmup_before_capture():
     calls: list[str] = []
     model_runner = MagicMock()
-    model_runner.compilation_config.cudagraph_capture_sizes = [1, 8, 32]
-    model_runner._dummy_run.side_effect = lambda size: calls.append(f"dummy_run:{size}")
+    model_runner.uniform_decode_query_len = 4
+    model_runner._dummy_run.side_effect = lambda *args, **kwargs: calls.append("dummy_run")
     model_runner.capture_model.side_effect = lambda: calls.append("capture")
     manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
 
-    with patch("vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config", return_value=nullcontext()):
+    with (
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config", return_value=nullcontext()),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.synchronize"),
+    ):
         manager.wakeup()
 
-    assert calls == ["dummy_run:32", "capture"]
+    assert calls == ["dummy_run", "capture"]
 
 
-def test_acl_graph_warmup_is_skipped_without_capture_sizes():
+def test_acl_graph_warmup_forces_attention_metadata_build():
     model_runner = MagicMock()
-    model_runner.compilation_config.cudagraph_capture_sizes = []
+    model_runner.uniform_decode_query_len = 4
 
-    AclGraphSleepWakeupManager.warm_up_before_capture(model_runner)
+    with patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.synchronize") as mock_sync:
+        AclGraphSleepWakeupManager.warm_up_before_capture(model_runner)
 
-    model_runner._dummy_run.assert_not_called()
+    model_runner._dummy_run.assert_called_once_with(
+        4,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+        force_attention=True,
+        uniform_decode=True,
+    )
+    mock_sync.assert_called_once_with()
 
 
 def test_sleep_wakeup_manager_skips_acl_sleep_when_aclgraph_disabled():
