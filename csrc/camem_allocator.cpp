@@ -25,9 +25,6 @@ extern "C" {
 
 #include <sys/types.h>
 #include "acl/acl.h"
-#ifdef CANN_STREAM_ALLOCATOR_API
-#include "acl/acl_rt_allocator.h"
-#endif
 
 // Global references to Python callables
 // NOTE: this is borrowed reference, so we don't need to DECREF them.
@@ -325,53 +322,6 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
   Py_RETURN_NONE;
 }
 
-static PyObject* python_register_stream_allocator(PyObject* self,
-                                                  PyObject* args) {
-  unsigned long long source_stream_handle;
-  unsigned long long target_stream_handle;
-  if (!PyArg_ParseTuple(args, "KK", &source_stream_handle,
-                        &target_stream_handle)) {
-    return nullptr;
-  }
-
-#ifdef CANN_STREAM_ALLOCATOR_API
-  auto source_stream =
-      reinterpret_cast<aclrtStream>(source_stream_handle);
-  auto target_stream =
-      reinterpret_cast<aclrtStream>(target_stream_handle);
-  aclrtAllocatorDesc allocator_desc = nullptr;
-  aclrtAllocator allocator = nullptr;
-  aclrtAllocatorAllocFunc alloc_func = nullptr;
-  aclrtAllocatorFreeFunc free_func = nullptr;
-  aclrtAllocatorAllocAdviseFunc alloc_advise_func = nullptr;
-  aclrtAllocatorGetAddrFromBlockFunc get_addr_from_block_func = nullptr;
-
-  aclError error_code = aclrtAllocatorGetByStream(
-      source_stream, &allocator_desc, &allocator, &alloc_func, &free_func,
-      &alloc_advise_func, &get_addr_from_block_func);
-  if (error_code == ACL_SUCCESS) {
-    error_code = aclrtAllocatorRegister(target_stream, allocator_desc);
-  }
-  return PyLong_FromLong(error_code);
-#else
-  return PyLong_FromLong(-1);
-#endif
-}
-
-static PyObject* python_unregister_stream_allocator(PyObject* self,
-                                                    PyObject* args) {
-  unsigned long long stream_handle;
-  if (!PyArg_ParseTuple(args, "K", &stream_handle)) {
-    return nullptr;
-  }
-#ifdef CANN_STREAM_ALLOCATOR_API
-  auto stream = reinterpret_cast<aclrtStream>(stream_handle);
-  return PyLong_FromLong(aclrtAllocatorUnregister(stream));
-#else
-  return PyLong_FromLong(-1);
-#endif
-}
-
 static PyMethodDef module_methods[] = {
     {"init_module", (PyCFunction)py_init_module, METH_VARARGS,
      "Initialize module with python_malloc and python_free callables."},
@@ -379,12 +329,6 @@ static PyMethodDef module_methods[] = {
      "Create and map memory on the device."},
     {"python_unmap_and_release", (PyCFunction)python_unmap_and_release,
      METH_VARARGS, "Unmap and release memory on the device."},
-    {"python_register_stream_allocator",
-     (PyCFunction)python_register_stream_allocator, METH_VARARGS,
-     "Register a stream with the allocator used by another stream."},
-    {"python_unregister_stream_allocator",
-     (PyCFunction)python_unregister_stream_allocator, METH_VARARGS,
-     "Remove a stream allocator registration."},
     {NULL, NULL, 0, NULL}  // sentinel
 };
 

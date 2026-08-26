@@ -152,24 +152,6 @@ else()
   endif()
 endif()
 
-if(NOT SOC_VERSION MATCHES "ascend310p.*")
-  check_cxx_source_compiles("
-    #include <acl/acl_rt_allocator.h>
-    int main() {
-      (void)aclrtAllocatorGetByStream;
-      (void)aclrtAllocatorRegister;
-      (void)aclrtAllocatorUnregister;
-      return 0;
-    }
-  " HAVE_ACLRT_STREAM_ALLOCATOR)
-  if(HAVE_ACLRT_STREAM_ALLOCATOR)
-    message(STATUS "CANN stream allocator APIs detected")
-    target_compile_definitions(vllm_ascend_C PRIVATE CANN_STREAM_ALLOCATOR_API)
-  else()
-    message(STATUS "CANN stream allocator APIs not found")
-  endif()
-endif()
-
 if(SOC_VERSION MATCHES "ascend310p.*")
     target_compile_definitions(vllm_ascend_C PRIVATE -DASCEND_PLATFORM_310P)
 endif()

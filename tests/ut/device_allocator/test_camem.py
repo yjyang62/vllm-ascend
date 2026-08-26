@@ -46,7 +46,7 @@ class TestCaMem(PytestBase):
         with (
             patch("vllm_ascend.device_allocator.camem.torch.npu.default_stream", return_value=default_stream),
             patch(
-                "vllm_ascend.device_allocator.camem.python_register_stream_allocator",
+                "vllm_ascend.device_allocator.camem._register_stream_allocator",
                 return_value=0,
             ) as mock_register,
         ):
@@ -58,7 +58,7 @@ class TestCaMem(PytestBase):
         default_stream = SimpleNamespace(npu_stream=11)
         with (
             patch("vllm_ascend.device_allocator.camem.torch.npu.default_stream", return_value=default_stream),
-            patch("vllm_ascend.device_allocator.camem.python_register_stream_allocator") as mock_register,
+            patch("vllm_ascend.device_allocator.camem._register_stream_allocator") as mock_register,
         ):
             assert register_npu_stream_allocator(default_stream)
 
@@ -69,14 +69,14 @@ class TestCaMem(PytestBase):
         target_stream = SimpleNamespace(npu_stream=22)
         with (
             patch("vllm_ascend.device_allocator.camem.torch.npu.default_stream", return_value=default_stream),
-            patch("vllm_ascend.device_allocator.camem.python_register_stream_allocator", return_value=1),
+            patch("vllm_ascend.device_allocator.camem._register_stream_allocator", return_value=1),
         ):
             assert not register_npu_stream_allocator(target_stream)
 
     def test_unregister_npu_stream_allocator_uses_stream_handle(self):
         target_stream = SimpleNamespace(npu_stream=22)
         with patch(
-            "vllm_ascend.device_allocator.camem.python_unregister_stream_allocator",
+            "vllm_ascend.device_allocator.camem._unregister_stream_allocator",
             return_value=0,
         ) as mock_unregister:
             unregister_npu_stream_allocator(target_stream)
