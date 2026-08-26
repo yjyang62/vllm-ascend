@@ -77,7 +77,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_attn_kv_plan import uses_explicit_bf16_kv
-from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import AscendCompressorStateSpec
 from vllm_ascend.models.deepseek_v4.compressor import Compressor
 from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
@@ -120,7 +120,10 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
             if use_bf16_kv
             else (self.head_dim + 128 if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_dim)
         )
-        return AscendSlidingWindowMLASpec(
+        # DSV4 SWA is a fixed window SSM (paper §3.5.1), not a chunked-prefill
+        # workspace. Bound admission by sliding_window only so 32K requests are
+        # not charged window-1+max_in_flight.
+        return AscendCompressorStateSpec(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=cached_head_size,
