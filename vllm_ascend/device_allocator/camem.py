@@ -58,9 +58,18 @@ try:
     from vllm_ascend.vllm_ascend_C import (  # type: ignore # noqa: F401
         init_module,
         python_create_and_map,
-        python_register_stream_allocator,
         python_unmap_and_release,
     )
+    try:
+        from vllm_ascend.vllm_ascend_C import (  # type: ignore # noqa: F401
+            python_register_stream_allocator,
+            python_unregister_stream_allocator,
+        )
+    except ImportError:
+        # Keep CaMem usable with extensions built before stream registration
+        # support was added.
+        python_register_stream_allocator = None
+        python_unregister_stream_allocator = None
 
     lib_name = find_loaded_library("vllm_ascend_C")
     camem_available = True
@@ -69,6 +78,7 @@ except ImportError as e:
     init_module = None
     python_create_and_map = None
     python_register_stream_allocator = None
+    python_unregister_stream_allocator = None
     python_unmap_and_release = None
     lib_name = None
     libcudart = None
@@ -115,6 +125,22 @@ def register_npu_stream_allocator(stream: Any) -> bool:
         )
         return False
     return True
+
+
+def unregister_npu_stream_allocator(stream: Any) -> None:
+    """Remove a registration created by :func:`register_npu_stream_allocator`."""
+    if stream is None or python_unregister_stream_allocator is None:
+        return
+    stream_handle = _stream_handle(stream)
+    if stream_handle is None:
+        return
+    error_code = python_unregister_stream_allocator(stream_handle)
+    if error_code != 0:
+        logger.warning(
+            "Failed to unregister NPU stream %#x from the CANN allocator (error code: %s).",
+            stream_handle,
+            error_code,
+        )
 
 
 @dataclasses.dataclass

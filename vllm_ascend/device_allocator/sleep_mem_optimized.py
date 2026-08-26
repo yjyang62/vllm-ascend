@@ -29,7 +29,6 @@ from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 
 from vllm_ascend.compilation import acl_graph
-from vllm_ascend.device_allocator.camem import register_npu_stream_allocator
 
 
 class SleepWakeupManager:
@@ -61,25 +60,8 @@ class SleepWakeupManager:
     def wakeup(self, tags: list[str] | None = None) -> None:
         self.hccl.wakeup()
         model_runner = self._model_runner_getter()
-        self._register_model_runner_streams(model_runner)
-        from vllm_ascend.attention.dsa_v1 import register_dsv4_dsa_overlap_stream
-
-        register_dsv4_dsa_overlap_stream()
         if model_runner.use_aclgraph:
             self.acl_graph.wakeup(tags)
-
-    @staticmethod
-    def _register_model_runner_streams(model_runner: Any) -> None:
-        """Restore allocator bindings before FULL ACL graph recapture."""
-        if model_runner is None:
-            return
-        seen: set[int] = set()
-        for owner in (model_runner, getattr(model_runner, "drafter", None), getattr(model_runner, "speculator", None)):
-            stream = getattr(owner, "update_stream", None)
-            if stream is None or id(stream) in seen:
-                continue
-            seen.add(id(stream))
-            register_npu_stream_allocator(stream)
 
 
 class AclGraphSleepWakeupManager:

@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -17,7 +18,29 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import AscendDeviceType
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner, graph_capture
+
+
+def test_graph_capture_registers_and_unregisters_capture_stream():
+    capture_stream = MagicMock()
+    current_stream = MagicMock()
+    device = MagicMock()
+    with (
+        patch("vllm_ascend.worker.model_runner_v1.torch.npu.Stream", return_value=capture_stream),
+        patch("vllm_ascend.worker.model_runner_v1.torch.npu.current_stream", return_value=current_stream),
+        patch("vllm_ascend.worker.model_runner_v1.torch.npu.stream", return_value=nullcontext()),
+        patch(
+            "vllm_ascend.worker.model_runner_v1.register_npu_stream_allocator",
+            return_value=True,
+        ) as mock_register,
+        patch("vllm_ascend.worker.model_runner_v1.unregister_npu_stream_allocator") as mock_unregister,
+    ):
+        with graph_capture(device) as context:
+            assert context.stream is capture_stream
+
+    mock_register.assert_called_once_with(capture_stream)
+    mock_unregister.assert_called_once_with(capture_stream)
+    capture_stream.wait_stream.assert_called_once_with(current_stream)
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):

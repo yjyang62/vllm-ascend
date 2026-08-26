@@ -27,8 +27,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
-    dsv4_dsa_overlap_stream,
-    register_dsv4_dsa_overlap_stream,
+    ensure_dsa_metadata_stream_registered,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -38,23 +37,10 @@ from vllm_ascend.models.deepseek_v4.indexer import (
 )
 
 
-def test_dsv4_overlap_stream_registers_new_and_cached_stream():
-    import vllm_ascend.attention.dsa_v1 as dsa_v1
-
-    stream = object()
-    dsa_v1._DSV4_DSA_OVERLAP_STREAM = None
-    try:
-        with (
-            patch("vllm_ascend.attention.dsa_v1.torch_npu.npu.Stream", return_value=stream),
-            patch("vllm_ascend.attention.dsa_v1.register_npu_stream_allocator") as mock_register,
-        ):
-            assert dsv4_dsa_overlap_stream() is stream
-            register_dsv4_dsa_overlap_stream()
-
-        assert mock_register.call_count == 2
-        mock_register.assert_called_with(stream)
-    finally:
-        dsa_v1._DSV4_DSA_OVERLAP_STREAM = None
+def test_ensure_dsa_metadata_stream_registered_fails_early():
+    with patch("vllm_ascend.attention.dsa_v1.register_npu_stream_allocator", return_value=False):
+        with pytest.raises(RuntimeError, match="SparseAttnSharedkvMetadata"):
+            ensure_dsa_metadata_stream_registered()
 
 
 def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:

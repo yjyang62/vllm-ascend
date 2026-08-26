@@ -17,7 +17,7 @@
 
 from contextlib import nullcontext
 from dataclasses import dataclass
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from vllm_ascend.device_allocator.sleep_mem_optimized import (
     AclGraphSleepWakeupManager,
@@ -105,38 +105,3 @@ def test_hccl_wakeup_restores_and_refreshes_moe_groups():
 
     mock_restore.assert_called_once_with()
     mock_refresh.assert_called_once_with()
-
-
-def test_wakeup_registers_runtime_streams_before_aclgraph_recapture():
-    shared_stream = object()
-    speculator_stream = object()
-    model_runner = MagicMock()
-    model_runner.use_aclgraph = True
-    model_runner.update_stream = shared_stream
-    model_runner.drafter.update_stream = shared_stream
-    model_runner.speculator.update_stream = speculator_stream
-    manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
-    calls: list[str] = []
-    manager.hccl.wakeup = MagicMock(side_effect=lambda: calls.append("hccl"))
-    manager.acl_graph.wakeup = MagicMock(side_effect=lambda tags: calls.append("aclgraph"))
-
-    with (
-        patch(
-            "vllm_ascend.device_allocator.sleep_mem_optimized.register_npu_stream_allocator",
-            side_effect=lambda stream: calls.append(f"stream:{id(stream)}"),
-        ) as mock_register,
-        patch(
-            "vllm_ascend.attention.dsa_v1.register_dsv4_dsa_overlap_stream",
-            side_effect=lambda: calls.append("dsa"),
-        ),
-    ):
-        manager.wakeup()
-
-    assert mock_register.call_args_list == [call(shared_stream), call(speculator_stream)]
-    assert calls == [
-        "hccl",
-        f"stream:{id(shared_stream)}",
-        f"stream:{id(speculator_stream)}",
-        "dsa",
-        "aclgraph",
-    ]

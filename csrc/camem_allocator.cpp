@@ -25,7 +25,9 @@ extern "C" {
 
 #include <sys/types.h>
 #include "acl/acl.h"
+#ifdef CANN_STREAM_ALLOCATOR_API
 #include "acl/acl_rt_allocator.h"
+#endif
 
 // Global references to Python callables
 // NOTE: this is borrowed reference, so we don't need to DECREF them.
@@ -332,6 +334,7 @@ static PyObject* python_register_stream_allocator(PyObject* self,
     return nullptr;
   }
 
+#ifdef CANN_STREAM_ALLOCATOR_API
   auto source_stream =
       reinterpret_cast<aclrtStream>(source_stream_handle);
   auto target_stream =
@@ -350,6 +353,23 @@ static PyObject* python_register_stream_allocator(PyObject* self,
     error_code = aclrtAllocatorRegister(target_stream, allocator_desc);
   }
   return PyLong_FromLong(error_code);
+#else
+  return PyLong_FromLong(-1);
+#endif
+}
+
+static PyObject* python_unregister_stream_allocator(PyObject* self,
+                                                    PyObject* args) {
+  unsigned long long stream_handle;
+  if (!PyArg_ParseTuple(args, "K", &stream_handle)) {
+    return nullptr;
+  }
+#ifdef CANN_STREAM_ALLOCATOR_API
+  auto stream = reinterpret_cast<aclrtStream>(stream_handle);
+  return PyLong_FromLong(aclrtAllocatorUnregister(stream));
+#else
+  return PyLong_FromLong(-1);
+#endif
 }
 
 static PyMethodDef module_methods[] = {
@@ -362,6 +382,9 @@ static PyMethodDef module_methods[] = {
     {"python_register_stream_allocator",
      (PyCFunction)python_register_stream_allocator, METH_VARARGS,
      "Register a stream with the allocator used by another stream."},
+    {"python_unregister_stream_allocator",
+     (PyCFunction)python_unregister_stream_allocator, METH_VARARGS,
+     "Remove a stream allocator registration."},
     {NULL, NULL, 0, NULL}  // sentinel
 };
 

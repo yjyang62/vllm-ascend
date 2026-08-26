@@ -27,6 +27,7 @@ from vllm_ascend.device_allocator.camem import (
     get_pluggable_allocator,
     register_npu_stream_allocator,
     unmap_and_release,
+    unregister_npu_stream_allocator,
 )
 
 
@@ -71,6 +72,16 @@ class TestCaMem(PytestBase):
             patch("vllm_ascend.device_allocator.camem.python_register_stream_allocator", return_value=1),
         ):
             assert not register_npu_stream_allocator(target_stream)
+
+    def test_unregister_npu_stream_allocator_uses_stream_handle(self):
+        target_stream = SimpleNamespace(npu_stream=22)
+        with patch(
+            "vllm_ascend.device_allocator.camem.python_unregister_stream_allocator",
+            return_value=0,
+        ) as mock_unregister:
+            unregister_npu_stream_allocator(target_stream)
+
+        mock_unregister.assert_called_once_with(22)
 
     @pytest.mark.parametrize(
         "handle",

@@ -68,14 +68,16 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     global _DSV4_DSA_OVERLAP_STREAM
     if _DSV4_DSA_OVERLAP_STREAM is None:
         _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
-        register_npu_stream_allocator(_DSV4_DSA_OVERLAP_STREAM)
     return _DSV4_DSA_OVERLAP_STREAM
 
 
-def register_dsv4_dsa_overlap_stream() -> None:
-    """Restore the cached overlap stream's CANN allocator registration."""
-    if _DSV4_DSA_OVERLAP_STREAM is not None:
-        register_npu_stream_allocator(_DSV4_DSA_OVERLAP_STREAM)
+def ensure_dsa_metadata_stream_registered() -> None:
+    """Fail early when an AICPU metadata op has no allocator-bound stream."""
+    if not register_npu_stream_allocator(torch.npu.current_stream()):
+        raise RuntimeError(
+            "The DSA metadata stream is not registered with a CANN allocator. "
+            "SparseAttnSharedkvMetadata cannot run safely."
+        )
 
 
 def _is_w8a8_dynamic(linear) -> bool:
@@ -603,7 +605,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cmp_ratio = 1 if self.compressor_ratio <= 1 else 4 if self.compressor_ratio == 4 else 128
             metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
-            register_npu_stream_allocator(torch.npu.current_stream())
+            ensure_dsa_metadata_stream_registered()
             sas_metadata = metadata_op(
                 **metadata_kwargs,
                 num_heads_q=n_local_heads,
@@ -888,7 +890,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
-        register_npu_stream_allocator(torch.npu.current_stream())
+        ensure_dsa_metadata_stream_registered()
         sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=n_local_heads,

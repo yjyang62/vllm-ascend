@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
+    ensure_dsa_metadata_stream_registered,
     get_dspark_sparse_sas_window,
 )
 from vllm_ascend.attention.utils import (
@@ -26,7 +27,6 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device_allocator.camem import register_npu_stream_allocator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
@@ -537,7 +537,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_seqlens_cmp_kv = (
             None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
-        register_npu_stream_allocator(torch.npu.current_stream())
+        ensure_dsa_metadata_stream_registered()
         sas_metadata = metadata_op(
             **metadata_kwargs,
             num_heads_q=num_heads,
@@ -988,7 +988,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 kw["cmp_ratio"] = cmp_ratio
                 kw["has_cmp_kv"] = False
 
-            register_npu_stream_allocator(torch.npu.current_stream())
+            ensure_dsa_metadata_stream_registered()
             metadata = metadata_op(**kw)
         self.common_ratio_to_sas_metadata[cache_key] = metadata
         self.req_sas_metadata[:1024] = metadata
