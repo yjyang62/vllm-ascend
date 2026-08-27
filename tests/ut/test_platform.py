@@ -1,4 +1,5 @@
 import importlib
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,7 +11,13 @@ from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
-from vllm_ascend.platform import NPUPlatform, _setup_compile_backend, _validate_eplb_config
+from vllm_ascend.platform import (
+    ACLNN_CACHE_LIMIT_ENV,
+    NPUPlatform,
+    _disable_aclnn_cache_for_recapture,
+    _setup_compile_backend,
+    _validate_eplb_config,
+)
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
@@ -1505,3 +1512,38 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+
+class TestDisableAclnnCacheForRecapture(TestBase):
+    @staticmethod
+    def _make_config(enable_sleep_mode=True, rl_enabled=True, extra_cleanup=True):
+        vllm_config = MagicMock()
+        vllm_config.model_config.enable_sleep_mode = enable_sleep_mode
+        ascend_config = MagicMock()
+        ascend_config.rl_config.enabled = rl_enabled
+        ascend_config.rl_config.sleep_mode_extra_cleanup = extra_cleanup
+        return vllm_config, ascend_config
+
+    def test_disables_cache_for_extra_cleanup_sleep(self):
+        vllm_config, ascend_config = self._make_config()
+        with patch.dict("os.environ", {}, clear=True):
+            _disable_aclnn_cache_for_recapture(vllm_config, ascend_config)
+            self.assertEqual(os.environ[ACLNN_CACHE_LIMIT_ENV], "0")
+
+    def test_keeps_explicit_user_setting(self):
+        vllm_config, ascend_config = self._make_config()
+        with patch.dict("os.environ", {ACLNN_CACHE_LIMIT_ENV: "10000"}, clear=True):
+            _disable_aclnn_cache_for_recapture(vllm_config, ascend_config)
+            self.assertEqual(os.environ[ACLNN_CACHE_LIMIT_ENV], "10000")
+
+    def test_skips_without_extra_cleanup(self):
+        vllm_config, ascend_config = self._make_config(extra_cleanup=False)
+        with patch.dict("os.environ", {}, clear=True):
+            _disable_aclnn_cache_for_recapture(vllm_config, ascend_config)
+            self.assertNotIn(ACLNN_CACHE_LIMIT_ENV, os.environ)
+
+    def test_skips_without_sleep_mode(self):
+        vllm_config, ascend_config = self._make_config(enable_sleep_mode=False)
+        with patch.dict("os.environ", {}, clear=True):
+            _disable_aclnn_cache_for_recapture(vllm_config, ascend_config)
+            self.assertNotIn(ACLNN_CACHE_LIMIT_ENV, os.environ)

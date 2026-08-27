@@ -23,7 +23,7 @@ from dataclasses import fields
 from typing import Any
 
 import torch
-from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import _groups
 from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
@@ -125,27 +125,7 @@ class AclGraphSleepWakeupManager:
             return
         model_runner = self._model_runner_getter()
         with set_current_vllm_config(self.vllm_config):
-            self.warm_up_before_capture(model_runner)
             model_runner.capture_model()
-
-    @staticmethod
-    def warm_up_before_capture(model_runner: Any) -> None:
-        """Run one eager decode forward before recapture, like a cold start does.
-
-        A cold start executes the model eagerly before capturing, so operators
-        that only run while attention metadata is built - DSA emits its AICPU
-        metadata operator there - already executed once on the default stream.
-        Recapture skips that and leaves the capture stream as their first
-        executor. ``force_attention`` is required here because dummy runs
-        otherwise skip metadata construction entirely.
-        """
-        model_runner._dummy_run(
-            getattr(model_runner, "uniform_decode_query_len", 1),
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            force_attention=True,
-            uniform_decode=True,
-        )
-        torch.npu.synchronize()
 
 
 class HcclSleepWakeupManager:
