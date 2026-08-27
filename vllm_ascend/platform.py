@@ -71,8 +71,6 @@ else:
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_CAPTURE_SIZES_FOR_950 = 4
-# CANN environment variable that bounds the aclnn executor cache.
-ACLNN_CACHE_LIMIT_ENV = "ACLNN_CACHE_LIMIT"
 
 
 class NPUPlatform(Platform):
@@ -395,9 +393,6 @@ class NPUPlatform(Platform):
 
         # 10.Set pytorch NPU allocator env (vllm_config)
         _set_pytorch_npu_alloc_env(vllm_config)
-
-        # 11.Disable the aclnn kernel cache when wake-up recaptures ACL graphs
-        _disable_aclnn_cache_for_recapture(vllm_config, ascend_config)
 
     @classmethod
     def set_additional_forward_context(
@@ -1230,36 +1225,6 @@ def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:
             npu_alloc_configs += ",expandable_segments:True"
         os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
         logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
-
-
-def _disable_aclnn_cache_for_recapture(vllm_config: VllmConfig, ascend_config) -> None:
-    """Disable the CANN aclnn kernel cache when wake-up recaptures ACL graphs.
-
-    Extra-cleanup sleep tears ACL graphs down and wake-up recaptures them. The
-    aclnn executor cache still holds entries built during the previous capture,
-    and reusing one whose kernel handle no longer resolves aborts the launch
-    with "Kernel launch from cache failed / OpExecCache run fail". On DeepSeek
-    V4 this surfaces as an AICPU exception in SparseAttnSharedkvMetadata.
-    """
-    model_config = vllm_config.model_config
-    if model_config is None or not model_config.enable_sleep_mode:
-        return
-
-    rl_config = ascend_config.rl_config
-    if not (rl_config.enabled and rl_config.sleep_mode_extra_cleanup):
-        return
-
-    if ACLNN_CACHE_LIMIT_ENV in os.environ:
-        return
-
-    os.environ[ACLNN_CACHE_LIMIT_ENV] = "0"
-    logger.warning(
-        "Set %s=0 because sleep mode extra cleanup recaptures ACL graphs after "
-        "wake-up, and aclnn executors cached during the previous capture are not "
-        "reusable. Set %s explicitly to keep the cache enabled.",
-        ACLNN_CACHE_LIMIT_ENV,
-        ACLNN_CACHE_LIMIT_ENV,
-    )
 
 
 def _disable_expandable_segments() -> None:
