@@ -132,6 +132,13 @@ class HcclSleepWakeupManager:
     def __init__(self, vllm_config: VllmConfig, worker: Any):
         self.vllm_config = vllm_config
         self.worker = worker
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        self._is_deepseek_v4 = getattr(hf_config, "model_type", None) == "deepseek_v4"
+        self._preserved_hccl_group_ids: set[int] = set()
+        self._skip_hccl_cleanup_for_cycle = False
+        self._logged_tp_hccl_anchor = False
+        self._logged_hccl_cleanup_fallback = False
 
     @staticmethod
     def iter_alive_group_coordinators():
@@ -143,20 +150,68 @@ class HcclSleepWakeupManager:
             seen.add(id(group))
             yield group
 
-    @classmethod
-    def destroy_hccl(cls) -> int:
+    def _should_preserve_hccl_group(self, group: Any) -> bool:
+        """Select the validated TP8 compatibility anchor when it is usable.
+
+        Tearing down every initialized multi-rank communicator shuts down the
+        device-side HCCP/AICPU runtime. On the affected CANN version, the first
+        DSA metadata operator was observed to fail after the process groups were
+        restored. Keeping the TP group alive was validated for the tested
+        DeepSeek-V4 TP8 topology. Only preserve a multi-rank TP coordinator
+        that currently owns a device process-group object.
+        """
+        return (
+            self._is_deepseek_v4
+            and getattr(group, "group_name", None) == "tp"
+            and getattr(group, "world_size", 1) > 1
+            and getattr(group, "device_group", None) is not None
+        )
+
+    def destroy_hccl(self) -> int:
+        groups = list(self.iter_alive_group_coordinators())
+        self._preserved_hccl_group_ids.clear()
+        self._skip_hccl_cleanup_for_cycle = False
+
+        if self._is_deepseek_v4:
+            self._preserved_hccl_group_ids = {id(group) for group in groups if self._should_preserve_hccl_group(group)}
+            if not self._preserved_hccl_group_ids:
+                self._skip_hccl_cleanup_for_cycle = True
+                if not self._logged_hccl_cleanup_fallback:
+                    logger.warning(
+                        "No usable multi-rank DeepSeek-V4 TP HCCL anchor was found; "
+                        "skipping HCCL teardown for this sleep cycle."
+                    )
+                    self._logged_hccl_cleanup_fallback = True
+                return 0
+
         num_destroyed = 0
-        for group in cls.iter_alive_group_coordinators():
+        for group in groups:
+            if id(group) in self._preserved_hccl_group_ids:
+                if not self._logged_tp_hccl_anchor:
+                    logger.warning(
+                        "Keeping the DeepSeek-V4 TP HCCL group alive during sleep "
+                        "as a CANN AICPU/HCCP lifecycle compatibility guard."
+                    )
+                    self._logged_tp_hccl_anchor = True
+                continue
             if group.destroy_hccl():
                 num_destroyed += 1
         return num_destroyed
 
-    @classmethod
-    def restore_hccl(cls) -> int:
+    def restore_hccl(self) -> int:
+        if self._skip_hccl_cleanup_for_cycle:
+            self._skip_hccl_cleanup_for_cycle = False
+            return 0
+
         num_restored = 0
-        for group in cls.iter_alive_group_coordinators():
-            if group.restore_hccl():
-                num_restored += 1
+        try:
+            for group in self.iter_alive_group_coordinators():
+                if id(group) in self._preserved_hccl_group_ids:
+                    continue
+                if group.restore_hccl():
+                    num_restored += 1
+        finally:
+            self._preserved_hccl_group_ids.clear()
         return num_restored
 
     @staticmethod
