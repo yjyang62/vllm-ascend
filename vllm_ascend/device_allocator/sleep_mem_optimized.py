@@ -134,7 +134,7 @@ class HcclSleepWakeupManager:
         self.worker = worker
         self._preserved_hccl_group_ids: set[int] = set()
         self._skip_hccl_cleanup_for_cycle = False
-        self._logged_tp_hccl_anchor = False
+        self._logged_dp_hccl_anchor = False
         self._logged_hccl_cleanup_fallback = False
 
     @staticmethod
@@ -148,17 +148,15 @@ class HcclSleepWakeupManager:
             yield group
 
     def _should_preserve_hccl_group(self, group: Any) -> bool:
-        """Select the validated TP compatibility anchor when it is usable.
+        """Keep a usable multi-rank DP group during extra-cleanup.
 
-        Tearing down every initialized multi-rank communicator shuts down the
-        device-side HCCP/AICPU runtime. On the affected CANN version, the first
-        DSA metadata operator was observed to fail after the process groups were
-        restored. Keeping the TP group alive was validated. Only preserve a
-        multi-rank TP coordinator that currently owns a device process-group
-        object.
+        This is an A3 trial after leftover world failed on wakeup. Only
+        leftover TP has been validated. Preserve a multi-rank DP coordinator
+        that currently owns a device process-group object; skip teardown
+        when no such DP group exists.
         """
         return (
-            getattr(group, "group_name", None) == "tp"
+            getattr(group, "group_name", None) == "dp"
             and getattr(group, "world_size", 1) > 1
             and getattr(group, "device_group", None) is not None
         )
@@ -173,7 +171,7 @@ class HcclSleepWakeupManager:
             self._skip_hccl_cleanup_for_cycle = True
             if not self._logged_hccl_cleanup_fallback:
                 logger.warning(
-                    "No usable multi-rank TP HCCL anchor was found; skipping HCCL teardown for this sleep cycle."
+                    "No usable multi-rank DP HCCL anchor was found; skipping HCCL teardown for this sleep cycle."
                 )
                 self._logged_hccl_cleanup_fallback = True
             return 0
@@ -181,12 +179,12 @@ class HcclSleepWakeupManager:
         num_destroyed = 0
         for group in groups:
             if id(group) in self._preserved_hccl_group_ids:
-                if not self._logged_tp_hccl_anchor:
+                if not self._logged_dp_hccl_anchor:
                     logger.warning(
-                        "Keeping the TP HCCL group alive during sleep "
+                        "Keeping the DP HCCL group alive during sleep "
                         "as a CANN AICPU/HCCP lifecycle compatibility guard."
                     )
-                    self._logged_tp_hccl_anchor = True
+                    self._logged_dp_hccl_anchor = True
                 continue
             if group.destroy_hccl():
                 num_destroyed += 1
