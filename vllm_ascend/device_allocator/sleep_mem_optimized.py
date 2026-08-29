@@ -24,11 +24,15 @@ from typing import Any
 
 import torch
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed.parallel_state import _groups
+from vllm.distributed.parallel_state import _groups, get_world_group, init_model_parallel_group
 from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 
 from vllm_ascend.compilation import acl_graph
+from vllm_ascend.utils import (
+    SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE,
+    SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME,
+)
 
 
 class SleepWakeupManager:
@@ -132,6 +136,10 @@ class HcclSleepWakeupManager:
     def __init__(self, vllm_config: VllmConfig, worker: Any):
         self.vllm_config = vllm_config
         self.worker = worker
+        self._lifecycle_anchor_group: Any | None = None
+        self._lifecycle_anchor_world_size: int | None = None
+        self._lifecycle_anchor_initialized = False
+        self._skip_hccl_cleanup_for_cycle = False
 
     @staticmethod
     def iter_alive_group_coordinators():
@@ -143,18 +151,74 @@ class HcclSleepWakeupManager:
             seen.add(id(group))
             yield group
 
-    @classmethod
-    def destroy_hccl(cls) -> int:
+    def _ensure_lifecycle_anchor(self) -> bool:
+        """Create and physically initialize the HCCL sleep anchor.
+
+        HCCL process-group creation can be lazy. Running a device barrier is
+        therefore required before treating the group as a lifecycle anchor.
+        The group is registered with vLLM's normal distributed lifecycle, so
+        it is retained across sleep but destroyed when the service exits.
+        """
+        try:
+            if self._lifecycle_anchor_group is None:
+                world_size = torch.distributed.get_world_size()
+                ranks = list(range(world_size))
+                self._lifecycle_anchor_group = init_model_parallel_group(
+                    [ranks],
+                    get_world_group().local_rank,
+                    "hccl",
+                    use_device_communicator=False,
+                    group_name=SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME,
+                )
+                self._lifecycle_anchor_world_size = world_size
+
+            device_group = getattr(self._lifecycle_anchor_group, "device_group", None)
+            if device_group is None:
+                raise RuntimeError("the HCCL lifecycle anchor has no device process group")
+
+            torch.distributed.barrier(
+                group=device_group,
+                device_ids=[torch.npu.current_device()],
+            )
+            if not self._lifecycle_anchor_initialized:
+                logger.info(
+                    "Initialized HCCL sleep lifecycle anchor '%s' across %d ranks with a %d MiB buffer.",
+                    SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME,
+                    self._lifecycle_anchor_world_size,
+                    SLEEP_LIFECYCLE_ANCHOR_BUFFER_SIZE,
+                )
+                self._lifecycle_anchor_initialized = True
+            return True
+        except Exception:
+            logger.exception(
+                "Failed to initialize the HCCL sleep lifecycle anchor; sleep_hccl_policy=skip for this sleep cycle."
+            )
+            return False
+
+    def destroy_hccl(self) -> int:
+        groups = list(self.iter_alive_group_coordinators())
+        self._skip_hccl_cleanup_for_cycle = False
+        if not self._ensure_lifecycle_anchor():
+            self._skip_hccl_cleanup_for_cycle = True
+            return 0
+
         num_destroyed = 0
-        for group in cls.iter_alive_group_coordinators():
+        for group in groups:
+            if group is self._lifecycle_anchor_group:
+                continue
             if group.destroy_hccl():
                 num_destroyed += 1
         return num_destroyed
 
-    @classmethod
-    def restore_hccl(cls) -> int:
+    def restore_hccl(self) -> int:
+        if self._skip_hccl_cleanup_for_cycle:
+            self._skip_hccl_cleanup_for_cycle = False
+            return 0
+
         num_restored = 0
-        for group in cls.iter_alive_group_coordinators():
+        for group in self.iter_alive_group_coordinators():
+            if group is self._lifecycle_anchor_group:
+                continue
             if group.restore_hccl():
                 num_restored += 1
         return num_restored
