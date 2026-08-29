@@ -141,23 +141,24 @@ def test_destroy_hccl_preserves_preferred_tp_anchor():
     assert not manager._skip_hccl_cleanup_for_cycle
 
 
-def test_destroy_hccl_skips_all_when_tp_is_single_rank():
+def test_destroy_hccl_keeps_dp_when_tp_is_single_rank():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     tp = _make_hccl_group(group_name="tp", world_size=1)
     dp = _make_hccl_group(group_name="dp", world_size=8)
     ep = _make_hccl_group(group_name="ep", world_size=16)
 
-    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, dp, ep]):
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[ep, tp, dp]):
         num_destroyed = manager.destroy_hccl()
 
-    tp.destroy_hccl.assert_not_called()
     dp.destroy_hccl.assert_not_called()
-    ep.destroy_hccl.assert_not_called()
-    assert num_destroyed == 0
-    assert manager._skip_hccl_cleanup_for_cycle
+    tp.destroy_hccl.assert_called_once_with()
+    ep.destroy_hccl.assert_called_once_with()
+    assert num_destroyed == 2
+    assert manager._preserved_hccl_group_ids == {id(dp)}
+    assert not manager._skip_hccl_cleanup_for_cycle
 
 
-def test_destroy_hccl_skips_all_when_tp_device_group_is_none():
+def test_destroy_hccl_keeps_dp_when_tp_device_group_is_none():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     tp = _make_hccl_group(group_name="tp", world_size=8, device_group=False)
     dp = _make_hccl_group(group_name="dp", world_size=2)
@@ -165,8 +166,23 @@ def test_destroy_hccl_skips_all_when_tp_device_group_is_none():
     with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, dp]):
         num_destroyed = manager.destroy_hccl()
 
-    tp.destroy_hccl.assert_not_called()
     dp.destroy_hccl.assert_not_called()
+    tp.destroy_hccl.assert_called_once_with()
+    assert num_destroyed == 1
+    assert manager._preserved_hccl_group_ids == {id(dp)}
+    assert not manager._skip_hccl_cleanup_for_cycle
+
+
+def test_destroy_hccl_skips_all_when_no_multi_rank_device_group():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    tp = _make_hccl_group(group_name="tp", world_size=1)
+    world = _make_hccl_group(group_name="world", world_size=1)
+
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, world]):
+        num_destroyed = manager.destroy_hccl()
+
+    tp.destroy_hccl.assert_not_called()
+    world.destroy_hccl.assert_not_called()
     assert num_destroyed == 0
     assert manager._skip_hccl_cleanup_for_cycle
 
@@ -187,18 +203,33 @@ def test_restore_hccl_skips_preserved_anchor_and_clears_ids():
     assert manager._preserved_hccl_group_ids == set()
 
 
-def test_restore_hccl_is_noop_after_skipped_cleanup():
+def test_restore_hccl_skips_fallback_dp_anchor():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     tp = _make_hccl_group(group_name="tp", world_size=1)
     dp = _make_hccl_group(group_name="dp", world_size=8)
+    ep = _make_hccl_group(group_name="ep", world_size=16)
+    groups = [tp, dp, ep]
 
-    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, dp]):
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=groups):
+        manager.destroy_hccl()
+        num_restored = manager.restore_hccl()
+
+    dp.restore_hccl.assert_not_called()
+    tp.restore_hccl.assert_called_once_with()
+    ep.restore_hccl.assert_called_once_with()
+    assert num_restored == 2
+    assert manager._preserved_hccl_group_ids == set()
+
+
+def test_restore_hccl_is_noop_after_skipped_cleanup():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    tp = _make_hccl_group(group_name="tp", world_size=1)
+
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp]):
         manager.destroy_hccl()
         num_restored = manager.restore_hccl()
 
     tp.destroy_hccl.assert_not_called()
-    dp.destroy_hccl.assert_not_called()
     tp.restore_hccl.assert_not_called()
-    dp.restore_hccl.assert_not_called()
     assert num_restored == 0
     assert not manager._skip_hccl_cleanup_for_cycle
