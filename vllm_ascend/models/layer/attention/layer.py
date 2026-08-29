@@ -64,7 +64,7 @@ DSV4_BLOCK_SIZES_A5_BF16 = get_dsv4_block_sizes(use_a5_bf16_kv=True)
 
 def dsv4_block_sizes(vllm_config: VllmConfig):
     """Return the A5 BF16 KV table when explicitly requested, else the upstream table."""
-    if get_ascend_device_type() in {AscendDeviceType.A5} and uses_explicit_bf16_kv(vllm_config):
+    if uses_explicit_bf16_kv(vllm_config):
         return DSV4_BLOCK_SIZES_A5_BF16
     return DSV4_BLOCK_SIZES
 
@@ -196,7 +196,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
-        use_bf16_kv = get_ascend_device_type() == AscendDeviceType.A5 and uses_explicit_bf16_kv(vllm_config)
+        use_bf16_kv = uses_explicit_bf16_kv(vllm_config)
         if use_bf16_kv:
             kv_cache_dtype = torch.bfloat16
         elif get_ascend_device_type() in {AscendDeviceType.A5}:
