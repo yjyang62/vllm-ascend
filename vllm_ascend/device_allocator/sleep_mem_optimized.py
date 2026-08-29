@@ -129,12 +129,10 @@ class AclGraphSleepWakeupManager:
 
 
 class HcclSleepWakeupManager:
-    # Cheap groups first. EP/MC2 are intentionally omitted so extra-cleanup
-    # can still release them when a cheaper axis exists. pp/pcp cover the
-    # remaining vLLM axes when TP=DP=1; world is the last-resort multi-card
-    # comm (ExternalDP / any leftover ranks) so skip-all only happens on
-    # single-card.
-    _HCCL_ANCHOR_GROUP_NAMES = ("tp", "dp", "pp", "pcp", "world")
+    # Keep only the world communicator. It spans every rank, so one live
+    # multi-rank world group covers TP/DP/PP/PCP/ExternalDP. Skip teardown
+    # when world is missing or single-rank (typical single-card).
+    _HCCL_ANCHOR_GROUP_NAMES = ("world",)
 
     def __init__(self, vllm_config: VllmConfig, worker: Any):
         self.vllm_config = vllm_config
@@ -164,12 +162,11 @@ class HcclSleepWakeupManager:
 
     @classmethod
     def _select_hccl_anchor(cls, groups: list[Any]) -> Any | None:
-        """Keep one live cheap device communicator during extra-cleanup.
+        """Keep the live world device communicator during extra-cleanup.
 
-        HCCP/AICPU stays up while any multi-rank hcclComm remains. Prefer TP,
-        then DP, then PP, then PCP. Fall back to world so a multi-card job
-        always keeps one comm even when TP and DP are both size 1 (PP-only,
-        PCP-only, or ExternalDP). Do not use EP/MC2 as anchors.
+        HCCP/AICPU stays up while any multi-rank hcclComm remains. The world
+        group already includes every rank, so it is a sufficient anchor for
+        all multi-card layouts. TP/DP/EP/MC2 can still be torn down.
         """
         usable = [group for group in groups if cls._is_usable_hccl_anchor(group)]
         if not usable:
