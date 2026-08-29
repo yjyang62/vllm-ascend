@@ -196,14 +196,12 @@ class HcclSleepWakeupManager:
             return 0
 
         num_restored = 0
-        try:
-            for group in self.iter_alive_group_coordinators():
-                if id(group) in self._preserved_hccl_group_ids:
-                    continue
-                if group.restore_hccl():
-                    num_restored += 1
-        finally:
-            self._preserved_hccl_group_ids.clear()
+        for group in self.iter_alive_group_coordinators():
+            if id(group) in self._preserved_hccl_group_ids:
+                continue
+            if group.restore_hccl():
+                num_restored += 1
+        self._preserved_hccl_group_ids.clear()
         return num_restored
 
     @staticmethod
