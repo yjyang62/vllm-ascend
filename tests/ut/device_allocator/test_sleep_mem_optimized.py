@@ -124,7 +124,7 @@ def _make_hccl_group(
     return group
 
 
-def test_destroy_hccl_keeps_world_and_destroys_other_groups():
+def test_destroy_hccl_keeps_tp_and_destroys_other_groups():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     world = _make_hccl_group(group_name="world", world_size=16)
     tp = _make_hccl_group(group_name="tp", world_size=8)
@@ -132,23 +132,39 @@ def test_destroy_hccl_keeps_world_and_destroys_other_groups():
     ep = _make_hccl_group(group_name="ep", world_size=16)
     mc2 = _make_hccl_group(group_name="mc2", world_size=16)
 
-    with patch.object(manager, "iter_alive_group_coordinators", return_value=[mc2, tp, dp, ep, world]):
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[mc2, world, dp, ep, tp]):
         num_destroyed = manager.destroy_hccl()
 
-    world.destroy_hccl.assert_not_called()
-    tp.destroy_hccl.assert_called_once_with()
+    tp.destroy_hccl.assert_not_called()
+    world.destroy_hccl.assert_called_once_with()
     dp.destroy_hccl.assert_called_once_with()
     ep.destroy_hccl.assert_called_once_with()
     mc2.destroy_hccl.assert_called_once_with()
     assert num_destroyed == 4
-    assert manager._preserved_hccl_group_ids == {id(world)}
+    assert manager._preserved_hccl_group_ids == {id(tp)}
     assert not manager._skip_hccl_cleanup_for_cycle
 
 
-def test_destroy_hccl_skips_all_when_world_is_unusable():
+def test_destroy_hccl_skips_all_when_tp_is_unusable():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
-    world = _make_hccl_group(group_name="world", world_size=1)
-    tp = _make_hccl_group(group_name="tp", world_size=8)
+    world = _make_hccl_group(group_name="world", world_size=8)
+    tp = _make_hccl_group(group_name="tp", world_size=1)
+    dp = _make_hccl_group(group_name="dp", world_size=8)
+
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[world, tp, dp]):
+        num_destroyed = manager.destroy_hccl()
+
+    world.destroy_hccl.assert_not_called()
+    tp.destroy_hccl.assert_not_called()
+    dp.destroy_hccl.assert_not_called()
+    assert num_destroyed == 0
+    assert manager._skip_hccl_cleanup_for_cycle
+
+
+def test_destroy_hccl_skips_all_when_tp_device_group_is_none():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    world = _make_hccl_group(group_name="world", world_size=16)
+    tp = _make_hccl_group(group_name="tp", world_size=8, device_group=False)
 
     with patch.object(manager, "iter_alive_group_coordinators", return_value=[world, tp]):
         num_destroyed = manager.destroy_hccl()
@@ -159,21 +175,7 @@ def test_destroy_hccl_skips_all_when_world_is_unusable():
     assert manager._skip_hccl_cleanup_for_cycle
 
 
-def test_destroy_hccl_skips_all_when_world_device_group_is_none():
-    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
-    world = _make_hccl_group(group_name="world", world_size=16, device_group=False)
-    tp = _make_hccl_group(group_name="tp", world_size=8)
-
-    with patch.object(manager, "iter_alive_group_coordinators", return_value=[world, tp]):
-        num_destroyed = manager.destroy_hccl()
-
-    world.destroy_hccl.assert_not_called()
-    tp.destroy_hccl.assert_not_called()
-    assert num_destroyed == 0
-    assert manager._skip_hccl_cleanup_for_cycle
-
-
-def test_restore_hccl_skips_preserved_world_and_clears_ids():
+def test_restore_hccl_skips_preserved_tp_and_clears_ids():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     world = _make_hccl_group(group_name="world", world_size=16)
     tp = _make_hccl_group(group_name="tp", world_size=8)
@@ -183,16 +185,16 @@ def test_restore_hccl_skips_preserved_world_and_clears_ids():
         manager.destroy_hccl()
         num_restored = manager.restore_hccl()
 
-    world.restore_hccl.assert_not_called()
-    tp.restore_hccl.assert_called_once_with()
+    tp.restore_hccl.assert_not_called()
+    world.restore_hccl.assert_called_once_with()
     assert num_restored == 1
     assert manager._preserved_hccl_group_ids == set()
 
 
 def test_restore_hccl_is_noop_after_skipped_cleanup():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
-    world = _make_hccl_group(group_name="world", world_size=1)
-    tp = _make_hccl_group(group_name="tp", world_size=8)
+    world = _make_hccl_group(group_name="world", world_size=8)
+    tp = _make_hccl_group(group_name="tp", world_size=1)
 
     with patch.object(manager, "iter_alive_group_coordinators", return_value=[world, tp]):
         manager.destroy_hccl()

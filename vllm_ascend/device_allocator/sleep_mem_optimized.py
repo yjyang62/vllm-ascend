@@ -129,10 +129,12 @@ class AclGraphSleepWakeupManager:
 
 
 class HcclSleepWakeupManager:
-    # Keep only the world communicator. It spans every rank, so one live
-    # multi-rank world group covers TP/DP/PP/PCP/ExternalDP. Skip teardown
-    # when world is missing or single-rank (typical single-card).
-    _HCCL_ANCHOR_GROUP_NAMES = ("world",)
+    # Keep only a live multi-rank TP communicator. A3 extra-cleanup with a
+    # leftover world group still failed on wakeup: restore rebound
+    # HCCL_IF_BASE_PORT (60000) while SparseAttnSharedkvMetadata died in
+    # AICPU. Only leftover TP has been validated. If TP is missing or
+    # unusable (for example TP=1), skip HCCL teardown for the cycle.
+    _HCCL_ANCHOR_GROUP_NAMES = ("tp",)
 
     def __init__(self, vllm_config: VllmConfig, worker: Any):
         self.vllm_config = vllm_config
@@ -162,11 +164,12 @@ class HcclSleepWakeupManager:
 
     @classmethod
     def _select_hccl_anchor(cls, groups: list[Any]) -> Any | None:
-        """Keep the live world device communicator during extra-cleanup.
+        """Keep the live TP device communicator during extra-cleanup.
 
-        HCCP/AICPU stays up while any multi-rank hcclComm remains. The world
-        group already includes every rank, so it is a sufficient anchor for
-        all multi-card layouts. TP/DP/EP/MC2 can still be torn down.
+        Leaving world alone is not enough: A3 wakeup still hit an AICPU
+        SparseAttnSharedkvMetadata failure after extra-cleanup. Only a
+        leftover multi-rank TP group has been validated. If TP is missing
+        or unusable, skip teardown instead of substituting DP/EP/world.
         """
         usable = [group for group in groups if cls._is_usable_hccl_anchor(group)]
         if not usable:
