@@ -173,7 +173,7 @@ def test_destroy_hccl_keeps_dp_when_tp_device_group_is_none():
     assert not manager._skip_hccl_cleanup_for_cycle
 
 
-def test_destroy_hccl_skips_all_when_tp_and_dp_are_unusable():
+def test_destroy_hccl_keeps_pp_when_tp_and_dp_are_single_rank():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     tp = _make_hccl_group(group_name="tp", world_size=1)
     dp = _make_hccl_group(group_name="dp", world_size=1)
@@ -183,10 +183,63 @@ def test_destroy_hccl_skips_all_when_tp_and_dp_are_unusable():
     with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, dp, pp, ep]):
         num_destroyed = manager.destroy_hccl()
 
+    pp.destroy_hccl.assert_not_called()
+    tp.destroy_hccl.assert_called_once_with()
+    dp.destroy_hccl.assert_called_once_with()
+    ep.destroy_hccl.assert_called_once_with()
+    assert num_destroyed == 3
+    assert manager._preserved_hccl_group_ids == {id(pp)}
+    assert not manager._skip_hccl_cleanup_for_cycle
+
+
+def test_destroy_hccl_keeps_pcp_before_world():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    tp = _make_hccl_group(group_name="tp", world_size=1)
+    dp = _make_hccl_group(group_name="dp", world_size=1)
+    pcp = _make_hccl_group(group_name="pcp", world_size=8)
+    world = _make_hccl_group(group_name="world", world_size=8)
+    mc2 = _make_hccl_group(group_name="mc2", world_size=8)
+
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[mc2, world, tp, dp, pcp]):
+        num_destroyed = manager.destroy_hccl()
+
+    pcp.destroy_hccl.assert_not_called()
+    world.destroy_hccl.assert_called_once_with()
+    mc2.destroy_hccl.assert_called_once_with()
+    assert num_destroyed == 4
+    assert manager._preserved_hccl_group_ids == {id(pcp)}
+
+
+def test_destroy_hccl_keeps_world_when_only_world_is_multi_rank():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    tp = _make_hccl_group(group_name="tp", world_size=1)
+    dp = _make_hccl_group(group_name="dp", world_size=1)
+    world = _make_hccl_group(group_name="world", world_size=8)
+
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, dp, world]):
+        num_destroyed = manager.destroy_hccl()
+
+    world.destroy_hccl.assert_not_called()
+    tp.destroy_hccl.assert_called_once_with()
+    dp.destroy_hccl.assert_called_once_with()
+    assert num_destroyed == 2
+    assert manager._preserved_hccl_group_ids == {id(world)}
+
+
+def test_destroy_hccl_skips_all_when_no_named_anchor_is_usable():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    tp = _make_hccl_group(group_name="tp", world_size=1)
+    dp = _make_hccl_group(group_name="dp", world_size=1)
+    world = _make_hccl_group(group_name="world", world_size=1)
+    mc2 = _make_hccl_group(group_name="mc2", world_size=1)
+
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, dp, world, mc2]):
+        num_destroyed = manager.destroy_hccl()
+
     tp.destroy_hccl.assert_not_called()
     dp.destroy_hccl.assert_not_called()
-    pp.destroy_hccl.assert_not_called()
-    ep.destroy_hccl.assert_not_called()
+    world.destroy_hccl.assert_not_called()
+    mc2.destroy_hccl.assert_not_called()
     assert num_destroyed == 0
     assert manager._skip_hccl_cleanup_for_cycle
 

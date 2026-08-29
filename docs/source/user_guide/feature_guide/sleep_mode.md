@@ -54,7 +54,7 @@ When `rl_config.sleep_mode_extra_cleanup` is enabled, `sleep()` additionally:
 
 - clears ACL graph attention workspaces and invalidates captured ACL graph caches when ACL graph is enabled;
 - resets the model runner graph manager so ACL graphs can be captured again after wakeup;
-- waits for pending pipeline-parallel send work, synchronizes the NPU, and destroys HCCL process groups while keeping one usable multi-rank TP or DP group as a CANN HCCP/AICPU lifecycle anchor. Prefer TP; keep DP when TP is unusable (for example TP1 + DP8). If neither TP nor DP is a usable multi-rank group, HCCL teardown is skipped for that sleep cycle.
+- waits for pending pipeline-parallel send work, synchronizes the NPU, and destroys HCCL process groups while keeping one usable multi-rank group as a CANN HCCP/AICPU lifecycle anchor. Prefer `tp`, then `dp`, `pp`, `pcp`, then `world`. Skip HCCL teardown only when none of those groups is a live multi-rank device communicator.
 
 During `wake_up()`, vLLM Ascend restores the HCCL process groups, refreshes MoE dispatcher HCCL metadata, restores sleep-mode allocator memory, and recaptures ACL graphs when needed.
 

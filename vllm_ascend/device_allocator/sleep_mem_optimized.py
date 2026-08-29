@@ -129,11 +129,12 @@ class AclGraphSleepWakeupManager:
 
 
 class HcclSleepWakeupManager:
-    # Only TP/DP are used as extra-cleanup anchors. In the vLLM rank layout,
-    # EP/MC2 size is dp * pcp * tp, so those expensive groups are already
-    # single-rank when both TP and DP are. PP or ExternalDP can still be
-    # multi-card in that case; skip-all then leaves those smaller comms up.
-    _HCCL_ANCHOR_GROUP_NAMES = ("tp", "dp")
+    # Cheap groups first. EP/MC2 are intentionally omitted so extra-cleanup
+    # can still release them when a cheaper axis exists. pp/pcp cover the
+    # remaining vLLM axes when TP=DP=1; world is the last-resort multi-card
+    # comm (ExternalDP / any leftover ranks) so skip-all only happens on
+    # single-card.
+    _HCCL_ANCHOR_GROUP_NAMES = ("tp", "dp", "pp", "pcp", "world")
 
     def __init__(self, vllm_config: VllmConfig, worker: Any):
         self.vllm_config = vllm_config
@@ -163,13 +164,12 @@ class HcclSleepWakeupManager:
 
     @classmethod
     def _select_hccl_anchor(cls, groups: list[Any]) -> Any | None:
-        """Keep one live TP or DP device communicator during extra-cleanup.
+        """Keep one live cheap device communicator during extra-cleanup.
 
-        HCCP/AICPU stays up while any multi-rank hcclComm remains. Prefer a
-        usable TP group; if TP is single-rank (TP1 + DP8), keep DP. Do not
-        substitute PP/EP/MC2: when both TP and DP are unusable the large
-        EP/MC2 groups are typically single-rank already, so skip teardown
-        instead of picking a leftover PP/world communicator.
+        HCCP/AICPU stays up while any multi-rank hcclComm remains. Prefer TP,
+        then DP, then PP, then PCP. Fall back to world so a multi-card job
+        always keeps one comm even when TP and DP are both size 1 (PP-only,
+        PCP-only, or ExternalDP). Do not use EP/MC2 as anchors.
         """
         usable = [group for group in groups if cls._is_usable_hccl_anchor(group)]
         if not usable:
@@ -186,7 +186,7 @@ class HcclSleepWakeupManager:
             self._skip_hccl_cleanup_for_cycle = True
             if not self._logged_hccl_cleanup_fallback:
                 logger.warning(
-                    "No usable multi-rank TP/DP HCCL anchor was found; skipping HCCL teardown for this sleep cycle."
+                    "No usable multi-rank HCCL anchor was found; skipping HCCL teardown for this sleep cycle."
                 )
                 self._logged_hccl_cleanup_fallback = True
             return 0
