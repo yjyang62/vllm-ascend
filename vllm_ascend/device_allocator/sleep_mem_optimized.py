@@ -129,19 +129,12 @@ class AclGraphSleepWakeupManager:
 
 
 class HcclSleepWakeupManager:
-    # Keep only a live multi-rank TP communicator. A3 extra-cleanup with a
-    # leftover world group still failed on wakeup: restore rebound
-    # HCCL_IF_BASE_PORT (60000) while SparseAttnSharedkvMetadata died in
-    # AICPU. Only leftover TP has been validated. If TP is missing or
-    # unusable (for example TP=1), skip HCCL teardown for the cycle.
-    _HCCL_ANCHOR_GROUP_NAMES = ("tp",)
-
     def __init__(self, vllm_config: VllmConfig, worker: Any):
         self.vllm_config = vllm_config
         self.worker = worker
         self._preserved_hccl_group_ids: set[int] = set()
         self._skip_hccl_cleanup_for_cycle = False
-        self._logged_hccl_anchor = False
+        self._logged_tp_hccl_anchor = False
         self._logged_hccl_cleanup_fallback = False
 
     @staticmethod
@@ -154,54 +147,46 @@ class HcclSleepWakeupManager:
             seen.add(id(group))
             yield group
 
-    @classmethod
-    def _is_usable_hccl_anchor(cls, group: Any) -> bool:
+    def _should_preserve_hccl_group(self, group: Any) -> bool:
+        """Select the validated TP compatibility anchor when it is usable.
+
+        Tearing down every initialized multi-rank communicator shuts down the
+        device-side HCCP/AICPU runtime. On the affected CANN version, the first
+        DSA metadata operator was observed to fail after the process groups were
+        restored. Keeping the TP group alive was validated. Only preserve a
+        multi-rank TP coordinator that currently owns a device process-group
+        object.
+        """
         return (
-            getattr(group, "group_name", None) in cls._HCCL_ANCHOR_GROUP_NAMES
+            getattr(group, "group_name", None) == "tp"
             and getattr(group, "world_size", 1) > 1
             and getattr(group, "device_group", None) is not None
         )
-
-    @classmethod
-    def _select_hccl_anchor(cls, groups: list[Any]) -> Any | None:
-        """Keep the live TP device communicator during extra-cleanup.
-
-        Leaving world alone is not enough: A3 wakeup still hit an AICPU
-        SparseAttnSharedkvMetadata failure after extra-cleanup. Only a
-        leftover multi-rank TP group has been validated. If TP is missing
-        or unusable, skip teardown instead of substituting DP/EP/world.
-        """
-        usable = [group for group in groups if cls._is_usable_hccl_anchor(group)]
-        if not usable:
-            return None
-        return min(usable, key=lambda group: cls._HCCL_ANCHOR_GROUP_NAMES.index(group.group_name))
 
     def destroy_hccl(self) -> int:
         groups = list(self.iter_alive_group_coordinators())
         self._preserved_hccl_group_ids.clear()
         self._skip_hccl_cleanup_for_cycle = False
 
-        anchor = self._select_hccl_anchor(groups)
-        if anchor is None:
+        self._preserved_hccl_group_ids = {id(group) for group in groups if self._should_preserve_hccl_group(group)}
+        if not self._preserved_hccl_group_ids:
             self._skip_hccl_cleanup_for_cycle = True
             if not self._logged_hccl_cleanup_fallback:
                 logger.warning(
-                    "No usable multi-rank HCCL anchor was found; skipping HCCL teardown for this sleep cycle."
+                    "No usable multi-rank TP HCCL anchor was found; skipping HCCL teardown for this sleep cycle."
                 )
                 self._logged_hccl_cleanup_fallback = True
             return 0
 
-        self._preserved_hccl_group_ids = {id(anchor)}
         num_destroyed = 0
         for group in groups:
             if id(group) in self._preserved_hccl_group_ids:
-                if not self._logged_hccl_anchor:
+                if not self._logged_tp_hccl_anchor:
                     logger.warning(
-                        "Keeping the %s HCCL group alive during sleep "
-                        "as a CANN AICPU/HCCP lifecycle compatibility guard.",
-                        getattr(anchor, "group_name", "unknown"),
+                        "Keeping the TP HCCL group alive during sleep "
+                        "as a CANN AICPU/HCCP lifecycle compatibility guard."
                     )
-                    self._logged_hccl_anchor = True
+                    self._logged_tp_hccl_anchor = True
                 continue
             if group.destroy_hccl():
                 num_destroyed += 1
