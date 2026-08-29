@@ -129,11 +129,6 @@ class AclGraphSleepWakeupManager:
 
 
 class HcclSleepWakeupManager:
-    # Prefer smaller, shared communicators as the CANN HCCP/AICPU lifecycle
-    # anchor so expensive groups (EP/MC2) can still be released. Unknown
-    # group names sort after this list.
-    _HCCL_ANCHOR_GROUP_NAME_PRIORITY = ("tp", "dp", "pp", "ep", "world")
-
     def __init__(self, vllm_config: VllmConfig, worker: Any):
         self.vllm_config = vllm_config
         self.worker = worker
@@ -153,31 +148,24 @@ class HcclSleepWakeupManager:
             yield group
 
     @staticmethod
-    def _is_usable_hccl_anchor(group: Any) -> bool:
-        return getattr(group, "world_size", 1) > 1 and getattr(group, "device_group", None) is not None
-
-    @classmethod
-    def _anchor_sort_key(cls, group: Any) -> int:
-        group_name = getattr(group, "group_name", None)
-        try:
-            return cls._HCCL_ANCHOR_GROUP_NAME_PRIORITY.index(group_name)
-        except ValueError:
-            return len(cls._HCCL_ANCHOR_GROUP_NAME_PRIORITY)
+    def _is_usable_tp_hccl_anchor(group: Any) -> bool:
+        return (
+            getattr(group, "group_name", None) == "tp"
+            and getattr(group, "world_size", 1) > 1
+            and getattr(group, "device_group", None) is not None
+        )
 
     @classmethod
     def _select_hccl_anchor(cls, groups: list[Any]) -> Any | None:
-        """Keep one live multi-rank device group while extra-cleanup runs.
+        """Keep a usable multi-rank TP group while extra-cleanup runs.
 
         Destroying every initialized multi-rank communicator shuts down the
-        device-side HCCP/AICPU runtime. On the affected CANN version the first
-        AICPU operator after restore failed. This is a communicator-lifecycle
-        guard, not a model-family special case: pick one usable multi-rank
-        group (prefer TP) and leave the rest eligible for teardown.
+        device-side HCCP/AICPU runtime. Only a live TP group has been validated
+        as an anchor; if that TP group is missing or unusable (for example
+        TP1 + DP8), skip HCCL teardown for the cycle instead of substituting
+        DP/EP/MC2.
         """
-        usable = [group for group in groups if cls._is_usable_hccl_anchor(group)]
-        if not usable:
-            return None
-        return min(usable, key=cls._anchor_sort_key)
+        return next((group for group in groups if cls._is_usable_tp_hccl_anchor(group)), None)
 
     def destroy_hccl(self) -> int:
         groups = list(self.iter_alive_group_coordinators())
@@ -189,7 +177,7 @@ class HcclSleepWakeupManager:
             self._skip_hccl_cleanup_for_cycle = True
             if not self._logged_hccl_cleanup_fallback:
                 logger.warning(
-                    "No usable multi-rank HCCL anchor was found; skipping HCCL teardown for this sleep cycle."
+                    "No usable multi-rank TP HCCL anchor was found; skipping HCCL teardown for this sleep cycle."
                 )
                 self._logged_hccl_cleanup_fallback = True
             return 0
