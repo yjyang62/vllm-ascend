@@ -173,16 +173,20 @@ def test_destroy_hccl_keeps_dp_when_tp_device_group_is_none():
     assert not manager._skip_hccl_cleanup_for_cycle
 
 
-def test_destroy_hccl_skips_all_when_no_multi_rank_device_group():
+def test_destroy_hccl_skips_all_when_tp_and_dp_are_unusable():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     tp = _make_hccl_group(group_name="tp", world_size=1)
-    world = _make_hccl_group(group_name="world", world_size=1)
+    dp = _make_hccl_group(group_name="dp", world_size=1)
+    pp = _make_hccl_group(group_name="pp", world_size=8)
+    ep = _make_hccl_group(group_name="ep", world_size=16)
 
-    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, world]):
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, dp, pp, ep]):
         num_destroyed = manager.destroy_hccl()
 
     tp.destroy_hccl.assert_not_called()
-    world.destroy_hccl.assert_not_called()
+    dp.destroy_hccl.assert_not_called()
+    pp.destroy_hccl.assert_not_called()
+    ep.destroy_hccl.assert_not_called()
     assert num_destroyed == 0
     assert manager._skip_hccl_cleanup_for_cycle
 
