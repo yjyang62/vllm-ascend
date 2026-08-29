@@ -107,12 +107,6 @@ def test_hccl_wakeup_restores_and_refreshes_moe_groups():
     mock_refresh.assert_called_once_with()
 
 
-def _make_vllm_config(model_type: str) -> MagicMock:
-    vllm_config = MagicMock()
-    vllm_config.model_config.hf_config.model_type = model_type
-    return vllm_config
-
-
 def _make_hccl_group(
     *,
     group_name: str,
@@ -130,28 +124,13 @@ def _make_hccl_group(
     return group
 
 
-def test_destroy_hccl_destroys_all_groups_for_non_deepseek_v4():
-    manager = HcclSleepWakeupManager(_make_vllm_config("llama"), MagicMock())
-    tp = _make_hccl_group(group_name="tp", world_size=8)
-    dp = _make_hccl_group(group_name="dp", world_size=2)
-
-    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, dp]):
-        num_destroyed = manager.destroy_hccl()
-
-    tp.destroy_hccl.assert_called_once_with()
-    dp.destroy_hccl.assert_called_once_with()
-    assert num_destroyed == 2
-    assert manager._preserved_hccl_group_ids == set()
-    assert not manager._skip_hccl_cleanup_for_cycle
-
-
-def test_destroy_hccl_preserves_deepseek_v4_multi_rank_tp():
-    manager = HcclSleepWakeupManager(_make_vllm_config("deepseek_v4"), MagicMock())
+def test_destroy_hccl_preserves_preferred_tp_anchor():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     tp = _make_hccl_group(group_name="tp", world_size=8)
     dp = _make_hccl_group(group_name="dp", world_size=2)
     ep = _make_hccl_group(group_name="ep", world_size=16)
 
-    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, dp, ep]):
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[ep, dp, tp]):
         num_destroyed = manager.destroy_hccl()
 
     tp.destroy_hccl.assert_not_called()
@@ -162,36 +141,53 @@ def test_destroy_hccl_preserves_deepseek_v4_multi_rank_tp():
     assert not manager._skip_hccl_cleanup_for_cycle
 
 
-def test_destroy_hccl_skips_all_when_deepseek_v4_tp_anchor_missing():
-    manager = HcclSleepWakeupManager(_make_vllm_config("deepseek_v4"), MagicMock())
+def test_destroy_hccl_falls_back_to_dp_when_tp_is_unusable():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     tp = _make_hccl_group(group_name="tp", world_size=1)
     dp = _make_hccl_group(group_name="dp", world_size=2)
+    mc2 = _make_hccl_group(group_name="mc2", world_size=16)
 
-    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, dp]):
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[mc2, tp, dp]):
         num_destroyed = manager.destroy_hccl()
 
-    tp.destroy_hccl.assert_not_called()
     dp.destroy_hccl.assert_not_called()
-    assert num_destroyed == 0
-    assert manager._skip_hccl_cleanup_for_cycle
+    tp.destroy_hccl.assert_called_once_with()
+    mc2.destroy_hccl.assert_called_once_with()
+    assert num_destroyed == 2
+    assert manager._preserved_hccl_group_ids == {id(dp)}
+    assert not manager._skip_hccl_cleanup_for_cycle
 
 
-def test_destroy_hccl_skips_all_when_deepseek_v4_tp_device_group_is_none():
-    manager = HcclSleepWakeupManager(_make_vllm_config("deepseek_v4"), MagicMock())
+def test_destroy_hccl_falls_back_when_tp_device_group_is_none():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     tp = _make_hccl_group(group_name="tp", world_size=8, device_group=False)
     dp = _make_hccl_group(group_name="dp", world_size=2)
 
     with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, dp]):
         num_destroyed = manager.destroy_hccl()
 
-    tp.destroy_hccl.assert_not_called()
     dp.destroy_hccl.assert_not_called()
+    tp.destroy_hccl.assert_called_once_with()
+    assert num_destroyed == 1
+    assert manager._preserved_hccl_group_ids == {id(dp)}
+
+
+def test_destroy_hccl_skips_all_when_no_usable_anchor():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    tp = _make_hccl_group(group_name="tp", world_size=1)
+    world = _make_hccl_group(group_name="world", world_size=1)
+
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp, world]):
+        num_destroyed = manager.destroy_hccl()
+
+    tp.destroy_hccl.assert_not_called()
+    world.destroy_hccl.assert_not_called()
     assert num_destroyed == 0
     assert manager._skip_hccl_cleanup_for_cycle
 
 
-def test_restore_hccl_skips_preserved_tp_and_clears_ids():
-    manager = HcclSleepWakeupManager(_make_vllm_config("deepseek_v4"), MagicMock())
+def test_restore_hccl_skips_preserved_anchor_and_clears_ids():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     tp = _make_hccl_group(group_name="tp", world_size=8)
     dp = _make_hccl_group(group_name="dp", world_size=2)
     groups = [tp, dp]
@@ -207,14 +203,14 @@ def test_restore_hccl_skips_preserved_tp_and_clears_ids():
 
 
 def test_restore_hccl_is_noop_after_skipped_cleanup():
-    manager = HcclSleepWakeupManager(_make_vllm_config("deepseek_v4"), MagicMock())
-    dp = _make_hccl_group(group_name="dp", world_size=2)
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    tp = _make_hccl_group(group_name="tp", world_size=1)
 
-    with patch.object(manager, "iter_alive_group_coordinators", return_value=[dp]):
+    with patch.object(manager, "iter_alive_group_coordinators", return_value=[tp]):
         manager.destroy_hccl()
         num_restored = manager.restore_hccl()
 
-    dp.destroy_hccl.assert_not_called()
-    dp.restore_hccl.assert_not_called()
+    tp.destroy_hccl.assert_not_called()
+    tp.restore_hccl.assert_not_called()
     assert num_restored == 0
     assert not manager._skip_hccl_cleanup_for_cycle
