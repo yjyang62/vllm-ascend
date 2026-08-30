@@ -193,6 +193,7 @@ from vllm_ascend.utils import (
     weak_ref_tensors,
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
+from vllm_ascend.worker.mm_encoder_profile import profile_mm_encoder_cache, skip_parent_mm_profiling
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
@@ -3719,12 +3720,18 @@ class NPUModelRunner(GPUModelRunner):
                 self.sparse_kv_offload_config,
             )
 
-        mc2_tokens_capacity = get_mc2_tokens_capacity()
-        if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
-            mc2_tokens_capacity, self.vllm_config
-        ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
-            self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
-        super().profile_run()
+        # ViT dummy must run before any LM/draft dummy that torch.compile's.
+        # Compiled graphs stay resident; stacking 3 max-size Kimi vision_chunks
+        # on top is what OOMs Kimi-K2.6 + dflash during encoder-cache init.
+        profile_mm_encoder_cache(self)
+
+        with skip_parent_mm_profiling(self.model_config):
+            mc2_tokens_capacity = get_mc2_tokens_capacity()
+            if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
+                mc2_tokens_capacity, self.vllm_config
+            ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
+                self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
+            super().profile_run()
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
