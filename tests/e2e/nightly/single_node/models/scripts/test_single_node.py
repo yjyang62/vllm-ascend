@@ -13,6 +13,7 @@ import pytest
 import vllm
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
+from tests.e2e.nightly.single_node.models.scripts.local_proxy import extend_no_proxy_for_local_server
 from tests.e2e.nightly.single_node.models.scripts.single_node_config import (
     SingleNodeConfig,
     SingleNodeConfigLoader,
@@ -20,6 +21,8 @@ from tests.e2e.nightly.single_node.models.scripts.single_node_config import (
 from tools.aisbench import run_aisbench_cases
 
 logger = logging.getLogger(__name__)
+
+extend_no_proxy_for_local_server()
 
 configs = SingleNodeConfigLoader.from_yaml_cases()
 
@@ -500,6 +503,7 @@ async def test_single_node(config: SingleNodeConfig) -> None:
     with RemoteOpenAIServer(
         model=config.model,
         vllm_serve_args=config.server_cmd,
+        server_host="127.0.0.1",
         server_port=config.server_port,
         env_dict=config.envs,
         auto_port=False,
