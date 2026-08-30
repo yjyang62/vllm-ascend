@@ -406,7 +406,6 @@ class RemoteOpenAIServer:
 
         while True:
             now = time.time()
-            all_ready = True
             should_log = (now - last_log_time) >= log_interval
 
             for node_ip, url in targets:
@@ -418,8 +417,13 @@ class RemoteOpenAIServer:
                     if resp.status_code == 200:
                         ready[node_ip] = True
                         logger.info("[READY] Node %s: %s is ready.", node_ip, url)
+                    else:
+                        # Proxy 502/HTML errors must not count as ready.
+                        ready[node_ip] = False
+                        if should_log:
+                            logger.debug("[WAIT] %s: HTTP %s", url, resp.status_code)
                 except RequestException:
-                    all_ready = False
+                    ready[node_ip] = False
                     if should_log:
                         logger.debug("[WAIT] %s: connection failed", url)
 
@@ -432,7 +436,7 @@ class RemoteOpenAIServer:
             if should_log:
                 last_log_time = now
 
-            if all_ready:
+            if all(ready.values()):
                 break
 
             if now - start > timeout:

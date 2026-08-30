@@ -19,6 +19,8 @@ _envs: &envs
       VLLM_ASCEND_ENABLE_MLAPO: "1"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       SERVER_PORT: "DEFAULT_PORT"
+      no_proxy: "127.0.0.1,0.0.0.0,localhost,local,.local,*.huawei.com"
+      NO_PROXY: "127.0.0.1,0.0.0.0,localhost,local,.local,*.huawei.com"
 
 _server_cmd: &server_cmd
       - "--enable-expert-parallel"
