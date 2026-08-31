@@ -1065,7 +1065,10 @@ def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
 
     with (
         patch("vllm_ascend.attention.dsa_v1.get_ascend_device_type", return_value=AscendDeviceType.A5),
-        patch("vllm_ascend.attention.dsa_v1.uses_explicit_bf16_kv", return_value=True),
+        patch(
+            "vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled",
+            return_value=True,
+        ),
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
         patch("vllm_ascend.attention.dsa_v1.olora_tp_enable", return_value=False),
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul", return_value=projected) as batched,

@@ -29,8 +29,8 @@ def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
     return "bfloat16" if str(cache_dtype).lower() in _BF16_KV_CACHE_DTYPES else "auto"
 
 
-def uses_explicit_bf16_kv(vllm_config) -> bool:
-    """Return whether the launch asked for BF16 SparseFlashMla KV on A5.
+def is_a5_bf16_kv_enabled(vllm_config) -> bool:
+    """Return whether BF16 SparseFlashMla KV is enabled on A5.
 
     Callers must pass the engine ``vllm_config``. Do not look it up from the
     process-global current config: that context is only set during
@@ -49,7 +49,7 @@ def get_dsv4_attn_kv_dtype(vllm_config) -> torch.dtype:
     return (
         torch.bfloat16
         if get_ascend_device_type() != AscendDeviceType.A5
-        or uses_explicit_bf16_kv(vllm_config)
+        or is_a5_bf16_kv_enabled(vllm_config)
         else torch.float8_e4m3fn
     )
 
@@ -149,7 +149,7 @@ def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
             applies_sparse_attn_runtime_kwargs=True,
         )
 
-    use_bf16 = uses_explicit_bf16_kv(vllm_config)
+    use_bf16 = is_a5_bf16_kv_enabled(vllm_config)
     if use_bf16:
         return DsaAttnKvPlan(
             uses_sparse_flash_mla=True,

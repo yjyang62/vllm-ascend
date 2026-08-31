@@ -19,7 +19,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan, uses_explicit_bf16_kv
+from vllm_ascend.attention.dsa_attn_kv_plan import (
+    get_dsa_attn_kv_plan,
+    is_a5_bf16_kv_enabled,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_pcp,
@@ -92,7 +95,7 @@ def _dsa_layout_kv(vllm_config: VllmConfig) -> str:
 
 def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int:
     """BF16 SWA-only attention takes no compressed stream; otherwise keep main's value."""
-    if uses_explicit_bf16_kv(vllm_config) and compress_ratio <= 1:
+    if is_a5_bf16_kv_enabled(vllm_config) and compress_ratio <= 1:
         return 0
     return max(compress_ratio, 1)
 
@@ -371,7 +374,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5} and not uses_explicit_bf16_kv(vllm_config):
+        if (
+            get_ascend_device_type() in {AscendDeviceType.A5}
+            and not is_a5_bf16_kv_enabled(vllm_config)
+        ):
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
@@ -1059,7 +1065,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
-        if self.multistream_dsv4_dsa_overlap and uses_explicit_bf16_kv(self.vllm_config):
+        if (
+            self.multistream_dsv4_dsa_overlap
+            and is_a5_bf16_kv_enabled(self.vllm_config)
+        ):
             self.multistream_dsv4_dsa_overlap = False
 
     def _get_layer_metadata(

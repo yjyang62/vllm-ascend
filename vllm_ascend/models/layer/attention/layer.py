@@ -19,7 +19,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.dsa_attn_kv_plan import uses_explicit_bf16_kv
+from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC128Backend,
@@ -64,7 +64,7 @@ DSV4_BLOCK_SIZES_A5_BF16 = get_dsv4_block_sizes(use_a5_bf16_kv=True)
 
 def dsv4_block_sizes(vllm_config: VllmConfig):
     """Return the A5 BF16 KV table when explicitly requested, else the upstream table."""
-    if uses_explicit_bf16_kv(vllm_config):
+    if is_a5_bf16_kv_enabled(vllm_config):
         return DSV4_BLOCK_SIZES_A5_BF16
     return DSV4_BLOCK_SIZES
 
@@ -196,7 +196,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
-        use_bf16_kv = uses_explicit_bf16_kv(vllm_config)
+        use_bf16_kv = is_a5_bf16_kv_enabled(vllm_config)
         if use_bf16_kv:
             kv_cache_dtype = torch.bfloat16
         elif get_ascend_device_type() in {AscendDeviceType.A5}:
