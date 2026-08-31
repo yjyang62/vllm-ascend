@@ -12,6 +12,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
     get_dsa_attn_kv_plan,
+    get_dsv4_attn_kv_dtype,
     resolve_dsv4_cache_dtype,
     uses_explicit_bf16_kv,
 )
@@ -107,6 +108,21 @@ def test_only_explicit_bfloat16_selects_bf16_kv_on_a5():
 def test_non_a5_never_uses_bf16_kv():
     with _on(AscendDeviceType.A3):
         assert not uses_explicit_bf16_kv(_cache_config("bfloat16"))
+
+
+@pytest.mark.parametrize(
+    ("device_type", "cache_dtype", "expected_dtype"),
+    [
+        (AscendDeviceType.A3, "auto", torch.bfloat16),
+        (AscendDeviceType.A5, "bfloat16", torch.bfloat16),
+        (AscendDeviceType.A5, "auto", torch.float8_e4m3fn),
+    ],
+)
+def test_dsv4_attn_kv_dtype_preserves_device_modes(
+    device_type, cache_dtype, expected_dtype
+):
+    with _on(device_type):
+        assert get_dsv4_attn_kv_dtype(_cache_config(cache_dtype)) == expected_dtype
 
 
 def test_non_a5_pins_cache_dtype_to_the_model_dtype():
