@@ -199,7 +199,7 @@ static internal::AicpuTaskSpace space(
 
 - `VllmQuantLightningIndexerMetadata`；
 - `StoreKvBlockMetadata`；
-- `ScatterNdUpdateV2`。
+- Scatter ND Update V2。
 
 它们可能不在当前路径中、执行位置更晚，或使用不同的缓存与恢复机制。Anchor 实验通过后仍需覆盖这些路径。
 
