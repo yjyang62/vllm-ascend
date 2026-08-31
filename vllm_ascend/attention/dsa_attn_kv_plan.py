@@ -48,8 +48,7 @@ def get_dsv4_attn_kv_dtype(vllm_config) -> torch.dtype:
     """Return the attention KV dtype while preserving non-A5 behavior."""
     return (
         torch.bfloat16
-        if get_ascend_device_type() != AscendDeviceType.A5
-        or is_a5_bf16_kv_enabled(vllm_config)
+        if get_ascend_device_type() != AscendDeviceType.A5 or is_a5_bf16_kv_enabled(vllm_config)
         else torch.float8_e4m3fn
     )
 

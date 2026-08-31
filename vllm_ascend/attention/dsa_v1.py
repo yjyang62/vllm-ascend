@@ -374,10 +374,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if (
-            get_ascend_device_type() in {AscendDeviceType.A5}
-            and not is_a5_bf16_kv_enabled(vllm_config)
-        ):
+        if get_ascend_device_type() in {AscendDeviceType.A5} and not is_a5_bf16_kv_enabled(vllm_config):
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
@@ -1065,10 +1062,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
-        if (
-            self.multistream_dsv4_dsa_overlap
-            and is_a5_bf16_kv_enabled(self.vllm_config)
-        ):
+        if self.multistream_dsv4_dsa_overlap and is_a5_bf16_kv_enabled(self.vllm_config):
             self.multistream_dsv4_dsa_overlap = False
 
     def _get_layer_metadata(

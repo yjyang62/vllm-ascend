@@ -118,9 +118,7 @@ def test_a5_bf16_kv_is_disabled_on_non_a5():
         (AscendDeviceType.A5, "auto", torch.float8_e4m3fn),
     ],
 )
-def test_dsv4_attn_kv_dtype_preserves_device_modes(
-    device_type, cache_dtype, expected_dtype
-):
+def test_dsv4_attn_kv_dtype_preserves_device_modes(device_type, cache_dtype, expected_dtype):
     with _on(device_type):
         assert get_dsv4_attn_kv_dtype(_cache_config(cache_dtype)) == expected_dtype
 

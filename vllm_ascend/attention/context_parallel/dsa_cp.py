@@ -246,10 +246,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if (
-            get_ascend_device_type() in {AscendDeviceType.A5}
-            and not is_a5_bf16_kv_enabled(vllm_config)
-        ):
+        if get_ascend_device_type() in {AscendDeviceType.A5} and not is_a5_bf16_kv_enabled(vllm_config):
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
