@@ -4,6 +4,7 @@
 
 import math
 from collections.abc import Callable, Iterator
+from functools import cache
 from typing import Any
 
 import torch
@@ -13,6 +14,13 @@ from torch.multiprocessing.reductions import reduce_tensor
 # These are imported by HCCLWeightTransferUpdateInfo and trainer_send_weights.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
+
+
+# Reuse streams across weight updates so the caching allocator can reuse packed
+# buffers allocated on them instead of stranding reserved memory on fresh streams.
+@cache
+def _get_streams(device_idx: int, num_buffers: int) -> tuple[torch.npu.Stream, ...]:
+    return tuple(torch.npu.Stream(device=device_idx) for _ in range(num_buffers))
 
 
 def packed_broadcast_producer(
@@ -38,7 +46,7 @@ def packed_broadcast_producer(
     """
     target_packed_tensor_size = buffer_size_bytes
 
-    streams = [torch.npu.Stream() for _ in range(num_buffers)]
+    streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
     buffer_idx = 0
 
     packing_tensor_list: list[list[torch.Tensor]] = [[] for _ in range(num_buffers)]
@@ -128,7 +136,7 @@ def packed_broadcast_consumer(
 
     target_packed_tensor_size = buffer_size_bytes
 
-    streams = [torch.npu.Stream() for _ in range(num_buffers)]
+    streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
     default_stream = torch.npu.current_stream()
     buffer_idx = 0
 
