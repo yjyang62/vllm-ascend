@@ -14,10 +14,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.dsa_attn_kv_plan import (
-    get_dsa_attn_kv_plan,
-    is_a5_bf16_kv_enabled,
-)
+from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import (
     _dsa_layout_kv,
     _dsa_swa_only_cmp_ratio,
@@ -246,10 +243,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5} and not is_a5_bf16_kv_enabled(vllm_config):
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
-        else:
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
+        self.slot_mapping_shape = get_dsa_attn_kv_plan(vllm_config).get_dsa_slot_mapping_shape(
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.spec_slot_mapping = [
