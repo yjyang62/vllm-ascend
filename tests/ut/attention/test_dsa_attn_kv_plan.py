@@ -59,6 +59,7 @@ def test_a5_fp8_plan_uses_flat_shared_kv():
     with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(False))
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
+        assert plan.get_dsa_slot_mapping_shape(8) == (8,)
         assert plan.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
 
 
@@ -66,17 +67,37 @@ def test_a5_bf16_plan_uses_sparse_flash_mla():
     with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(True))
         assert plan.get_dsa_sparse_attn_op() is sparse_flash_mla
-        assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
-        torch.testing.assert_close(
-            plan.format_dsa_slot_mapping(torch.tensor([5, -1], dtype=torch.int32), 128),
-            torch.tensor([[0, 5], [-1, -1]], dtype=torch.int32),
-        )
+        assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
+        assert plan.get_dsa_slot_mapping_shape(8) == (8,)
+        slot_mapping = torch.tensor([5, -1], dtype=torch.int32)
+        assert plan.format_dsa_slot_mapping(slot_mapping, 128) is slot_mapping
+
+
+def test_a5_bf16_scatter_flattens_cache_instead_of_slot_mapping():
+    with mock.patch(
+        "vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type",
+        return_value=AscendDeviceType.A5,
+    ):
+        plan = get_dsa_attn_kv_plan(_config(True))
+
+    cache = torch.zeros((2, 3, 1, 4), dtype=torch.bfloat16)
+    updates = torch.arange(8, dtype=torch.bfloat16).reshape(2, 1, 4)
+    slot_mapping = torch.tensor([1, -1], dtype=torch.int32)
+    with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.torch_npu.npu_scatter_nd_update_") as scatter:
+        plan.dsa_kv_compress_scatter(cache, updates, slot_mapping)
+
+    flat_cache, indices, actual_updates = scatter.call_args.args
+    assert flat_cache.shape == (6, 1, 4)
+    assert flat_cache.data_ptr() == cache.data_ptr()
+    torch.testing.assert_close(indices, slot_mapping.view(-1, 1))
+    torch.testing.assert_close(actual_updates, updates)
 
 
 def test_non_a5_plan_preserves_shared_kv_runtime_kwargs():
     with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A3):
         plan = get_dsa_attn_kv_plan(_config(True))
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+        assert plan.get_dsa_slot_mapping_shape(8) == (8, 2)
         kwargs: dict[str, Any] = {}
         plan.add_dsa_sparse_attn_extra_kwargs(kwargs, cu_seqlens_ori_kv=torch.tensor([0, 1]))
         assert "cu_seqlens_ori_kv" in kwargs

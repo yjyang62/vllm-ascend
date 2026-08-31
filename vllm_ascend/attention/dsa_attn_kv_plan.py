@@ -95,6 +95,11 @@ class DsaAttnKvPlan:
     def get_dsa_compressor_slot_mapping_format(self) -> int:
         return self.compressor_slot_mapping_format
 
+    def get_dsa_slot_mapping_shape(self, num_tokens: int) -> tuple[int, ...]:
+        if self.requires_block_offset_slots:
+            return (num_tokens, 2)
+        return (num_tokens,)
+
     def format_dsa_slot_mapping(self, slot_mapping: torch.Tensor, block_size: int) -> torch.Tensor:
         if not self.requires_block_offset_slots:
             return slot_mapping
@@ -108,14 +113,14 @@ class DsaAttnKvPlan:
         if x is None:
             return
         if self.uses_sparse_flash_mla:
-            if slot_mapping.ndim != 2 or slot_mapping.shape[-1] != 2:
-                raise ValueError(f"BF16 DSA slot_mapping must be [num_tokens, 2], got {tuple(slot_mapping.shape)}.")
-            # Keep fixed [T, 2] shape under ACLGraph. SparseFlashMla's
-            # scatter path receives padded [-1, -1] rows directly; do not
-            # introduce a data-dependent Nonzero/gather operation here.
-            indices = slot_mapping.to(torch.int64).contiguous()
+            if slot_mapping.ndim != 1:
+                raise ValueError(f"BF16 DSA slot_mapping must be [num_tokens], got {tuple(slot_mapping.shape)}.")
+            # Flatten the physical block and offset dimensions so the common
+            # flat slot mapping can be consumed without device-side div/mod.
+            flat_cache = cache.flatten(0, 1)
+            indices = slot_mapping.view(-1, 1)
             updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:])).contiguous()
-            torch_npu.npu_scatter_nd_update_(cache, indices, updates)
+            torch_npu.npu_scatter_nd_update_(flat_cache, indices, updates)
             return
         if not self.uses_kv_compress_epilog:
             torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
@@ -154,8 +159,8 @@ def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
             uses_sparse_flash_mla=True,
             uses_kv_compress_epilog=False,
             layout_kv="PA_BBND",
-            compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
-            requires_block_offset_slots=True,
+            compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
+            requires_block_offset_slots=False,
             sparse_attn_op=sparse_flash_mla,
             sparse_attn_metadata_op=sparse_flash_mla_metadata,
             sparse_attn_base_kwargs={},
