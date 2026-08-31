@@ -41,7 +41,6 @@ from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
     IndexerOverlapPlan,
 )
-from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
@@ -1057,6 +1056,7 @@ def test_forward_attention_sets_compressed_kv_args(
 
 def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
     impl = _make_impl()
+    impl.support_fp8_attention = True
     impl.wo_a = SimpleNamespace(weight=torch.randn(1, 2, 2), weight_scale=None)
     impl.wo_b = lambda x: x
     o_proj_input = torch.randn(4, 1, 2)
@@ -1064,11 +1064,6 @@ def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
     projected = torch.randn(4, 1, 2)
 
     with (
-        patch("vllm_ascend.attention.dsa_v1.get_ascend_device_type", return_value=AscendDeviceType.A5),
-        patch(
-            "vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled",
-            return_value=True,
-        ),
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
         patch("vllm_ascend.attention.dsa_v1.olora_tp_enable", return_value=False),
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul", return_value=projected) as batched,
