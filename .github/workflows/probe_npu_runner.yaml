@@ -36,33 +36,41 @@ jobs:
           echo "GITHUB_JOB=${GITHUB_JOB:-}"
           echo
           echo "=== hostname ==="
-          hostname
+          hostname || true
           hostname -f || true
           echo
           echo "=== /etc/hostname / uname ==="
           cat /etc/hostname || true
-          uname -a
+          uname -a || true
           echo
           echo "=== match C04-B03-OS6? ==="
-          if [[ "$(hostname)" == "C04-B03-OS6" ]]; then
+          if [[ "${RUNNER_NAME:-}" == "C04-B03-OS6" ]]; then
             echo "YES: this runner host is C04-B03-OS6"
           else
-            echo "NO: this runner host is '$(hostname)', not C04-B03-OS6"
+            echo "NO: this runner is '${RUNNER_NAME:-}', not C04-B03-OS6"
           fi
 
       - name: Show NPU HBM
         run: |
           set -u
-          command -v npu-smi
+          NPU_SMI="$(command -v npu-smi || true)"
+          if [[ -z "${NPU_SMI}" && -x /usr/local/Ascend/driver/tools/npu-smi ]]; then
+            NPU_SMI=/usr/local/Ascend/driver/tools/npu-smi
+          fi
+          if [[ -z "${NPU_SMI}" ]]; then
+            echo "npu-smi was not found in PATH or the standard driver path"
+            exit 1
+          fi
+          echo "npu-smi=${NPU_SMI}"
           echo "=== npu-smi info ==="
-          npu-smi info
+          "${NPU_SMI}" info
           echo
           echo "=== npu-smi info -l ==="
-          npu-smi info -l || true
+          "${NPU_SMI}" info -l || true
           echo
           echo "=== per-chip memory ==="
           for i in $(seq 0 15); do
-            if npu-smi info -t memory -i "${i}" >/tmp/npu-mem-"${i}.txt" 2>/dev/null; then
+            if "${NPU_SMI}" info -t memory -i "${i}" >/tmp/npu-mem-"${i}.txt" 2>/dev/null; then
               echo "----- npu-smi info -t memory -i ${i} -----"
               cat /tmp/npu-mem-"${i}.txt"
             fi
