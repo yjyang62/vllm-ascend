@@ -1,8 +1,12 @@
 name: Probe NPU runner
 
-# Manual only. Prints hostname and NPU HBM so we can tell whether the
-# selected self-hosted runner is a given lab machine (e.g. C04-B03-OS6).
+# Prints hostname and NPU HBM so we can tell whether the selected self-hosted
+# runner is a given lab machine (e.g. C04-B03-OS6). The branch push trigger is
+# temporary so this probe can run before the workflow reaches the default branch.
 on:
+  push:
+    branches:
+      - cursor/runner-npu-mem-probe-b927
   workflow_dispatch:
     inputs:
       runner:
@@ -18,7 +22,7 @@ defaults:
 jobs:
   probe:
     name: hostname and NPU HBM
-    runs-on: ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner || 'self-hosted' }}
     timeout-minutes: 10
     steps:
       - name: Identify runner host
