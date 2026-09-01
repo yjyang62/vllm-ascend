@@ -63,15 +63,24 @@ jobs:
           fi
           echo "npu-smi=${NPU_SMI}"
           echo "=== npu-smi info ==="
-          "${NPU_SMI}" info
+          NPU_INFO="$("${NPU_SMI}" info)"
+          printf '%s\n' "${NPU_INFO}"
+          NPU_INFO="${NPU_INFO//'%'/'%25'}"
+          NPU_INFO="${NPU_INFO//$'\r'/'%0D'}"
+          NPU_INFO="${NPU_INFO//$'\n'/'%0A'}"
+          echo "::notice title=NPU device summary::${NPU_INFO}"
           echo
           echo "=== npu-smi info -l ==="
           "${NPU_SMI}" info -l || true
           echo
           echo "=== per-chip memory ==="
           for i in $(seq 0 15); do
-            if "${NPU_SMI}" info -t memory -i "${i}" >/tmp/npu-mem-"${i}.txt" 2>/dev/null; then
+            if NPU_MEMORY="$("${NPU_SMI}" info -t memory -i "${i}" 2>/dev/null)"; then
               echo "----- npu-smi info -t memory -i ${i} -----"
-              cat /tmp/npu-mem-"${i}.txt"
+              printf '%s\n' "${NPU_MEMORY}"
+              NPU_MEMORY="${NPU_MEMORY//'%'/'%25'}"
+              NPU_MEMORY="${NPU_MEMORY//$'\r'/'%0D'}"
+              NPU_MEMORY="${NPU_MEMORY//$'\n'/'%0A'}"
+              echo "::notice title=NPU ${i} memory::${NPU_MEMORY}"
             fi
           done
