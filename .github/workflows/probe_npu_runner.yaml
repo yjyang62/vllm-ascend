@@ -1,0 +1,65 @@
+name: Probe NPU runner
+
+# Manual only. Prints hostname and NPU HBM so we can tell whether the
+# selected self-hosted runner is a given lab machine (e.g. C04-B03-OS6).
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Self-hosted runner label registered on this repository
+        required: true
+        type: string
+        default: self-hosted
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  probe:
+    name: hostname and NPU HBM
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 10
+    steps:
+      - name: Identify runner host
+        run: |
+          set -u
+          echo "=== runner env ==="
+          echo "RUNNER_NAME=${RUNNER_NAME:-}"
+          echo "RUNNER_OS=${RUNNER_OS:-}"
+          echo "RUNNER_ARCH=${RUNNER_ARCH:-}"
+          echo "RUNNER_TRACKING_ID=${RUNNER_TRACKING_ID:-}"
+          echo "GITHUB_JOB=${GITHUB_JOB:-}"
+          echo
+          echo "=== hostname ==="
+          hostname
+          hostname -f || true
+          echo
+          echo "=== /etc/hostname / uname ==="
+          cat /etc/hostname || true
+          uname -a
+          echo
+          echo "=== match C04-B03-OS6? ==="
+          if [[ "$(hostname)" == "C04-B03-OS6" ]]; then
+            echo "YES: this runner host is C04-B03-OS6"
+          else
+            echo "NO: this runner host is '$(hostname)', not C04-B03-OS6"
+          fi
+
+      - name: Show NPU HBM
+        run: |
+          set -u
+          command -v npu-smi
+          echo "=== npu-smi info ==="
+          npu-smi info
+          echo
+          echo "=== npu-smi info -l ==="
+          npu-smi info -l || true
+          echo
+          echo "=== per-chip memory ==="
+          for i in $(seq 0 15); do
+            if npu-smi info -t memory -i "${i}" >/tmp/npu-mem-"${i}.txt" 2>/dev/null; then
+              echo "----- npu-smi info -t memory -i ${i} -----"
+              cat /tmp/npu-mem-"${i}.txt"
+            fi
+          done
