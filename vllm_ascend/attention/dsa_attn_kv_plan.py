@@ -33,10 +33,7 @@ def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str, quant_method: str | 
         return "auto"
     normalized_model_dtype = str(model_dtype).lower()
     normalized_quant_method = str(quant_method).lower()
-    if (
-        normalized_model_dtype in _BF16_KV_CACHE_DTYPES
-        and normalized_quant_method not in _DSV4_FP8_QUANT_METHODS
-    ):
+    if normalized_model_dtype in _BF16_KV_CACHE_DTYPES and normalized_quant_method not in _DSV4_FP8_QUANT_METHODS:
         return "bfloat16"
     return "auto"
 
