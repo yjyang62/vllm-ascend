@@ -192,22 +192,20 @@ def test_non_a5_pins_cache_dtype_to_the_model_dtype():
             assert resolve_dsv4_cache_dtype(launch, "bfloat16") == "bfloat16"
 
 
-def test_a5_collapses_non_bfloat16_requests_to_auto():
-    # "auto" resolves to the model dtype everywhere downstream, so it carries
-    # the FP8 mode without changing any value upstream would have computed.
+def test_a5_auto_selects_bf16_for_unquantized_bf16_checkpoint():
     with _on(AscendDeviceType.A5):
         assert resolve_dsv4_cache_dtype("bfloat16", "bfloat16") == "bfloat16"
-        assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "auto"
+        assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "bfloat16"
         assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "auto"
 
 
-def test_a5_mode_survives_the_spec_path_rewrite():
+def test_a5_auto_preserves_fp8_quantized_checkpoint_mode():
     with _on(AscendDeviceType.A5):
         for launch in ("auto", "fp8"):
-            pinned = resolve_dsv4_cache_dtype(launch, "bfloat16")
+            pinned = resolve_dsv4_cache_dtype(launch, "bfloat16", "deepseek_v4_fp8")
             assert not is_a5_bf16_kv_enabled(_cache_config(pinned))
             # layer.get_kv_cache_spec pins FP8 once it has picked the mode.
             assert not is_a5_bf16_kv_enabled(_cache_config("float8_e4m3fn"))
 
-        pinned = resolve_dsv4_cache_dtype("bfloat16", "bfloat16")
+        pinned = resolve_dsv4_cache_dtype("bfloat16", "bfloat16", "deepseek_v4_fp8")
         assert is_a5_bf16_kv_enabled(_cache_config(pinned))

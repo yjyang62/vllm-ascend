@@ -13,20 +13,32 @@ from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flas
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
+_AUTO_KV_CACHE_DTYPES = frozenset({"auto", "none"})
+_DSV4_FP8_QUANT_METHODS = frozenset({"deepseek_v4_fp8"})
 
 
-def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
+def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str, quant_method: str | None = None) -> str:
     """Return the KV cache dtype the platform should pin for DeepSeek-V4.
 
-    On A5 the launch request has to stay readable afterwards, because it is the
-    only thing that separates an explicit bfloat16 KV request from ``auto``.
-    ``auto`` and the model dtype resolve identically everywhere downstream, so
-    collapsing every non-bfloat16 request to ``auto`` preserves the upstream
-    values while keeping the mode recoverable.
+    On A5 an explicit cache dtype always wins. ``auto`` selects BF16 for an
+    unquantized BF16 checkpoint and keeps FP8-quantized checkpoints on the
+    existing FP8 KV path.
     """
     if get_ascend_device_type() != AscendDeviceType.A5:
         return model_dtype
-    return "bfloat16" if str(cache_dtype).lower() in _BF16_KV_CACHE_DTYPES else "auto"
+    normalized_cache_dtype = str(cache_dtype).lower()
+    if normalized_cache_dtype in _BF16_KV_CACHE_DTYPES:
+        return "bfloat16"
+    if normalized_cache_dtype not in _AUTO_KV_CACHE_DTYPES:
+        return "auto"
+    normalized_model_dtype = str(model_dtype).lower()
+    normalized_quant_method = str(quant_method).lower()
+    if (
+        normalized_model_dtype in _BF16_KV_CACHE_DTYPES
+        and normalized_quant_method not in _DSV4_FP8_QUANT_METHODS
+    ):
+        return "bfloat16"
+    return "auto"
 
 
 def is_a5_bf16_kv_enabled(vllm_config) -> bool:
