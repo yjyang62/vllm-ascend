@@ -13,8 +13,9 @@ from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flas
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
+_FP8_KV_CACHE_DTYPES = frozenset({"fp8", "float8", "float8_e4m3fn", "float8_e5m2"})
 _AUTO_KV_CACHE_DTYPES = frozenset({"auto", "none"})
-_DSV4_FP8_QUANT_METHODS = frozenset({"deepseek_v4_fp8"})
+_NO_QUANT_METHODS = frozenset({"", "none"})
 
 
 def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str, quant_method: str | None = None) -> str:
@@ -29,11 +30,19 @@ def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str, quant_method: str | 
     normalized_cache_dtype = str(cache_dtype).lower()
     if normalized_cache_dtype in _BF16_KV_CACHE_DTYPES:
         return "bfloat16"
+    normalized_model_dtype = str(model_dtype).lower()
+    normalized_quant_method = "" if quant_method is None else str(quant_method).lower()
+    is_unquantized_bf16 = (
+        normalized_model_dtype in _BF16_KV_CACHE_DTYPES and normalized_quant_method in _NO_QUANT_METHODS
+    )
+    if normalized_cache_dtype in _FP8_KV_CACHE_DTYPES and is_unquantized_bf16:
+        raise ValueError(
+            "A5 DeepSeek-V4 does not support FP8 KV cache with an unquantized BF16 checkpoint; "
+            "use --kv-cache-dtype bfloat16 or leave it as auto."
+        )
     if normalized_cache_dtype not in _AUTO_KV_CACHE_DTYPES:
         return "auto"
-    normalized_model_dtype = str(model_dtype).lower()
-    normalized_quant_method = str(quant_method).lower()
-    if normalized_model_dtype in _BF16_KV_CACHE_DTYPES and normalized_quant_method not in _DSV4_FP8_QUANT_METHODS:
+    if is_unquantized_bf16:
         return "bfloat16"
     return "auto"
 

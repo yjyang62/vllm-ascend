@@ -196,7 +196,8 @@ def test_a5_auto_selects_bf16_for_unquantized_bf16_checkpoint():
     with _on(AscendDeviceType.A5):
         assert resolve_dsv4_cache_dtype("bfloat16", "bfloat16") == "bfloat16"
         assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "bfloat16"
-        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "auto"
+        with pytest.raises(ValueError, match="does not support FP8 KV cache"):
+            resolve_dsv4_cache_dtype("fp8", "bfloat16")
 
 
 def test_a5_auto_preserves_fp8_quantized_checkpoint_mode():
