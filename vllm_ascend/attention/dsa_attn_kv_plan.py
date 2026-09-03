@@ -14,7 +14,14 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
 _AUTO_KV_CACHE_DTYPES = frozenset({"auto", "none"})
+_FP8_KV_CACHE_DTYPES = frozenset({"fp8", "fp8_e4m3", "fp8_e4m3fn", "float8_e4m3fn", "fp8_ds_mla"})
 _NO_QUANT_METHODS = frozenset({"", "none"})
+# Keep the launch-visible vLLM name so Worker.cache_dtype is FP8, not model BF16.
+_PINNED_FP8_CACHE_DTYPE = "fp8"
+
+
+def _normalize_dtype_name(dtype) -> str:
+    return str(dtype).lower().removeprefix("torch.")
 
 
 def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str, quant_method: str | None = None) -> str:
@@ -22,20 +29,24 @@ def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str, quant_method: str | 
 
     On A5 an explicit cache dtype always wins. ``auto`` selects BF16 for an
     unquantized BF16 checkpoint and keeps FP8-quantized checkpoints on the
-    existing FP8 KV path.
+    existing FP8 KV path. Explicit FP8 must stay FP8: collapsing it to
+    ``auto`` makes ``Worker`` treat the cache as the model dtype (BF16) while
+    DSA still runs ``kv_compress_epilog`` + MXFP8 attention.
     """
     if get_ascend_device_type() != AscendDeviceType.A5:
         return model_dtype
-    normalized_cache_dtype = str(cache_dtype).lower()
+    normalized_cache_dtype = _normalize_dtype_name(cache_dtype)
     if normalized_cache_dtype in _BF16_KV_CACHE_DTYPES:
         return "bfloat16"
-    normalized_model_dtype = str(model_dtype).lower()
+    if normalized_cache_dtype in _FP8_KV_CACHE_DTYPES:
+        return _PINNED_FP8_CACHE_DTYPE
+    normalized_model_dtype = _normalize_dtype_name(model_dtype)
     normalized_quant_method = "" if quant_method is None else str(quant_method).lower()
     is_unquantized_bf16 = (
         normalized_model_dtype in _BF16_KV_CACHE_DTYPES and normalized_quant_method in _NO_QUANT_METHODS
     )
     if normalized_cache_dtype not in _AUTO_KV_CACHE_DTYPES:
-        return "auto"
+        return _PINNED_FP8_CACHE_DTYPE
     if is_unquantized_bf16:
         return "bfloat16"
     return "auto"
@@ -53,7 +64,7 @@ def is_a5_bf16_kv_enabled(vllm_config) -> bool:
     cache_config = getattr(vllm_config, "cache_config", None)
     if cache_config is None:
         return False
-    return str(cache_config.cache_dtype).lower() in _BF16_KV_CACHE_DTYPES
+    return _normalize_dtype_name(cache_config.cache_dtype) in _BF16_KV_CACHE_DTYPES
 
 
 def get_dsv4_attn_kv_dtype(vllm_config) -> torch.dtype:
@@ -100,6 +111,14 @@ class DsaAttnKvPlan:
     def get_dsa_sparse_attn_base_kwargs(self) -> dict[str, Any]:
         return dict(self.sparse_attn_base_kwargs)
 
+    def prepare_sparse_attn_query(self, q: torch.Tensor) -> torch.Tensor:
+        # npu_kv_quant_sparse_attn_sharedkv rejects non-contiguous Q. BF16
+        # wq_b/unflatten/rope often leaves a strided [T, N, D] view; the BF16
+        # SparseFlashMla path tolerates that, the FP8 kernel decodes 乱码.
+        if self.uses_kv_compress_epilog:
+            return q.contiguous()
+        return q
+
     def add_dsa_sparse_attn_extra_kwargs(self, extra_kwargs: dict[str, Any], **kwargs_to_add) -> None:
         if self.applies_sparse_attn_runtime_kwargs:
             extra_kwargs.update(kwargs_to_add)
@@ -134,10 +153,15 @@ class DsaAttnKvPlan:
         if not self.uses_kv_compress_epilog:
             torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
             return
+        # Unquantized BF16 wkv/rope often leaves a non-contiguous [T, 1, D]
+        # view. kv_compress_epilog reads a dense [T, D] BF16 row; a strided
+        # view makes it pack garbage MXFP8 pages and decode as 乱码.
+        packed_x = x.reshape(-1, x.shape[-1]).contiguous()
+        packed_slots = slot_mapping.reshape(-1).contiguous()
         torch.ops._C_ascend.kv_compress_epilog(
-            kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
-            x=x.view(-1, x.shape[-1]),
-            slot_mapping=slot_mapping,
+            kv_compress_cache=cache.reshape(-1, 1, cache.shape[-1]),
+            x=packed_x,
+            slot_mapping=packed_slots,
             quant_group_size=64,
             quant_mode=2,
             round_scale_flag=True,

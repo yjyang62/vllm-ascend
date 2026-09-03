@@ -91,6 +91,53 @@ def test_scatter_skips_none_updates():
             epilog.assert_not_called()
 
 
+def test_fp8_epilog_receives_contiguous_token_rows():
+    """BF16 wkv/rope often leaves [T, 1, D] as a non-contiguous view.
+
+    kv_compress_epilog reads dense [T, D] BF16 rows. Passing the strided view
+    packs garbage MXFP8 pages and the FP8 attention kernel decodes 乱码.
+    """
+    with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A5):
+        plan = get_dsa_attn_kv_plan(_config(False))
+        cache = torch.zeros(2, 2, 1, 8)
+        wide = torch.arange(3 * 8, dtype=torch.bfloat16).reshape(3, 8)
+        updates = wide[:, :4].unsqueeze(1)
+        assert updates.shape == (3, 1, 4)
+        assert not updates.is_contiguous()
+        slot_mapping = torch.tensor([0, 1, 2], dtype=torch.int32)
+
+        with mock.patch.object(torch.ops._C_ascend, "kv_compress_epilog") as epilog:
+            plan.dsa_kv_compress_scatter(cache, updates, slot_mapping)
+
+        epilog.assert_called_once()
+        kwargs = epilog.call_args.kwargs
+        packed_x = kwargs["x"]
+        packed_slots = kwargs["slot_mapping"]
+        packed_cache = kwargs["kv_compress_cache"]
+        assert packed_x.shape == (3, 4)
+        assert packed_x.is_contiguous()
+        torch.testing.assert_close(packed_x, updates.reshape(3, 4).contiguous())
+        assert packed_slots.shape == (3,)
+        assert packed_slots.is_contiguous()
+        assert packed_cache.shape == (4, 1, 8)
+
+
+def test_fp8_attn_query_is_made_contiguous():
+    """npu_kv_quant_sparse_attn_sharedkv does not accept a strided Q."""
+    with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A5):
+        fp8_plan = get_dsa_attn_kv_plan(_config(False))
+        bf16_plan = get_dsa_attn_kv_plan(_config(True))
+        wide = torch.arange(2 * 3 * 8, dtype=torch.bfloat16).reshape(2, 3, 8)
+        q = wide[:, :, :4]
+        assert q.shape == (2, 3, 4)
+        assert not q.is_contiguous()
+
+        packed = fp8_plan.prepare_sparse_attn_query(q)
+        assert packed.is_contiguous()
+        torch.testing.assert_close(packed, q.contiguous())
+        assert bf16_plan.prepare_sparse_attn_query(q) is q
+
+
 def _cpu_scatter_nd_update_(cache, indices, updates):
     """Apply npu_scatter_nd_update_ semantics on CPU for flat BF16 slots."""
     for row, update in zip(indices, updates, strict=True):
@@ -179,6 +226,8 @@ def test_a5_bf16_kv_is_disabled_on_non_a5():
         (AscendDeviceType.A3, "auto", torch.bfloat16),
         (AscendDeviceType.A5, "bfloat16", torch.bfloat16),
         (AscendDeviceType.A5, "auto", torch.float8_e4m3fn),
+        (AscendDeviceType.A5, "fp8", torch.float8_e4m3fn),
+        (AscendDeviceType.A5, "float8_e4m3fn", torch.float8_e4m3fn),
     ],
 )
 def test_dsv4_attn_kv_dtype_preserves_device_modes(device_type, cache_dtype, expected_dtype):
@@ -196,16 +245,17 @@ def test_a5_auto_selects_bf16_for_unquantized_bf16_checkpoint():
     with _on(AscendDeviceType.A5):
         assert resolve_dsv4_cache_dtype("bfloat16", "bfloat16") == "bfloat16"
         assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "bfloat16"
-        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "auto"
+        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "fp8"
+        assert resolve_dsv4_cache_dtype("float8_e4m3fn", "bfloat16") == "fp8"
+        assert resolve_dsv4_cache_dtype(torch.float8_e4m3fn, "bfloat16") == "fp8"
 
 
 def test_a5_auto_preserves_fp8_quantized_checkpoint_mode():
     with _on(AscendDeviceType.A5):
-        for launch in ("auto", "fp8"):
-            pinned = resolve_dsv4_cache_dtype(launch, "bfloat16", "deepseek_v4_fp8")
+        assert resolve_dsv4_cache_dtype("auto", "bfloat16", "deepseek_v4_fp8") == "auto"
+        assert resolve_dsv4_cache_dtype("fp8", "bfloat16", "deepseek_v4_fp8") == "fp8"
+        for pinned in ("auto", "fp8", "float8_e4m3fn"):
             assert not is_a5_bf16_kv_enabled(_cache_config(pinned))
-            # layer.get_kv_cache_spec pins FP8 once it has picked the mode.
-            assert not is_a5_bf16_kv_enabled(_cache_config("float8_e4m3fn"))
 
         pinned = resolve_dsv4_cache_dtype("bfloat16", "bfloat16", "deepseek_v4_fp8")
         assert is_a5_bf16_kv_enabled(_cache_config(pinned))

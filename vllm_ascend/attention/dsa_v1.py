@@ -1684,4 +1684,4 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 assert compress_topk_idxs is not None
                 attn_kwargs["cmp_sparse_indices"] = compress_topk_idxs
 
-        return attn_op(q, **attn_kwargs)[0]
+        return attn_op(kv_plan.prepare_sparse_attn_query(q), **attn_kwargs)[0]

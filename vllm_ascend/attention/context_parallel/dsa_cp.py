@@ -1718,6 +1718,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             **extra_attn_kwargs,
         )
 
+        q = kv_plan.prepare_sparse_attn_query(q)
         if self.compress_ratio <= 1:
             attn_output = attn_op(
                 q,
