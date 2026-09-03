@@ -91,6 +91,69 @@ def test_scatter_skips_none_updates():
             epilog.assert_not_called()
 
 
+def _cpu_scatter_nd_update_(cache, indices, updates):
+    """Apply npu_scatter_nd_update_ semantics on CPU for the [T, 2] BF16 path."""
+    for row, update in zip(indices, updates, strict=True):
+        cache[row[0], row[1]] = update
+
+
+def test_bf16_scatter_is_aclgraph_static_and_skips_pad_wrap():
+    """PAD_SLOT_ID rows must stay in-graph and must not wrap to the last slot.
+
+    Evaluating ``torch.any(valid)`` as a Python bool calls LocalScalarDense
+    and aborts ACLGraph capture (EE1016 / error 107027). Boolean-indexing the
+    valid rows is also illegal: it emits a data-dependent Nonzero. Passing raw
+    -1 indices is also wrong: advanced indexing wraps to the last live slot.
+    """
+    with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A5):
+        plan = get_dsa_attn_kv_plan(_config(True))
+        num_blocks, block_size, num_kv_heads, head_dim = 3, 4, 1, 2
+        cache = torch.zeros(num_blocks, block_size, num_kv_heads, head_dim)
+        sentinel = torch.full((num_kv_heads, head_dim), 999.0)
+        cache[num_blocks - 1, block_size - 1] = sentinel
+
+        slot_mapping = torch.tensor([[0, 1], [-1, -1], [-1, -1]], dtype=torch.int32)
+        updates = torch.tensor([[[1.0, 2.0]], [[-7.0, -7.0]], [[-8.0, -8.0]]])
+        captured: dict[str, torch.Tensor] = {}
+
+        def fake_scatter(cache_t, indices, values):
+            captured["indices"] = indices.detach().clone()
+            captured["updates"] = values.detach().clone()
+            _cpu_scatter_nd_update_(cache_t, indices, values)
+
+        with (
+            mock.patch(
+                "vllm_ascend.attention.dsa_attn_kv_plan.torch_npu.npu_scatter_nd_update_", side_effect=fake_scatter
+            ),
+            mock.patch("torch.any", wraps=torch.any) as any_spy,
+        ):
+            plan.dsa_kv_compress_scatter(cache, updates, slot_mapping)
+
+        any_spy.assert_not_called()
+        assert captured["indices"].shape == slot_mapping.shape
+        assert captured["updates"].shape[0] == slot_mapping.shape[0]
+        assert bool((captured["indices"] >= 0).all())
+        torch.testing.assert_close(captured["indices"][0], torch.tensor([0, 1], dtype=torch.int64))
+        torch.testing.assert_close(cache[0, 1], updates[0])
+        torch.testing.assert_close(cache[num_blocks - 1, block_size - 1], sentinel)
+
+
+def test_bf16_scatter_does_not_early_return_on_all_padded_slots():
+    """An all-pad decode capture batch must still emit a static scatter."""
+    with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A5):
+        plan = get_dsa_attn_kv_plan(_config(True))
+        cache = torch.zeros(2, 2, 1, 2)
+        slot_mapping = torch.full((4, 2), -1, dtype=torch.int32)
+        updates = torch.ones(4, 1, 2)
+
+        with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.torch_npu.npu_scatter_nd_update_") as scatter:
+            plan.dsa_kv_compress_scatter(cache, updates, slot_mapping)
+            scatter.assert_called_once()
+            indices = scatter.call_args.args[1]
+            assert indices.shape == (4, 2)
+            assert bool((indices == 0).all())
+
+
 def test_is_a5_bf16_kv_enabled_requires_vllm_config():
     with _on(AscendDeviceType.A5), pytest.raises(TypeError):
         is_a5_bf16_kv_enabled()
