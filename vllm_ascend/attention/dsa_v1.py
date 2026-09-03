@@ -7,7 +7,6 @@ import torch.distributed as dist
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -374,12 +373,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and not is_a5_bf16_kv_enabled(
-            vllm_config
-        ):
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
-        else:
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
+        kv_plan = get_dsa_attn_kv_plan(vllm_config)
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.slot_mapping_shape = (
+            (max_num_batched_tokens, 2)
+            if kv_plan.requires_block_offset_slots
+            else (max_num_batched_tokens,)
+        )
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.spec_slot_mapping = [
@@ -427,8 +427,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
         self._zero_i32 = torch.tensor([0], device=self.device, dtype=torch.int32)
-        # Note(qcs): we use two dimension slot_mapping for kvcache with shape
-        # [block_nums, block_size, head_num, head_dim]
+        # A5 uses flat physical slots for both FP8 and BF16 KV. Other devices
+        # retain [block_idx, block_offset] mappings for paged cache writes.
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
 
     def _init_hadamard(self, layer_names: list[str]) -> None:
@@ -1066,22 +1066,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
 
-    def _is_graph_capturing(self) -> bool:
-        # v2 runner records capture on `_EXTRA_CTX` from
-        # `torch.npu.is_current_stream_capturing()`. ACLGraph also sets
-        # `forward_context.capturing` during `torch.npu.graph(...)`.
-        if _EXTRA_CTX.capturing:
-            return True
-        if not is_forward_context_available():
-            return False
-        return bool(getattr(get_forward_context(), "capturing", False))
-
-    def _should_scatter_swa_kv_on_main_stream(self) -> bool:
-        # FULL_DECODE_ONLY records the main stream only. A5 BF16 scatter uses
-        # `npu_scatter_nd_update_`, which is dropped on replay if it stays on
-        # the aux overlap stream. Eager decode keeps that write on aux.
-        return self._is_graph_capturing() and is_a5_bf16_kv_enabled(self.vllm_config)
-
     def _get_layer_metadata(
         self,
         attn_layer_name: str,
@@ -1432,15 +1416,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         Each stream's data is self-contained; no cross-stream sync is needed between blocks.
         Only the tail wait_stream ensures scatter is complete.
 
-        ACLGraph FULL_DECODE_ONLY records the main stream only. During capture
-        on the A5 BF16 KV path, SWA scatter moves to the main stream after the
-        wait so the write is not dropped on replay. Eager decode keeps scatter
-        on the aux stream to preserve overlap.
         """
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
-
-        scatter_on_main = self._should_scatter_swa_kv_on_main_stream()
 
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
 
@@ -1494,8 +1472,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 rotary_mode="interleave",
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
-            if not scatter_on_main:
-                get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
+            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
 
         if is_prefill:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
@@ -1510,10 +1487,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             ).unflatten(-1, (self.n_local_heads, self.head_dim))
         else:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
-
-        if scatter_on_main:
-            main_stream.wait_stream(aux_stream)
-            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
 
         # Serial tail: wait for auxiliary stream then execute q_rms[V] + rope[V]
         main_stream.wait_stream(aux_stream)
@@ -1571,11 +1544,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             overlap_plan = IndexerOverlapPlan(
                 compute_attention_compressed_kv=compute_attention_compressed_kv,
                 scatter_attention_compressed_kv=scatter_attention_compressed_kv,
-                aux_stream=(
-                    dsv4_dsa_overlap_stream()
-                    if self.multistream_dsv4_dsa_overlap and not self._should_scatter_swa_kv_on_main_stream()
-                    else None
-                ),
+                aux_stream=dsv4_dsa_overlap_stream() if self.multistream_dsv4_dsa_overlap else None,
             )
             return self.indexer(
                 hidden_states=hidden_states,

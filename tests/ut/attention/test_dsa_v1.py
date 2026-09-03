@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -1124,61 +1123,13 @@ def test_a5_bf16_keeps_multistream_overlap_enabled():
     assert impl.multistream_dsv4_dsa_overlap is True
 
 
-@pytest.mark.parametrize(
-    ("extra_ctx_capturing", "forward_available", "forward_capturing", "expected"),
-    [
-        (True, False, False, True),
-        (False, False, True, False),
-        (False, True, True, True),
-        (False, True, False, False),
-    ],
-    ids=["extra_ctx", "no_forward_context", "forward_context", "eager"],
-)
-def test_is_graph_capturing_reads_extra_ctx_and_forward_context(
-    extra_ctx_capturing: bool,
-    forward_available: bool,
-    forward_capturing: bool,
-    expected: bool,
-):
-    impl = _make_impl()
-    with (
-        patch(
-            "vllm_ascend.attention.dsa_v1._EXTRA_CTX",
-            SimpleNamespace(capturing=extra_ctx_capturing),
-        ),
-        patch(
-            "vllm_ascend.attention.dsa_v1.is_forward_context_available",
-            return_value=forward_available,
-        ),
-        patch(
-            "vllm_ascend.attention.dsa_v1.get_forward_context",
-            return_value=SimpleNamespace(capturing=forward_capturing),
-        ),
-    ):
-        assert impl._is_graph_capturing() is expected
-
-
-@pytest.mark.parametrize(
-    ("capturing", "bf16_kv", "scatter_on_aux"),
-    [
-        (True, True, False),
-        (False, True, True),
-        (True, False, True),
-        (False, False, True),
-    ],
-    ids=["capture_bf16_main", "eager_bf16_aux", "capture_fp8_aux", "eager_fp8_aux"],
-)
-def test_multistream_prolog_scatters_swa_kv_on_capture_aware_stream(
-    capturing: bool,
-    bf16_kv: bool,
-    scatter_on_aux: bool,
-):
+def test_multistream_prolog_scatters_flat_swa_kv_on_aux_stream():
     impl = _make_impl()
     hidden_states = torch.randn(2, 4)
     cos = torch.ones(2, 1, 1, 1)
     sin = torch.zeros(2, 1, 1, 1)
     swa_kv_cache = torch.zeros(2, 2, 1, 2)
-    slot_mapping = torch.tensor([[0, 0], [0, 1]], dtype=torch.int32)
+    slot_mapping = torch.tensor([0, 1], dtype=torch.int32)
     q_out = torch.randn(2, 2)
 
     aux_depth = {"n": 0}
@@ -1194,7 +1145,8 @@ def test_multistream_prolog_scatters_swa_kv_on_capture_aware_stream(
             return False
 
     def fake_switch(_stream, enabled=True):
-        return _StreamSwitch() if enabled else nullcontext()
+        assert enabled
+        return _StreamSwitch()
 
     def fake_scatter(*_args, **_kwargs):
         scatter_inside_aux.append(aux_depth["n"] > 0)
@@ -1211,8 +1163,6 @@ def test_multistream_prolog_scatters_swa_kv_on_capture_aware_stream(
     stream = MagicMock()
 
     with (
-        patch.object(impl, "_is_graph_capturing", return_value=capturing),
-        patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=bf16_kv),
         patch("vllm_ascend.attention.dsa_v1.torch.npu.current_stream", return_value=stream),
         patch("vllm_ascend.attention.dsa_v1.dsv4_dsa_overlap_stream", return_value=stream),
         patch("vllm_ascend.attention.dsa_v1.npu_stream_switch", side_effect=fake_switch),
@@ -1222,29 +1172,16 @@ def test_multistream_prolog_scatters_swa_kv_on_capture_aware_stream(
     ):
         impl._mla_prolog_multistream(hidden_states, cos, sin, swa_kv_cache, slot_mapping)
 
-    assert scatter_inside_aux == [scatter_on_aux]
+    assert scatter_inside_aux == [True]
     plan.dsa_kv_compress_scatter.assert_called_once()
     stream.wait_stream.assert_called()
 
 
-@pytest.mark.parametrize(
-    ("capturing", "bf16_kv", "expect_aux_stream"),
-    [
-        (True, True, False),
-        (False, True, True),
-        (True, False, True),
-    ],
-    ids=["capture_bf16", "eager_bf16", "capture_fp8"],
-)
-def test_indexer_overlap_disables_aux_stream_during_bf16_capture(
-    capturing: bool,
-    bf16_kv: bool,
-    expect_aux_stream: bool,
-):
+def test_indexer_overlap_keeps_aux_stream_for_flat_bf16_slots():
     impl = _make_impl()
     impl.compress_ratio = 4
     impl.multistream_dsv4_dsa_overlap = True
-    impl.compressor = MagicMock(return_value=(torch.ones((1, 1, 4)), torch.zeros((1, 2), dtype=torch.int32)))
+    impl.compressor = MagicMock(return_value=(torch.ones((1, 1, 4)), torch.zeros((1,), dtype=torch.int32)))
     impl.indexer = MagicMock(return_value=torch.tensor([[[1, 2, 3]]], dtype=torch.int32))
     compressor_metadata = AscendCompressorMetadata(
         cache=cast(Any, object()),
@@ -1259,8 +1196,6 @@ def test_indexer_overlap_disables_aux_stream_during_bf16_capture(
     overlap_stream = object()
 
     with (
-        patch.object(impl, "_is_graph_capturing", return_value=capturing),
-        patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=bf16_kv),
         patch("vllm_ascend.attention.dsa_v1.dsv4_dsa_overlap_stream", return_value=overlap_stream),
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=_mock_dsa_kv_plan()),
     ):
@@ -1276,10 +1211,7 @@ def test_indexer_overlap_disables_aux_stream_during_bf16_capture(
         )
 
     overlap_plan = impl.indexer.call_args.kwargs["overlap_plan"]
-    if expect_aux_stream:
-        assert overlap_plan.aux_stream is overlap_stream
-    else:
-        assert overlap_plan.aux_stream is None
+    assert overlap_plan.aux_stream is overlap_stream
 
 
 def test_prepared_cache_rejects_multistream_before_cache_access():
