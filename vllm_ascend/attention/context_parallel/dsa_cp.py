@@ -14,7 +14,11 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import (
+    _dsa_layout_kv,
+    _dsa_swa_only_cmp_ratio,
+    _has_weight_scale,
     build_dspark_swa_indices,
     get_dspark_sparse_sas_window,
 )
@@ -28,6 +32,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata
@@ -37,9 +42,7 @@ from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.tp_weight_switch import TPWeightSwitchMixin, TPWeightSwitchState
 from vllm_ascend.utils import (
-    AscendDeviceType,
     enable_dsa_cp_with_o_proj_tp,
-    get_ascend_device_type,
     olora_tp_enable,
 )
 
@@ -239,10 +242,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
-        else:
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
+        kv_plan = get_dsa_attn_kv_plan(vllm_config)
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.slot_mapping_shape = (
+            (max_num_batched_tokens, 2) if kv_plan.requires_block_offset_slots else (max_num_batched_tokens,)
+        )
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.spec_slot_mapping = [
@@ -265,8 +269,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
 
         self.reorder_batch_threshold = self.decode_threshold
-        # Note(qcs): we use two dimension slot_mapping for kvcache with shape
-        # [block_nums, block_size, head_num, head_dim]
+        # A5 uses flat physical slots for both FP8 and BF16 KV. Other devices
+        # retain [block_idx, block_offset] mappings for paged cache writes.
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
 
     @classmethod
@@ -343,7 +347,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # are generated later from the logical block table by compressor_metadata.
         if self.compressor_ratio <= 1:
             slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-            self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
+            self.slot_mapping[:num_input_tokens] = get_dsa_attn_kv_plan(self.vllm_config).format_dsa_slot_mapping(
                 slot_mapping, self.storage_block_size
             )
 
@@ -412,9 +416,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
 
         assert self.spec_slot_mapping is not None
-        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(
-            slot_mapping, self.storage_block_size
-        )
+        self.spec_slot_mapping[draft_index - 1][:num_input_tokens] = get_dsa_attn_kv_plan(
+            self.vllm_config
+        ).format_dsa_slot_mapping(slot_mapping, self.storage_block_size)
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         req_metadata = self.build_req_metadata_for_drafting(
@@ -523,9 +527,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]
 
         num_heads = self.model_config.hf_config.num_attention_heads
-        metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
-        metadata_kwargs.setdefault("device", str(self.seqused_q.device))
+        kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+        metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
+        metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         cu_seqlens_ori_kv = (
             local_query_start_loc
             if has_prefill
@@ -559,7 +563,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv=_dsa_layout_kv(self.vllm_config),
             has_ori_kv=True,
             has_cmp_kv=False,
         )
@@ -954,9 +958,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cu_seqlens_cmp_kv = (
                 None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
             )
-            metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
-            metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
-            metadata_kwargs.setdefault("device", str(self.seqused_q.device))
+            kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+            metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
+            metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
             kw = dict(
                 **metadata_kwargs,
                 num_heads_q=num_heads,
@@ -974,7 +978,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 ori_win_left=self.model_config.hf_config.sliding_window - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND",
+                layout_kv=_dsa_layout_kv(self.vllm_config),
                 has_ori_kv=True,
             )
 
@@ -1089,6 +1093,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.q_lora_rank = q_lora_rank
         self.compress_ratio = compress_ratio
         self.softmax_scale = self.head_dim**-0.5
+        self.support_fp8_attention = get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
         self.tp_group = get_tp_group()
         self.tp_size = self.tp_group.world_size
         self.tp_rank = self.tp_group.rank_in_group
@@ -1109,14 +1114,16 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]
 
-        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
+        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp() and get_current_hardware_profile().supports(
+            HardwareCapability.DSA_O_PROJ_TP
+        )
         self._o_proj_tp_weight_switch_enabled = False
 
         self.eps = kwargs["eps"]
 
         self.attn_sink = kwargs["attn_sink"]
 
-        self.vllm_config = get_current_vllm_config()
+        self.vllm_config = kwargs.get("vllm_config", get_current_vllm_config())
 
         # indexer param
         if self.indexer is not None:
@@ -1199,7 +1206,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             metadata.start_pos,
             metadata.block_table,
             metadata.storage_block_size,
-            DeviceOperator.get_dsa_compressor_slot_mapping_format(),
+            get_dsa_attn_kv_plan(self.vllm_config).get_dsa_compressor_slot_mapping_format(),
             self.compress_ratio,
             metadata.num_compressed_tokens,
             metadata.num_actual_reqs,
@@ -1461,7 +1468,8 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self._switch_o_proj_to_full_weight()
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
-            if get_ascend_device_type() in {AscendDeviceType.A5}:
+            use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
+            if use_a5_quant_o_proj:
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
                 if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
@@ -1489,6 +1497,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 else:
                     # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
                     # o = torch.einsum("tgd,grd->tgr", o, wo_a)
+                    # A5 BF16 uses the same 3D [groups, hidden, rank] layout.
                     o_proj_input = torch_npu.npu_transpose_batchmatmul(
                         o_proj_input,
                         self._get_batched_wo_a_weight(o_proj_groups),
@@ -1618,7 +1627,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
+        get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
+            swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping
+        )
 
         compress_topk_idxs = None
         if self.compress_ratio > 1:
@@ -1676,16 +1687,17 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
             if compressed_kv.numel() == 0:
                 compressed_kv = None
-            DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
+                compress_kv_cache, compressed_kv, compress_slot_mapping
+            )
 
         notify_kv_cache_written(layer_name)
         record_attention_compute_start()
-        attn_op = DeviceOperator.get_dsa_sparse_attn_op()
-        extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
+        kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+        attn_op = kv_plan.get_dsa_sparse_attn_op()
+        extra_attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()
         if has_prefill:
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
-                extra_attn_kwargs, cu_seqlens_ori_kv=local_seq_lengths_query
-            )
+            kv_plan.add_dsa_sparse_attn_extra_kwargs(extra_attn_kwargs, cu_seqlens_ori_kv=local_seq_lengths_query)
         if swa_req_metadata.dspark_swa_indices is not None:
             extra_attn_kwargs["ori_sparse_indices"] = swa_req_metadata.dspark_swa_indices
 
@@ -1697,12 +1709,12 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             seqused_kv=local_seq_lengths_key,
             sinks=self.attn_sink,
             softmax_scale=self.softmax_scale,
-            cmp_ratio=max(self.compress_ratio, 1),
+            cmp_ratio=_dsa_swa_only_cmp_ratio(self.compress_ratio, self.vllm_config),
             ori_mask_mode=4,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             layout_q="TND",
-            layout_kv="PA_ND",
+            layout_kv=_dsa_layout_kv(self.vllm_config),
             **extra_attn_kwargs,
         )
 
@@ -1718,7 +1730,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             assert compressor_attn_metadata is not None
             compressor_req_metadata = compressor_attn_metadata.req_metadata
             assert compressor_req_metadata is not None
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
+            kv_plan.add_dsa_sparse_attn_extra_kwargs(
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
             attn_output = attn_op(
@@ -1736,7 +1748,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             assert compressor_attn_metadata is not None
             compressor_req_metadata = compressor_attn_metadata.req_metadata
             assert compressor_req_metadata is not None
-            DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
+            kv_plan.add_dsa_sparse_attn_extra_kwargs(
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
             attn_output = attn_op(
@@ -1863,7 +1875,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod))
             and isinstance(self.inderxer_wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod)
             and qr_pertoken_scale is not None
-            and get_ascend_device_type() not in {AscendDeviceType.A5}
+            and not self.support_fp8_attention
         ):
             q = torch_npu.npu_quant_matmul(
                 qr,
@@ -2180,7 +2192,7 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-        DeviceOperator.dsa_kv_compress_scatter(
+        get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
             swa_kv_cache,
             kv,
             req_metadata.slot_mapping,
@@ -2201,7 +2213,7 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
             metadata=metadata,
         )
         if compressed_kv.shape[0] > 0:
-            DeviceOperator.dsa_kv_compress_scatter(
+            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
                 compress_kv_cache,
                 compressed_kv,
                 compress_slot_mapping,
