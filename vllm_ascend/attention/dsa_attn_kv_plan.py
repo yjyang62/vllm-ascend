@@ -110,10 +110,11 @@ class DsaAttnKvPlan:
         if self.uses_sparse_flash_mla:
             if slot_mapping.ndim != 2 or slot_mapping.shape[-1] != 2:
                 raise ValueError(f"BF16 DSA slot_mapping must be [num_tokens, 2], got {tuple(slot_mapping.shape)}.")
-            # Keep fixed [T, 2] shape under ACLGraph. SparseFlashMla's
-            # scatter path receives padded [-1, -1] rows directly; do not
-            # introduce a data-dependent Nonzero/gather operation here.
-            indices = slot_mapping.to(torch.int64).contiguous()
+            # ACLGraph cannot capture host syncs (torch.any/item) or
+            # data-dependent Nonzero/gather. Keep a static [T, 2] scatter and
+            # clamp PAD_SLOT_ID (-1) to the reserved null block (0, 0) so
+            # negative indices do not wrap to the last live cache slot.
+            indices = slot_mapping.to(torch.int64).clamp(min=0).contiguous()
             updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:])).contiguous()
             torch_npu.npu_scatter_nd_update_(cache, indices, updates)
             return
