@@ -270,8 +270,7 @@ class HcclSleepWakeupManager:
             return True
         except Exception:
             logger.exception(
-                "Failed to prepare MoE state for HCCL teardown; "
-                "skipping HCCL cleanup for this sleep cycle."
+                "Failed to prepare MoE state for HCCL teardown; skipping HCCL cleanup for this sleep cycle."
             )
             return False
 

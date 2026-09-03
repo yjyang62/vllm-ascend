@@ -327,8 +327,7 @@ class FusedMC2CommImpl(MoECommMethod):
         )
         self._mega_moe_hccl_state_stale = False
         logger.info(
-            "Refreshed MegaMoe HCCL runtime context after MC2 group restore: "
-            "rank=%d, world_size=%d.",
+            "Refreshed MegaMoe HCCL runtime context after MC2 group restore: rank=%d, world_size=%d.",
             local_rank,
             symm_buffer.ep_world_size,
         )
@@ -336,9 +335,7 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def _ensure_mega_moe_hccl_state_ready(self) -> None:
         if self._mega_moe_hccl_state_stale:
-            raise RuntimeError(
-                "MegaMoe HCCL runtime context is stale; wake-up must refresh it before inference."
-            )
+            raise RuntimeError("MegaMoe HCCL runtime context is stale; wake-up must refresh it before inference.")
 
     def _init_mega_moe_symm_buffer(
         self,

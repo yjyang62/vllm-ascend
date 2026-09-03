@@ -54,9 +54,7 @@ def test_fused_mc2_prepare_refuses_teardown_without_update_group_api():
 def test_fused_mc2_refreshes_existing_context_against_restored_group():
     context_manager = MagicMock(ccl_buffer_size=4096)
     inference_modes: list[bool] = []
-    context_manager.update_group.side_effect = lambda *_: inference_modes.append(
-        torch.is_inference_mode_enabled()
-    )
+    context_manager.update_group.side_effect = lambda *_: inference_modes.append(torch.is_inference_mode_enabled())
     context = MagicMock()
     symm_buffer = SimpleNamespace(
         _ctx_manager=context_manager,
