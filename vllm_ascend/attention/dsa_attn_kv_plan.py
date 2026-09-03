@@ -16,8 +16,10 @@ _BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
 _AUTO_KV_CACHE_DTYPES = frozenset({"auto", "none"})
 _FP8_KV_CACHE_DTYPES = frozenset({"fp8", "fp8_e4m3", "fp8_e4m3fn", "float8_e4m3fn", "fp8_ds_mla"})
 _NO_QUANT_METHODS = frozenset({"", "none"})
-# Keep the launch-visible vLLM name so Worker.cache_dtype is FP8, not model BF16.
-_PINNED_FP8_CACHE_DTYPE = "fp8"
+# DSV4 A5 FP8 KV is a custom MXFP8 packed page (rope + nope + e8m0 + pad),
+# not vLLM's generic ``--kv-cache-dtype fp8`` tensor. Keep the engine string
+# as ``auto`` so Worker / _init_kv_cache_quant do not install generic FP8 KV.
+_CUSTOM_MXFP8_CACHE_DTYPE = "auto"
 
 
 def _normalize_dtype_name(dtype) -> str:
@@ -29,9 +31,9 @@ def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str, quant_method: str | 
 
     On A5 an explicit cache dtype always wins. ``auto`` selects BF16 for an
     unquantized BF16 checkpoint and keeps FP8-quantized checkpoints on the
-    existing FP8 KV path. Explicit FP8 must stay FP8: collapsing it to
-    ``auto`` makes ``Worker`` treat the cache as the model dtype (BF16) while
-    DSA still runs ``kv_compress_epilog`` + MXFP8 attention.
+    existing MXFP8 KV path. Explicit ``fp8`` must stay on that same custom
+    path: writing ``fp8`` into ``CacheConfig`` turns on vLLM's generic FP8
+    KV machinery and corrupts the packed 640-wide pages.
     """
     if get_ascend_device_type() != AscendDeviceType.A5:
         return model_dtype
@@ -39,14 +41,14 @@ def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str, quant_method: str | 
     if normalized_cache_dtype in _BF16_KV_CACHE_DTYPES:
         return "bfloat16"
     if normalized_cache_dtype in _FP8_KV_CACHE_DTYPES:
-        return _PINNED_FP8_CACHE_DTYPE
+        return _CUSTOM_MXFP8_CACHE_DTYPE
     normalized_model_dtype = _normalize_dtype_name(model_dtype)
     normalized_quant_method = "" if quant_method is None else str(quant_method).lower()
     is_unquantized_bf16 = (
         normalized_model_dtype in _BF16_KV_CACHE_DTYPES and normalized_quant_method in _NO_QUANT_METHODS
     )
     if normalized_cache_dtype not in _AUTO_KV_CACHE_DTYPES:
-        return _PINNED_FP8_CACHE_DTYPE
+        return _CUSTOM_MXFP8_CACHE_DTYPE
     if is_unquantized_bf16:
         return "bfloat16"
     return "auto"
@@ -156,10 +158,12 @@ class DsaAttnKvPlan:
         # Unquantized BF16 wkv/rope often leaves a non-contiguous [T, 1, D]
         # view. kv_compress_epilog reads a dense [T, D] BF16 row; a strided
         # view makes it pack garbage MXFP8 pages and decode as 乱码.
+        # The cache argument must stay a view of the live page: reshape()
+        # copies a padded/strided cache and the write is discarded.
         packed_x = x.reshape(-1, x.shape[-1]).contiguous()
         packed_slots = slot_mapping.reshape(-1).contiguous()
         torch.ops._C_ascend.kv_compress_epilog(
-            kv_compress_cache=cache.reshape(-1, 1, cache.shape[-1]),
+            kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
             x=packed_x,
             slot_mapping=packed_slots,
             quant_group_size=64,

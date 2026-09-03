@@ -120,6 +120,7 @@ def test_fp8_epilog_receives_contiguous_token_rows():
         assert packed_slots.shape == (3,)
         assert packed_slots.is_contiguous()
         assert packed_cache.shape == (4, 1, 8)
+        assert packed_cache.data_ptr() == cache.data_ptr()
 
 
 def test_fp8_attn_query_is_made_contiguous():
@@ -245,15 +246,18 @@ def test_a5_auto_selects_bf16_for_unquantized_bf16_checkpoint():
     with _on(AscendDeviceType.A5):
         assert resolve_dsv4_cache_dtype("bfloat16", "bfloat16") == "bfloat16"
         assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "bfloat16"
-        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "fp8"
-        assert resolve_dsv4_cache_dtype("float8_e4m3fn", "bfloat16") == "fp8"
-        assert resolve_dsv4_cache_dtype(torch.float8_e4m3fn, "bfloat16") == "fp8"
+        # Explicit FP8 must not write "fp8" into CacheConfig: that enables
+        # vLLM generic FP8 KV and corrupts DSV4's packed MXFP8 pages.
+        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "auto"
+        assert resolve_dsv4_cache_dtype("float8_e4m3fn", "bfloat16") == "auto"
+        assert resolve_dsv4_cache_dtype(torch.float8_e4m3fn, "bfloat16") == "auto"
+        assert not is_a5_bf16_kv_enabled(_cache_config(resolve_dsv4_cache_dtype("fp8", "bfloat16")))
 
 
 def test_a5_auto_preserves_fp8_quantized_checkpoint_mode():
     with _on(AscendDeviceType.A5):
         assert resolve_dsv4_cache_dtype("auto", "bfloat16", "deepseek_v4_fp8") == "auto"
-        assert resolve_dsv4_cache_dtype("fp8", "bfloat16", "deepseek_v4_fp8") == "fp8"
+        assert resolve_dsv4_cache_dtype("fp8", "bfloat16", "deepseek_v4_fp8") == "auto"
         for pinned in ("auto", "fp8", "float8_e4m3fn"):
             assert not is_a5_bf16_kv_enabled(_cache_config(pinned))
 
