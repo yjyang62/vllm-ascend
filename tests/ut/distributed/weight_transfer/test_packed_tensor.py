@@ -33,6 +33,7 @@ import torch
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    _get_streams,
     packed_broadcast_consumer,
     packed_broadcast_producer,
     packed_npu_ipc_consumer,
@@ -53,6 +54,11 @@ class _FakeNpuStream:
     ``synchronize()`` is a no-op; ``__enter__``/``__exit__`` allow the
     ``with torch.npu.stream(s):`` context manager to work.
     """
+
+    created_devices: list[int | None] = []
+
+    def __init__(self, device: int | None = None) -> None:
+        self.created_devices.append(device)
 
     def synchronize(self) -> None:
         return None
@@ -76,23 +82,31 @@ def _stub_torch_npu():
     to redirect ``device="npu"`` to ``device="cpu"`` (the packing logic under test
     is dtype/shape/byte-correctness, which is device-agnostic).
     """
+    current_stream = _FakeNpuStream()
     fake_npu = types.SimpleNamespace(
         Stream=_FakeNpuStream,
-        current_stream=_FakeNpuStream,
+        current_stream=lambda: current_stream,
         synchronize=lambda *a, **kw: None,
         # ``torch.npu.stream(s)`` returns a context manager; the fake stream
         # already implements ``__enter__``/``__exit__`` so just return it.
         stream=lambda s: s,
     )
     original_empty = torch.empty
+    _FakeNpuStream.created_devices = []
+    _get_streams.cache_clear()
 
     def _fake_empty(*args, **kwargs):
         if kwargs.get("device") == "npu":
             kwargs["device"] = "cpu"
         return original_empty(*args, **kwargs)
 
-    with patch.object(torch, "npu", fake_npu, create=True), patch.object(torch, "empty", _fake_empty):
+    with (
+        patch.object(torch, "npu", fake_npu, create=True),
+        patch.object(torch, "empty", _fake_empty),
+        patch.object(torch.accelerator, "current_device_index", return_value=0),
+    ):
         yield
+    _get_streams.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +222,31 @@ def test_packed_broadcast_producer_uses_num_buffers_to_rotate():
     )
     # Each tensor is broadcast alone because each one (4 bytes) > 1 byte buffer.
     assert group.broadcast.call_count == 6
+
+
+def test_packed_broadcast_reuses_streams_across_calls():
+    """Producer and consumer reuse streams instead of stranding buffer caches."""
+    for _ in range(2):
+        group = _make_group_mock()
+        packed_broadcast_producer(
+            iterator=iter([("w", torch.zeros(1, dtype=torch.float32))]),
+            group=group,
+            src=0,
+            post_iter_func=lambda item: item[1],
+        )
+
+    packed = torch.zeros(4, dtype=torch.uint8)
+    for _ in range(2):
+        group = _make_group_mock()
+        group.broadcast = MagicMock(side_effect=lambda tensor, **kwargs: tensor.copy_(packed))
+        packed_broadcast_consumer(
+            iterator=iter([("w", ([1], torch.float32))]),
+            group=group,
+            src=0,
+            post_unpack_func=lambda weights: None,
+        )
+
+    assert _FakeNpuStream.created_devices == [0, 0]
 
 
 def test_packed_broadcast_producer_passes_src_rank():
