@@ -245,9 +245,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         kv_plan = get_dsa_attn_kv_plan(vllm_config)
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.slot_mapping_shape = (
-            (max_num_batched_tokens, 2)
-            if kv_plan.requires_block_offset_slots
-            else (max_num_batched_tokens,)
+            (max_num_batched_tokens, 2) if kv_plan.requires_block_offset_slots else (max_num_batched_tokens,)
         )
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
