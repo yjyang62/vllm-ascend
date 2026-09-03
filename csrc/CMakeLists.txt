@@ -32,6 +32,11 @@ option(ENABLE_OOM                 "Enable kernel oom"               OFF)
 
 set(ASCEND_COMPUTE_UNIT           "ascend910b"           CACHE   STRING   "soc that need to be compiled")
 set(ASCEND_OP_NAME                "ALL"                           CACHE   STRING   "operators that need to be compiled")
+# CACHE INTERNAL persists across reconfigures. Reset so a previous SOC/op list
+# cannot leave stale *_obj names for gen_cust_aicpu_kernel_symbol (for example
+# A3 sparse_attn_sharedkv_metadata after switching to A5
+# kv_quant_sparse_attn_sharedkv_metadata).
+set(AICPU_CUST_OBJ_TARGETS "" CACHE INTERNAL "All aicpu cust obj targets" FORCE)
 set(ARCH_DIRECTORY                ""                           CACHE   STRING   "arch directory that need to be compiled")
 set(VENDOR_NAME                   "custom"                     CACHE   STRING   "vendor name")
 set(ASCEND_ALL_COMPUTE_UNIT       "ascend310p;ascend910b;ascend910_93;ascend950;kirinx90" CACHE STRING "all soc list")

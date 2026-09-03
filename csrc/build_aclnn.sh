@@ -72,6 +72,108 @@ log_selected_ops() {
     done
 }
 
+resolve_cann_package_path() {
+    if [[ -n "${ASCEND_HOME_PATH:-}" ]]; then
+        printf '%s\n' "${ASCEND_HOME_PATH}"
+    elif [[ -n "${ASCEND_OPP_PATH:-}" ]]; then
+        dirname "${ASCEND_OPP_PATH}"
+    elif [[ -d /usr/local/Ascend/latest ]]; then
+        printf '%s\n' "/usr/local/Ascend/latest"
+    else
+        printf '%s\n' ""
+    fi
+}
+
+aclnn_cache_key() {
+    printf 'SOC_ARG=%s\nCUSTOM_OPS=%s\nASCEND_CANN_PACKAGE_PATH=%s\n' \
+        "${SOC_ARG}" "${CUSTOM_OPS}" "$(resolve_cann_package_path)"
+}
+
+log_cann_candidates() {
+    local cann_dir
+    shopt -s nullglob
+    for cann_dir in /usr/local/Ascend/cann-* /usr/local/Ascend/latest /usr/local/Ascend/ascend-toolkit/latest; do
+        if [[ -d "${cann_dir}/include" ]]; then
+            log "CANN candidate with include/: ${cann_dir}"
+        elif [[ -e "${cann_dir}" ]]; then
+            log "CANN path without include/: ${cann_dir}"
+        fi
+    done
+    shopt -u nullglob
+}
+
+check_cann_package() {
+    local cann_path
+    cann_path=$(resolve_cann_package_path)
+    log "env: ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-<unset>} CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH:-<unset>}"
+    if [[ -z "${cann_path}" ]]; then
+        log "ERROR: ASCEND_HOME_PATH is unset and no default CANN install was found"
+        log_cann_candidates
+        exit 1
+    fi
+    log "resolved CANN package path=${cann_path}"
+    if [[ ! -d "${cann_path}/include" ]]; then
+        log "ERROR: CANN at ${cann_path} is missing include/."
+        log "CMake imported targets (exe_graph, nnopbase, alog_headers, dlog) will then"
+        log "point at non-existent INTERFACE_INCLUDE_DIRECTORIES and the generate step fails."
+        log "This commonly means ASCEND_HOME_PATH points at an incomplete daily tree"
+        log "(for example cann-9.1.T560) while a complete toolkit such as cann-9.1.0 is installed."
+        log "Fix: source the complete toolkit set_env.sh/setenv.bash, export ASCEND_HOME_PATH"
+        log "to that tree, remove csrc/build if it still exists, then rebuild."
+        log_cann_candidates
+        exit 1
+    fi
+}
+
+cached_cann_package_path() {
+    local cache_file=$1
+    if [[ ! -f "${cache_file}" ]]; then
+        return 0
+    fi
+    sed -n 's/^CUSTOM_ASCEND_CANN_PACKAGE_PATH:[^=]*=//p' "${cache_file}" | head -1
+}
+
+maybe_invalidate_csrc_build() {
+    local build_dir=$1
+    local key_file="${build_dir}/.aclnn_cache_key"
+    local new_key old_key cached_cann current_cann
+
+    if [[ ! -d "${build_dir}" ]]; then
+        log "no existing ${build_dir}; starting a clean CMake tree"
+        return 0
+    fi
+
+    new_key=$(aclnn_cache_key)
+    current_cann=$(resolve_cann_package_path)
+    cached_cann=$(cached_cann_package_path "${build_dir}/CMakeCache.txt")
+
+    if [[ -n "${cached_cann}" && "${cached_cann}" != "${current_cann}" ]]; then
+        log "CMakeCache CANN path ${cached_cann} != current ${current_cann}; wiping ${build_dir}"
+        rm -rf -- "${build_dir}"
+        return 0
+    fi
+
+    if [[ -f "${key_file}" ]]; then
+        old_key=$(cat "${key_file}")
+        if [[ "${old_key}" == "${new_key}" ]]; then
+            log "reusing ${build_dir} (SOC/ops/CANN cache key unchanged)"
+            return 0
+        fi
+        log "csrc/build cache key changed; wiping ${build_dir} to avoid stale AICPU object targets"
+        printf '%s\n' "${old_key}" | sed 's/^/[build_aclnn] old key: /'
+        printf '%s\n' "${new_key}" | sed 's/^/[build_aclnn] new key: /'
+    else
+        log "csrc/build has no cache key; wiping ${build_dir} to drop leftover SOC/CANN CMake state"
+    fi
+    rm -rf -- "${build_dir}"
+}
+
+write_aclnn_cache_key() {
+    local build_dir=$1
+    mkdir -p -- "${build_dir}"
+    aclnn_cache_key > "${build_dir}/.aclnn_cache_key"
+}
+
 log "start: ROOT_DIR=${ROOT_DIR:-<unset>} SOC_VERSION=${SOC_VERSION:-<unset>} cwd=$(pwd)"
 log "env: ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-<unset>} ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME:-<unset>}"
 
@@ -257,17 +359,21 @@ log_selected_ops
   log "subshell cwd before cd=$(pwd)"
   cd "${ROOT_DIR}/csrc"
   log "subshell cwd after cd=$(pwd)"
-  log "preserving csrc/build and cleaning output dirs"
-  rm -rf -- output build_out
 
   : "${CUSTOM_OPS:?CUSTOM_OPS is not set}"
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
 
+  check_cann_package
+  maybe_invalidate_csrc_build "${ROOT_DIR}/csrc/build"
+  log "cleaning output dirs (csrc/build reused only when the SOC/ops/CANN cache key matches)"
+  rm -rf -- output build_out
+
   log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
   bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
   log "build.sh finished"
+  write_aclnn_cache_key "${ROOT_DIR}/csrc/build"
 
   custom_ops_install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"
   log "custom_ops_install_dir=${custom_ops_install_dir}"
