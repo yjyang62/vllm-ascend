@@ -371,7 +371,9 @@
 #       so that MLAAttention.__init__ completes without error. Ascend's
 #       AscendSFAImpl/AscendMLAImpl handles the full forward pass (including
 #       prefill) via impl.forward(), so prefill_backend.run_prefill_* is never
-#       called.
+#       called. If `vllm.v1.attention.backends.mla.prefill` is absent (0.27.1
+#       and other vLLM builds without PR #32623), skip the patch so plugin
+#       import does not raise ModuleNotFoundError.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/32623
 #    Future Plan:
