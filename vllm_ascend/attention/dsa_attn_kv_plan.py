@@ -114,6 +114,8 @@ class DsaAttnKvPlan:
             # data-dependent Nonzero/gather. Keep a static [T, 2] scatter and
             # clamp PAD_SLOT_ID (-1) to the reserved null block (0, 0) so
             # negative indices do not wrap to the last live cache slot.
+            # Callers must invoke this on the captured main stream; an
+            # aux-stream write is dropped on FULL_DECODE_ONLY replay.
             indices = slot_mapping.to(torch.int64).clamp(min=0).contiguous()
             updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:])).contiguous()
             torch_npu.npu_scatter_nd_update_(cache, indices, updates)

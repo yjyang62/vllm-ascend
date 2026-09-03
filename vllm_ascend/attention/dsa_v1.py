@@ -1064,8 +1064,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
-        if self.multistream_dsv4_dsa_overlap and is_a5_bf16_kv_enabled(self.vllm_config):
-            self.multistream_dsv4_dsa_overlap = False
 
     def _get_layer_metadata(
         self,
@@ -1411,11 +1409,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         Block partition (V: Vector, C: Cube, AIV: AI Vector):
           Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
           Part2: q_norm[V] + q_b_quant[V]  ||  kv_matmul[C]
-          Part3: q_b_matmul[C]             ||  kv_norm[V] + rope[V] + scatter[AIV]
-          Tail:  q_rms[V] + rope[V] (wait for auxiliary stream to complete)
+          Part3: q_b_matmul[C]             ||  kv_norm[V] + rope[V]
+          Tail:  wait aux, scatter SWA KV on the captured stream, then q_rms + rope
 
-        Each stream's data is self-contained; no cross-stream sync is needed between blocks.
-        Only the tail wait_stream ensures scatter is complete.
+        ACLGraph FULL_DECODE_ONLY records the main stream only. A cache write
+        left on the aux stream is dropped on replay and shows up as a decode
+        accuracy regression, so scatter stays on the main stream after the wait.
         """
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
@@ -1457,7 +1456,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         main_stream.wait_stream(aux_stream)
 
-        # Part3: q_b_matmul[C]  ||  kv_norm[V] + rope[V] + scatter[AIV]
+        # Part3: q_b_matmul[C]  ||  kv_norm[V] + rope[V]
         e_part3_start = main_stream.record_event()
 
         with npu_stream_switch(aux_stream, enabled=True):
@@ -1472,7 +1471,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 rotary_mode="interleave",
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
-            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
 
         if is_prefill:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
@@ -1488,8 +1486,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         else:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
 
-        # Serial tail: wait for auxiliary stream then execute q_rms[V] + rope[V]
+        # Serial tail: wait for KV produce, then scatter on the captured stream.
         main_stream.wait_stream(aux_stream)
+        get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
 
         q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
         torch.ops._C_ascend.inplace_partial_rotary_mul(
