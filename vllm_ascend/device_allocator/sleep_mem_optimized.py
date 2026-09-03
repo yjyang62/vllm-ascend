@@ -132,6 +132,10 @@ class HcclSleepWakeupManager:
     def __init__(self, vllm_config: VllmConfig, worker: Any):
         self.vllm_config = vllm_config
         self.worker = worker
+        self._preserved_hccl_group_ids: set[int] = set()
+        self._skip_hccl_cleanup_for_cycle = False
+        self._logged_ep_hccl_anchor = False
+        self._logged_hccl_cleanup_fallback = False
 
     @staticmethod
     def iter_alive_group_coordinators():
@@ -143,20 +147,61 @@ class HcclSleepWakeupManager:
             seen.add(id(group))
             yield group
 
-    @classmethod
-    def destroy_hccl(cls) -> int:
+    def _should_preserve_hccl_group(self, group: Any) -> bool:
+        """Keep a usable multi-rank EP group during extra-cleanup.
+
+        A3 trial after leftover world/DP. Only leftover TP has been
+        validated. Preserve a multi-rank EP coordinator that currently
+        owns a device process-group object; skip teardown when no such
+        EP group exists. This does not keep the separate mc2 group.
+        """
+        return (
+            getattr(group, "group_name", None) == "ep"
+            and getattr(group, "world_size", 1) > 1
+            and getattr(group, "device_group", None) is not None
+        )
+
+    def destroy_hccl(self) -> int:
+        groups = list(self.iter_alive_group_coordinators())
+        self._preserved_hccl_group_ids.clear()
+        self._skip_hccl_cleanup_for_cycle = False
+
+        self._preserved_hccl_group_ids = {id(group) for group in groups if self._should_preserve_hccl_group(group)}
+        if not self._preserved_hccl_group_ids:
+            self._skip_hccl_cleanup_for_cycle = True
+            if not self._logged_hccl_cleanup_fallback:
+                logger.warning(
+                    "No usable multi-rank EP HCCL anchor was found; skipping HCCL teardown for this sleep cycle."
+                )
+                self._logged_hccl_cleanup_fallback = True
+            return 0
+
         num_destroyed = 0
-        for group in cls.iter_alive_group_coordinators():
+        for group in groups:
+            if id(group) in self._preserved_hccl_group_ids:
+                if not self._logged_ep_hccl_anchor:
+                    logger.warning(
+                        "Keeping the EP HCCL group alive during sleep "
+                        "as a CANN AICPU/HCCP lifecycle compatibility guard."
+                    )
+                    self._logged_ep_hccl_anchor = True
+                continue
             if group.destroy_hccl():
                 num_destroyed += 1
         return num_destroyed
 
-    @classmethod
-    def restore_hccl(cls) -> int:
+    def restore_hccl(self) -> int:
+        if self._skip_hccl_cleanup_for_cycle:
+            self._skip_hccl_cleanup_for_cycle = False
+            return 0
+
         num_restored = 0
-        for group in cls.iter_alive_group_coordinators():
+        for group in self.iter_alive_group_coordinators():
+            if id(group) in self._preserved_hccl_group_ids:
+                continue
             if group.restore_hccl():
                 num_restored += 1
+        self._preserved_hccl_group_ids.clear()
         return num_restored
 
     @staticmethod
