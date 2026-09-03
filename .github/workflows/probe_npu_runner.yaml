@@ -1,0 +1,86 @@
+name: Probe NPU runner
+
+# Prints hostname and NPU HBM so we can tell whether the selected self-hosted
+# runner is a given lab machine (e.g. C04-B03-OS6). The branch push trigger is
+# temporary so this probe can run before the workflow reaches the default branch.
+on:
+  push:
+    branches:
+      - cursor/runner-npu-mem-probe-b927
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Self-hosted runner label registered on this repository
+        required: true
+        type: string
+        default: self-hosted
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  probe:
+    name: hostname and NPU HBM
+    runs-on: ${{ inputs.runner || 'self-hosted' }}
+    timeout-minutes: 10
+    steps:
+      - name: Identify runner host
+        run: |
+          set -u
+          echo "=== runner env ==="
+          echo "RUNNER_NAME=${RUNNER_NAME:-}"
+          echo "RUNNER_OS=${RUNNER_OS:-}"
+          echo "RUNNER_ARCH=${RUNNER_ARCH:-}"
+          echo "RUNNER_TRACKING_ID=${RUNNER_TRACKING_ID:-}"
+          echo "GITHUB_JOB=${GITHUB_JOB:-}"
+          echo
+          echo "=== hostname ==="
+          hostname || true
+          hostname -f || true
+          echo
+          echo "=== /etc/hostname / uname ==="
+          cat /etc/hostname || true
+          uname -a || true
+          echo
+          echo "=== match C04-B03-OS6? ==="
+          if [[ "${RUNNER_NAME:-}" == "C04-B03-OS6" ]]; then
+            echo "YES: this runner host is C04-B03-OS6"
+          else
+            echo "NO: this runner is '${RUNNER_NAME:-}', not C04-B03-OS6"
+          fi
+
+      - name: Show NPU HBM
+        run: |
+          set -u
+          NPU_SMI="$(command -v npu-smi || true)"
+          if [[ -z "${NPU_SMI}" && -x /usr/local/Ascend/driver/tools/npu-smi ]]; then
+            NPU_SMI=/usr/local/Ascend/driver/tools/npu-smi
+          fi
+          if [[ -z "${NPU_SMI}" ]]; then
+            echo "npu-smi was not found in PATH or the standard driver path"
+            exit 1
+          fi
+          echo "npu-smi=${NPU_SMI}"
+          echo "=== npu-smi info ==="
+          NPU_INFO="$("${NPU_SMI}" info)"
+          printf '%s\n' "${NPU_INFO}"
+          NPU_INFO="${NPU_INFO//'%'/'%25'}"
+          NPU_INFO="${NPU_INFO//$'\r'/'%0D'}"
+          NPU_INFO="${NPU_INFO//$'\n'/'%0A'}"
+          echo "::notice title=NPU device summary::${NPU_INFO}"
+          echo
+          echo "=== npu-smi info -l ==="
+          "${NPU_SMI}" info -l || true
+          echo
+          echo "=== per-chip memory ==="
+          for i in $(seq 0 15); do
+            if NPU_MEMORY="$("${NPU_SMI}" info -t memory -i "${i}" 2>/dev/null)"; then
+              echo "----- npu-smi info -t memory -i ${i} -----"
+              printf '%s\n' "${NPU_MEMORY}"
+              NPU_MEMORY="${NPU_MEMORY//'%'/'%25'}"
+              NPU_MEMORY="${NPU_MEMORY//$'\r'/'%0D'}"
+              NPU_MEMORY="${NPU_MEMORY//$'\n'/'%0A'}"
+              echo "::notice title=NPU ${i} memory::${NPU_MEMORY}"
+            fi
+          done
