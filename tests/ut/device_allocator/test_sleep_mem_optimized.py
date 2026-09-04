@@ -306,16 +306,20 @@ def test_hccl_sleep_prepares_moe_state_before_business_group_teardown():
     business_group.destroy_hccl.return_value = True
     calls: list[str] = []
 
+    def record_prepare() -> bool:
+        calls.append("prepare")
+        return True
+
+    def record_destroy() -> bool:
+        calls.append("destroy")
+        return True
+
     with (
         patch.object(manager, "_ensure_lifecycle_anchor", return_value=True),
-        patch.object(
-            manager,
-            "prepare_moe_hccl_teardown",
-            side_effect=lambda: calls.append("prepare") or True,
-        ),
+        patch.object(manager, "prepare_moe_hccl_teardown", side_effect=record_prepare),
         patch.object(manager, "iter_alive_group_coordinators", return_value=[business_group]),
     ):
-        business_group.destroy_hccl.side_effect = lambda: calls.append("destroy") or True
+        business_group.destroy_hccl.side_effect = record_destroy
         assert manager.destroy_hccl() == 1
 
     assert calls == ["prepare", "destroy"]
@@ -325,10 +329,20 @@ def test_hccl_wakeup_refreshes_dispatcher_then_moe_runtime_state():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
     calls: list[str] = []
 
+    def record_restore() -> int:
+        calls.append("restore")
+        return 2
+
+    def record_dispatcher() -> None:
+        calls.append("dispatcher")
+
+    def record_runtime() -> None:
+        calls.append("runtime")
+
     with (
-        patch.object(manager, "restore_hccl", side_effect=lambda: calls.append("restore") or 2),
-        patch.object(manager, "refresh_moe_hccl_groups", side_effect=lambda: calls.append("dispatcher")),
-        patch.object(manager, "refresh_moe_hccl_runtime_state", side_effect=lambda: calls.append("runtime")),
+        patch.object(manager, "restore_hccl", side_effect=record_restore),
+        patch.object(manager, "refresh_moe_hccl_groups", side_effect=record_dispatcher),
+        patch.object(manager, "refresh_moe_hccl_runtime_state", side_effect=record_runtime),
         patch(
             "vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config",
             return_value=nullcontext(),
