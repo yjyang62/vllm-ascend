@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from typing import Any
 
@@ -444,7 +445,11 @@ class NPUModelRunner310V2(NPUModelRunner):
                 kv_cache_spec[layer_name] = spec
         return kv_cache_spec
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+    ) -> None:
         """Allocate 310P attention caches as NZ and hybrid Mamba caches as ND."""
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
@@ -503,7 +508,9 @@ class NPUModelRunner310V2(NPUModelRunner):
         check_attention_cp_compatibility(self.vllm_config)
 
         shared_layers = get_shared_kv_cache_layers(self.vllm_config)
-        kv_caches_dict = self._allocate_kv_cache_tensors(kv_cache_config, shared_layers)
+        allocation_context = kv_cache_allocation_context or nullcontext()
+        with allocation_context:
+            kv_caches_dict = self._allocate_kv_cache_tensors(kv_cache_config, shared_layers)
         self.kv_caches: list[Any] = []
         bind_kv_cache(
             kv_caches_dict,
