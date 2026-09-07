@@ -22,6 +22,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
+    dsa_indexer_uses_quant,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
 )
@@ -929,6 +930,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_q: int,
         max_seqlen_kv: int,
     ) -> torch.Tensor:
+        if not dsa_indexer_uses_quant(self.vllm_config):
+            return self.qli_metadata_buffer
         qli_metadata = metadata_cache.get("qli")
         if qli_metadata is None:
             qli_metadata = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
@@ -1104,7 +1107,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     max_seqlen_kv=max_seqlen_kv,
                 )
 
-            if self.compressor_ratio == 4:
+            if self.compressor_ratio == 4 and dsa_indexer_uses_quant(self.vllm_config):
                 self._device_metadata_tasks = (
                     DeviceMetadataTask(DeviceMetadataStage.INDEXER, build_qli_metadata, id(self.qli_metadata_buffer)),
                     DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
@@ -1114,7 +1117,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
                 )
             sas_metadata = self.sas_metadata_buffer
-            qli_metadata = self.qli_metadata_buffer if self.compressor_ratio == 4 else None
+            qli_metadata = (
+                self.qli_metadata_buffer
+                if self.compressor_ratio == 4 and dsa_indexer_uses_quant(self.vllm_config)
+                else None
+            )
         else:
             self._device_metadata_tasks = ()
             sas_metadata = self._build_sas_metadata(

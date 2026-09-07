@@ -373,6 +373,31 @@ def test_build_req_metadata_defers_device_work_to_fixed_buffers(
         builder._build_qli_metadata.assert_not_called()
 
 
+def test_build_qli_metadata_skips_quant_op_for_fp16_indexer():
+    builder = _make_builder()
+    metadata_cache: dict[str, torch.Tensor] = {}
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.dsa_indexer_uses_quant", return_value=False),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_vllm_quant_lightning_indexer_metadata",
+            create=True,
+        ) as metadata_op,
+    ):
+        result = builder._build_qli_metadata(
+            metadata_cache=metadata_cache,
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            seq_lens=torch.tensor([8], dtype=torch.int32),
+            max_seqlen_q=2,
+            max_seqlen_kv=8,
+        )
+
+    metadata_op.assert_not_called()
+    assert result is builder.qli_metadata_buffer
+    assert "qli" not in metadata_cache
+
+
 def test_full_graph_compressor_metadata_uses_capture_bucket_extent():
     builder = _make_builder(4)
     builder.enable_device_metadata()

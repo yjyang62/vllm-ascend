@@ -57,13 +57,69 @@ def get_dsv4_attn_kv_dtype(vllm_config) -> torch.dtype:
     )
 
 
+def get_dsv4_indexer_kv_dtype(vllm_config) -> torch.dtype:
+    """Return the indexer K cache dtype.
+
+    A5 BF16 SparseFlashMla stores indexer KV in float16. A5 ``auto`` stays
+    FP8, and non-A5 keeps the int8 lightning-indexer cache.
+    """
+    if not _supports_dsv4_compressed_cache():
+        return torch.int8
+    return torch.float16 if is_a5_bf16_kv_enabled(vllm_config) else torch.float8_e4m3fn
+
+
+def dsa_indexer_uses_quant(vllm_config) -> bool:
+    """Return whether indexer KV is quantized (int8/FP8) rather than FP16."""
+    return not is_a5_bf16_kv_enabled(vllm_config)
+
+
+DSA_INDEXER_CMP_RATIO = 4
+
+
+def get_dsv4_indexer_key_seq_lens(seq_lens: torch.Tensor, cmp_ratio: int = DSA_INDEXER_CMP_RATIO) -> torch.Tensor:
+    """Return compressed indexer K lengths for unquantized lightning_indexer.
+
+    Quant lightning indexer consumes original sequence lengths plus
+    ``cmp_ratio``. The unquantized operator has no compression attribute, so
+    callers must pass the number of compressed keys actually stored in cache.
+    """
+    return torch.div(seq_lens, cmp_ratio, rounding_mode="floor")
+
+
+def select_dsa_indexer_fp16_topk(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    weights: torch.Tensor,
+    actual_seq_lengths_query: torch.Tensor,
+    actual_seq_lengths_key: torch.Tensor,
+    block_table: torch.Tensor,
+    index_topk: int,
+) -> torch.Tensor:
+    """Select indexer TopK from FP16 query/key caches."""
+    if query.dtype != key_cache.dtype:
+        query = query.to(dtype=key_cache.dtype)
+    topk_idxs, _ = torch.ops._C_ascend.npu_lightning_indexer(
+        query=query,
+        key=key_cache,
+        weights=weights.to(dtype=key_cache.dtype),
+        actual_seq_lengths_query=actual_seq_lengths_query,
+        actual_seq_lengths_key=get_dsv4_indexer_key_seq_lens(actual_seq_lengths_key),
+        block_table=block_table,
+        layout_query="TND",
+        layout_key="PA_BSND",
+        sparse_count=index_topk,
+        sparse_mode=3,
+    )
+    return topk_idxs
+
+
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
 
 @dataclass(frozen=True)
 class DsaAttnKvPlan:
-    """The attention-KV plan only; indexer KV remains independently FP8."""
+    """Attention-KV plan. Indexer KV follows the A5 BF16 switch as FP16."""
 
     uses_sparse_flash_mla: bool
     uses_kv_compress_epilog: bool
