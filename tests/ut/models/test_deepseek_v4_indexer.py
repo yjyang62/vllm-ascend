@@ -505,7 +505,10 @@ class TestIndexerOps:
         assert select_kwargs["key_cache"] is key_cache
         assert select_kwargs["weights"] is weights
         assert torch.equal(select_kwargs["actual_seq_lengths_query"], metadata.query_start_loc[1:])
-        assert select_kwargs["actual_seq_lengths_key"] is metadata.seq_lens
+        torch.testing.assert_close(
+            select_kwargs["actual_seq_lengths_key"],
+            torch.tensor([2], dtype=torch.int32),
+        )
         assert select_kwargs["block_table"] is metadata.block_table
         assert select_kwargs["index_topk"] == 3
 

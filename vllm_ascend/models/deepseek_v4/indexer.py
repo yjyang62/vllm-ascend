@@ -40,6 +40,7 @@ from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.attention.dsa_attn_kv_plan import (
+    dsa_fp16_indexer_key_seq_lens,
     dsa_indexer_uses_quant,
     get_dsa_attn_kv_plan,
     get_dsv4_indexer_kv_dtype,
@@ -227,7 +228,7 @@ class AscendIndexerOps:
                 key_cache=key_cache,
                 weights=weights,
                 actual_seq_lengths_query=metadata.query_start_loc[1:],
-                actual_seq_lengths_key=metadata.seq_lens,
+                actual_seq_lengths_key=dsa_fp16_indexer_key_seq_lens(metadata),
                 block_table=metadata.block_table,
                 index_topk=self.index_topk,
             )

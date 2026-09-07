@@ -11,7 +11,9 @@ import torch
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
+    DSA_INDEXER_FP16_SPARSE_MODE,
     dsa_indexer_uses_quant,
+    fill_dsv4_indexer_key_seq_lens,
     get_dsa_attn_kv_plan,
     get_dsv4_attn_kv_dtype,
     get_dsv4_indexer_key_seq_lens,
@@ -260,18 +262,25 @@ def test_dsv4_indexer_key_seq_lens_floor_divides_by_cmp_ratio():
     )
 
 
-def test_select_dsa_indexer_fp16_topk_passes_compressed_key_lens():
+def test_fill_dsv4_indexer_key_seq_lens_writes_persistent_prefix():
+    out = torch.full((4,), -1, dtype=torch.int32)
+    seq_lens = torch.tensor([8, 6], dtype=torch.int32)
+    filled = fill_dsv4_indexer_key_seq_lens(out, seq_lens)
+    torch.testing.assert_close(filled, torch.tensor([2, 1], dtype=torch.int32))
+    torch.testing.assert_close(out, torch.tensor([2, 1, -1, -1], dtype=torch.int32))
+
+
+def test_select_dsa_indexer_fp16_topk_uses_default_mask_and_compressed_key_lens():
     query = torch.ones((2, 4, 8), dtype=torch.bfloat16)
     key_cache = torch.ones((1, 4, 1, 8), dtype=torch.float16)
     weights = torch.ones((2, 4))
     actual_seq_lengths_query = torch.tensor([2], dtype=torch.int32)
-    actual_seq_lengths_key = torch.tensor([16], dtype=torch.int32)
+    actual_seq_lengths_key = torch.tensor([4], dtype=torch.int32)
     block_table = torch.tensor([[0]], dtype=torch.int32)
     topk = torch.tensor([[[1, 2]]], dtype=torch.int32)
 
-    with mock.patch.object(
-        torch.ops._C_ascend,
-        "npu_lightning_indexer",
+    with mock.patch(
+        "vllm_ascend.attention.dsa_attn_kv_plan.torch_npu.npu_lightning_indexer",
         create=True,
         return_value=(topk, None),
     ) as lightning:
@@ -293,6 +302,7 @@ def test_select_dsa_indexer_fp16_topk_passes_compressed_key_lens():
     assert kwargs["layout_query"] == "TND"
     assert kwargs["layout_key"] == "PA_BSND"
     assert kwargs["sparse_count"] == 2
+    assert kwargs["sparse_mode"] == DSA_INDEXER_FP16_SPARSE_MODE
     torch.testing.assert_close(
         kwargs["actual_seq_lengths_key"],
         torch.tensor([4], dtype=torch.int32),
