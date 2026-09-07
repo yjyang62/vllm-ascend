@@ -11,7 +11,7 @@ import torch
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
-    DSA_INDEXER_FP16_SPARSE_MODE,
+    DSA_INDEXER_UNQUANT_SPARSE_MODE,
     dsa_indexer_uses_quant,
     fill_dsv4_indexer_key_seq_lens,
     get_dsa_attn_kv_plan,
@@ -20,7 +20,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsv4_indexer_kv_dtype,
     is_a5_bf16_kv_enabled,
     resolve_dsv4_cache_dtype,
-    select_dsa_indexer_fp16_topk,
+    select_dsa_indexer_unquant_topk,
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -237,7 +237,7 @@ def test_a5_mode_survives_the_spec_path_rewrite():
     ("device_type", "cache_dtype", "expected_dtype"),
     [
         (AscendDeviceType.A3, "bfloat16", torch.int8),
-        (AscendDeviceType.A5, "bfloat16", torch.float16),
+        (AscendDeviceType.A5, "bfloat16", torch.bfloat16),
         (AscendDeviceType.A5, "auto", torch.float8_e4m3fn),
     ],
 )
@@ -270,9 +270,9 @@ def test_fill_dsv4_indexer_key_seq_lens_writes_persistent_prefix():
     torch.testing.assert_close(out, torch.tensor([2, 1, -1, -1], dtype=torch.int32))
 
 
-def test_select_dsa_indexer_fp16_topk_uses_default_mask_and_compressed_key_lens():
+def test_select_dsa_indexer_unquant_topk_uses_default_mask_and_compressed_key_lens():
     query = torch.ones((2, 4, 8), dtype=torch.bfloat16)
-    key_cache = torch.ones((1, 4, 1, 8), dtype=torch.float16)
+    key_cache = torch.ones((1, 4, 1, 8), dtype=torch.bfloat16)
     weights = torch.ones((2, 4))
     actual_seq_lengths_query = torch.tensor([2], dtype=torch.int32)
     actual_seq_lengths_key = torch.tensor([4], dtype=torch.int32)
@@ -284,7 +284,7 @@ def test_select_dsa_indexer_fp16_topk_uses_default_mask_and_compressed_key_lens(
         create=True,
         return_value=(topk, None),
     ) as lightning:
-        actual = select_dsa_indexer_fp16_topk(
+        actual = select_dsa_indexer_unquant_topk(
             query=query,
             key_cache=key_cache,
             weights=weights,
@@ -297,12 +297,12 @@ def test_select_dsa_indexer_fp16_topk_uses_default_mask_and_compressed_key_lens(
     assert actual is topk
     kwargs = lightning.call_args.kwargs
     assert kwargs["key"] is key_cache
-    assert kwargs["query"].dtype == torch.float16
-    assert kwargs["weights"].dtype == torch.float16
+    assert kwargs["query"].dtype == torch.bfloat16
+    assert kwargs["weights"].dtype == torch.bfloat16
     assert kwargs["layout_query"] == "TND"
     assert kwargs["layout_key"] == "PA_BSND"
     assert kwargs["sparse_count"] == 2
-    assert kwargs["sparse_mode"] == DSA_INDEXER_FP16_SPARSE_MODE
+    assert kwargs["sparse_mode"] == DSA_INDEXER_UNQUANT_SPARSE_MODE
     torch.testing.assert_close(
         kwargs["actual_seq_lengths_key"],
         torch.tensor([4], dtype=torch.int32),

@@ -40,12 +40,12 @@ from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.attention.dsa_attn_kv_plan import (
-    dsa_fp16_indexer_key_seq_lens,
     dsa_indexer_uses_quant,
+    dsa_unquant_indexer_key_seq_lens,
     get_dsa_attn_kv_plan,
     get_dsv4_indexer_kv_dtype,
     is_a5_bf16_kv_enabled,
-    select_dsa_indexer_fp16_topk,
+    select_dsa_indexer_unquant_topk,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
@@ -98,10 +98,10 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        use_fp16_indexer_kv = is_a5_bf16_kv_enabled(vllm_config)
+        use_bf16_indexer_kv = is_a5_bf16_kv_enabled(vllm_config)
         if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
-            self.dtype = torch.float16 if use_fp16_indexer_kv else torch.float8_e4m3fn
-            if not use_fp16_indexer_kv:
+            self.dtype = torch.bfloat16 if use_bf16_indexer_kv else torch.float8_e4m3fn
+            if not use_bf16_indexer_kv:
                 vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
@@ -116,7 +116,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             model_version="deepseek_v4",
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.cache_config.cache_dtype,
-            scale_dim=0 if use_fp16_indexer_kv or self.head_dim != 128 else 1,
+            scale_dim=0 if use_bf16_indexer_kv or self.head_dim != 128 else 1,
             scale_dtype=torch.float
             if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
             else torch.float16,
@@ -223,12 +223,12 @@ class AscendIndexerOps:
         metadata: typing.Any,
     ) -> torch.Tensor:
         if not self._uses_quant():
-            return select_dsa_indexer_fp16_topk(
+            return select_dsa_indexer_unquant_topk(
                 query=query,
                 key_cache=key_cache,
                 weights=weights,
                 actual_seq_lengths_query=metadata.query_start_loc[1:],
-                actual_seq_lengths_key=dsa_fp16_indexer_key_seq_lens(metadata),
+                actual_seq_lengths_key=dsa_unquant_indexer_key_seq_lens(metadata),
                 block_table=metadata.block_table,
                 index_topk=self.index_topk,
             )

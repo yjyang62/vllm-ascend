@@ -451,10 +451,10 @@ class TestIndexerOps:
         assert qli_kwargs["block_table"] is metadata.block_table
         assert qli_kwargs["metadata"] is metadata.qli_metadata
 
-    def test_fp16_scatter_then_lightning_indexer(self):
+    def test_bf16_scatter_then_lightning_indexer(self):
         vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16"))
         indexer_ops = AscendIndexerOps(index_topk=3, vllm_config=vllm_config)
-        key_cache = torch.empty((1, 1, 1, 4), dtype=torch.float16)
+        key_cache = torch.empty((1, 1, 1, 4), dtype=torch.bfloat16)
         query = torch.ones((2, 2, 4), dtype=torch.bfloat16)
         key = torch.ones((1, 1, 4), dtype=torch.bfloat16)
         weights = torch.ones((2, 2))
@@ -478,7 +478,7 @@ class TestIndexerOps:
                 return_value=plan,
             ),
             patch(
-                "vllm_ascend.models.deepseek_v4.indexer.select_dsa_indexer_fp16_topk",
+                "vllm_ascend.models.deepseek_v4.indexer.select_dsa_indexer_unquant_topk",
                 return_value=topk_indices,
             ) as select,
             patch.object(DeviceOperator, "indexer_quant_scatter") as quant_scatter,
@@ -497,7 +497,7 @@ class TestIndexerOps:
         assert actual is topk_indices
         quant_scatter.assert_not_called()
         scatter_key = plan.dsa_kv_compress_scatter.call_args.args[1]
-        assert scatter_key.dtype == torch.float16
+        assert scatter_key.dtype == torch.bfloat16
         plan.dsa_kv_compress_scatter.assert_called_once()
         select.assert_called_once()
         select_kwargs = select.call_args.kwargs
@@ -514,7 +514,7 @@ class TestIndexerOps:
 
 
 class TestIndexerCacheSpec:
-    def test_a5_fp16_drops_scale_dim_and_keeps_launch_cache_dtype(self):
+    def test_a5_bf16_drops_scale_dim_and_keeps_launch_cache_dtype(self):
         cache = AscendDeepseekV4IndexerCache.__new__(AscendDeepseekV4IndexerCache)
         cache.head_dim = 128
         cache.dtype = torch.float8_e4m3fn
@@ -534,13 +534,13 @@ class TestIndexerCacheSpec:
         ):
             spec = cache.get_kv_cache_spec(vllm_config)
 
-        assert spec.dtype == torch.float16
+        assert spec.dtype == torch.bfloat16
         assert spec.scale_dim == 0
         assert vllm_config.cache_config.cache_dtype == "bfloat16"
         assert spec.storage_block_size == 128
         assert spec.real_page_size_bytes == 32768
 
-    def test_a5_fp16_block_table_pads_indexer_page(self):
+    def test_a5_bf16_block_table_pads_indexer_page(self):
         from vllm_ascend.models.layer.attention.layer import get_dsv4_block_sizes
 
         with patch(

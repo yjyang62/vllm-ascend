@@ -210,7 +210,7 @@ def _build_kv_cache(self, forward_context):
     """Construct the KV cache tuple used by impl.forward().
 
     Compressed-cache devices use a 7-tuple with ``indexer_full_cache``. A5
-    FP16 indexer KV leaves the scale/full slots as ``None``.
+    BF16 indexer KV leaves the scale/full slots as ``None``.
     """
     compress_kv_cache = None
     swa_kv_cache = self.swa_cache_layer.kv_cache

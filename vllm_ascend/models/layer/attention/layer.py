@@ -42,7 +42,7 @@ def get_dsv4_block_sizes(use_a5_bf16_kv: bool = False):
         32: [[32, 32, 2, 4], [4224, 20480]],
     }
     _DSV4_BLOCK_SIZES_A5_BF16 = {
-        # t1 is the indexer page. FP16 indexer K is 2 bytes/element with no
+        # t1 is the indexer page. BF16 indexer K is 2 bytes/element with no
         # scale, so t1 is block * 128 * 2. t2 stays the BF16 attention page.
         128: [[128, 128, 8, 16], [32768, 131072]],
         64: [[64, 64, 4, 8], [16384, 65536]],
