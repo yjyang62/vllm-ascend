@@ -87,32 +87,42 @@ def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_ind
 
 
 @pytest.mark.parametrize(
-    ("device_type", "cache_dtype", "scale_dtype", "component_dims"),
+    ("device_type", "request_cache_dtype", "cache_dtype", "scale_dtype", "component_dims"),
     [
         (
             AscendDeviceType.A2,
+            "auto",
             torch.int8,
             torch.float16,
             (128, 1),
         ),
         (
             AscendDeviceType.A5,
+            "auto",
             torch.float8_e4m3fn,
             torch.float32,
             (128, 1, 132),
+        ),
+        (
+            AscendDeviceType.A5,
+            "bfloat16",
+            torch.float16,
+            None,
+            (128,),
         ),
     ],
 )
 def test_mrv2_initializes_dsv4_cache_only_layer(
     monkeypatch,
     device_type,
+    request_cache_dtype,
     cache_dtype,
     scale_dtype,
     component_dims,
 ):
     """Exercise DSV4 discovery, allocation, reshape, and binding as one flow."""
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
-    cache_config = SimpleNamespace(block_size=32, cache_dtype="auto")
+    cache_config = SimpleNamespace(block_size=32, cache_dtype=request_cache_dtype)
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
@@ -142,6 +152,10 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         lambda: get_hardware_profile(device_type),
     )
     monkeypatch.setattr(
+        "vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile",
+        lambda: get_hardware_profile(device_type),
+    )
+    monkeypatch.setattr(
         attn_utils,
         "get_current_hardware_profile",
         lambda: get_hardware_profile(device_type),
@@ -168,6 +182,8 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.block_size == cache_config.block_size * cache_layer.compress_ratio
     assert spec.storage_block_size == cache_config.block_size
+    assert spec.dtype == cache_dtype
+    assert spec.scale_dim == (0 if scale_dtype is None else 1)
     merged_spec = spec.merge([spec])
     assert merged_spec.compress_ratio == cache_layer.compress_ratio
     assert merged_spec.storage_block_size == cache_config.block_size
@@ -214,11 +230,15 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert [component.shape for component in cache_components] == [
         (num_blocks, spec.storage_block_size, 1, dim) for dim in component_dims
     ]
-    assert [component.dtype for component in cache_components] == [
-        cache_dtype,
-        scale_dtype,
-        *([cache_dtype] if device_type == AscendDeviceType.A5 else []),
-    ]
+    if scale_dtype is None:
+        expected_dtypes = [cache_dtype]
+    else:
+        expected_dtypes = [
+            cache_dtype,
+            scale_dtype,
+            *([cache_dtype] if device_type == AscendDeviceType.A5 else []),
+        ]
+    assert [component.dtype for component in cache_components] == expected_dtypes
     backing_storage = cache_components[0].untyped_storage().data_ptr()
     assert all(component.untyped_storage().data_ptr() == backing_storage for component in cache_components)
 
