@@ -677,6 +677,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_q: int,
         max_seqlen_kv: int,
     ) -> torch.Tensor:
+        if is_a5_bf16_kv_enabled(self.vllm_config):
+            return self.qli_metadata_buffer
         qli_metadata = metadata_cache.get("qli")
         if qli_metadata is None:
             qli_metadata = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
