@@ -535,3 +535,18 @@ class TestIndexerCacheSpec:
         assert spec.scale_dim == 0
         assert vllm_config.cache_config.cache_dtype == "bfloat16"
         assert spec.storage_block_size == 128
+        assert spec.real_page_size_bytes == 32768
+
+    def test_a5_fp16_block_table_pads_indexer_page(self):
+        from vllm_ascend.models.layer.attention.layer import get_dsv4_block_sizes
+
+        with patch(
+            "vllm_ascend.models.layer.attention.layer.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A5),
+        ):
+            table = get_dsv4_block_sizes(use_a5_bf16_kv=True)
+
+        assert table[128][0] == [128, 128, 8, 16]
+        assert table[128][1] == [32768, 131072]
+        assert table[64][1][0] == 16384
+        assert table[32][1][0] == 8192
