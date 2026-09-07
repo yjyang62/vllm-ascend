@@ -380,7 +380,7 @@ def test_build_req_metadata_defers_device_work_to_fixed_buffers(
         builder._build_qli_metadata.assert_not_called()
 
 
-def test_build_qli_metadata_skips_quant_op_for_fp16_indexer():
+def test_build_qli_metadata_skips_quant_op_for_unquant_indexer():
     builder = _make_builder()
     metadata_cache: dict[str, torch.Tensor] = {}
 

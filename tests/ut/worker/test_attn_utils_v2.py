@@ -106,7 +106,7 @@ def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_ind
         (
             AscendDeviceType.A5,
             "bfloat16",
-            torch.float16,
+            torch.bfloat16,
             None,
             (128,),
         ),

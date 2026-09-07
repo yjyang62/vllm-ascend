@@ -16,12 +16,12 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
-    dsa_fp16_indexer_key_seq_lens,
     dsa_indexer_uses_quant,
+    dsa_unquant_indexer_key_seq_lens,
     fill_dsv4_indexer_key_seq_lens,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
-    select_dsa_indexer_fp16_topk,
+    select_dsa_indexer_unquant_topk,
 )
 from vllm_ascend.attention.dsa_v1 import (
     _dsa_layout_kv,
@@ -2157,12 +2157,12 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         assert indexer_kv_scale_metadata.req_metadata is not None
         block_table = indexer_kv_scale_metadata.req_metadata.block_table
         if is_a5_bf16_kv_enabled(self.vllm_config):
-            return select_dsa_indexer_fp16_topk(
+            return select_dsa_indexer_unquant_topk(
                 query=q,
                 key_cache=indexer_k_cache,
                 weights=weights,
                 actual_seq_lengths_query=actual_seq_lengths_query[1:],
-                actual_seq_lengths_key=dsa_fp16_indexer_key_seq_lens(indexer_kv_scale_metadata.req_metadata),
+                actual_seq_lengths_key=dsa_unquant_indexer_key_seq_lens(indexer_kv_scale_metadata.req_metadata),
                 block_table=block_table,
                 index_topk=self.index_topk,
             )

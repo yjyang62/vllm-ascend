@@ -60,16 +60,16 @@ def get_dsv4_attn_kv_dtype(vllm_config) -> torch.dtype:
 def get_dsv4_indexer_kv_dtype(vllm_config) -> torch.dtype:
     """Return the indexer K cache dtype.
 
-    A5 BF16 SparseFlashMla stores indexer KV in float16. A5 ``auto`` stays
+    A5 BF16 SparseFlashMla stores indexer KV in bfloat16. A5 ``auto`` stays
     FP8, and non-A5 keeps the int8 lightning-indexer cache.
     """
     if not _supports_dsv4_compressed_cache():
         return torch.int8
-    return torch.float16 if is_a5_bf16_kv_enabled(vllm_config) else torch.float8_e4m3fn
+    return torch.bfloat16 if is_a5_bf16_kv_enabled(vllm_config) else torch.float8_e4m3fn
 
 
 def dsa_indexer_uses_quant(vllm_config) -> bool:
-    """Return whether indexer KV is quantized (int8/FP8) rather than FP16."""
+    """Return whether indexer KV is quantized (int8/FP8) rather than BF16."""
     return not is_a5_bf16_kv_enabled(vllm_config)
 
 
@@ -78,7 +78,7 @@ DSA_INDEXER_CMP_RATIO = 4
 # query_len as original tokens and key_len as compressed slots, so prefill
 # validS2Len becomes (S/4 - S) and TopK collapses. defaultMask (mode 0) scores
 # every stored compressed key; SparseFlashMla still applies cmp_ratio causal.
-DSA_INDEXER_FP16_SPARSE_MODE = 0
+DSA_INDEXER_UNQUANT_SPARSE_MODE = 0
 
 
 def get_dsv4_indexer_key_seq_lens(seq_lens: torch.Tensor, cmp_ratio: int = DSA_INDEXER_CMP_RATIO) -> torch.Tensor:
@@ -98,7 +98,7 @@ def fill_dsv4_indexer_key_seq_lens(out: torch.Tensor, seq_lens: torch.Tensor) ->
     return out[:n]
 
 
-def dsa_fp16_indexer_key_seq_lens(metadata) -> torch.Tensor:
+def dsa_unquant_indexer_key_seq_lens(metadata) -> torch.Tensor:
     """Return compressed indexer K lengths, preferring the graph-stable buffer."""
     key_seq_lens = getattr(metadata, "indexer_key_seq_lens", None)
     if key_seq_lens is not None:
@@ -114,7 +114,7 @@ def _unquant_lightning_indexer(**kwargs):
     return torch.ops._C_ascend.npu_lightning_indexer(**kwargs)
 
 
-def select_dsa_indexer_fp16_topk(
+def select_dsa_indexer_unquant_topk(
     query: torch.Tensor,
     key_cache: torch.Tensor,
     weights: torch.Tensor,
@@ -123,7 +123,7 @@ def select_dsa_indexer_fp16_topk(
     block_table: torch.Tensor,
     index_topk: int,
 ) -> torch.Tensor:
-    """Select indexer TopK from FP16 query/key caches.
+    """Select indexer TopK from unquantized (BF16) query/key caches.
 
     ``actual_seq_lengths_key`` must already be compressed (seq_len // 4).
     Do not divide inside this call: ACLGraph would otherwise capture a fresh
@@ -141,7 +141,7 @@ def select_dsa_indexer_fp16_topk(
         layout_query="TND",
         layout_key="PA_BSND",
         sparse_count=index_topk,
-        sparse_mode=DSA_INDEXER_FP16_SPARSE_MODE,
+        sparse_mode=DSA_INDEXER_UNQUANT_SPARSE_MODE,
     )
     return topk_idxs
 
@@ -152,7 +152,7 @@ DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
 @dataclass(frozen=True)
 class DsaAttnKvPlan:
-    """Attention-KV plan. Indexer KV follows the A5 BF16 switch as FP16."""
+    """Attention-KV plan. Indexer KV follows the A5 BF16 switch as BF16."""
 
     uses_sparse_flash_mla: bool
     uses_kv_compress_epilog: bool
