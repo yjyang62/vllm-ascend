@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 
+from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled
 from vllm_ascend.models.layer.attention.layer import DSAAttention
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -209,7 +210,12 @@ direct_register_custom_op(
 
 
 def _build_kv_cache(self, forward_context):
-    """Construct the 6-tuple KV cache used by impl.forward()."""
+    """Construct the KV cache tuple used by impl.forward().
+
+    A5 uses a 7-tuple with ``indexer_full_cache``; A5 BF16 leaves the
+    indexer scale/full slots as ``None`` because indexer K is stored as
+    a single bfloat16 tensor.
+    """
     compress_kv_cache = None
     swa_kv_cache = self.swa_cache_layer.kv_cache
     state_cache = None
@@ -226,10 +232,14 @@ def _build_kv_cache(self, forward_context):
             compress_kv_cache = compress_kv_cache[virtual_engine]
     if self.compress_ratio == 4:
         indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
+        unfolded_indexer_cache = unfold_kvcache(self.indexer.k_cache.kv_cache)
         if get_ascend_device_type() in {AscendDeviceType.A5}:
-            indexer_k_cache, indexer_scale_cache, indexer_full_cache = unfold_kvcache(self.indexer.k_cache.kv_cache)
+            if is_a5_bf16_kv_enabled(self.indexer.vllm_config):
+                indexer_k_cache = unfolded_indexer_cache
+            else:
+                indexer_k_cache, indexer_scale_cache, indexer_full_cache = unfolded_indexer_cache
         else:
-            indexer_k_cache, indexer_scale_cache = unfold_kvcache(self.indexer.k_cache.kv_cache)
+            indexer_k_cache, indexer_scale_cache = unfolded_indexer_cache
 
     if get_ascend_device_type() in {AscendDeviceType.A5}:
         kv_cache = tuple(

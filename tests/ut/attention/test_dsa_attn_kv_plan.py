@@ -11,10 +11,14 @@ import torch
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
+    dsa_indexer_uses_quant,
     get_dsa_attn_kv_plan,
     get_dsv4_attn_kv_dtype,
+    get_dsv4_indexer_key_seq_lens,
+    get_dsv4_indexer_kv_dtype,
     is_a5_bf16_kv_enabled,
     resolve_dsv4_cache_dtype,
+    select_dsa_indexer_bf16_topk,
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
 from vllm_ascend.utils import AscendDeviceType
@@ -26,6 +30,7 @@ _DSA_C_ASCEND_OPS = (
     "npu_kv_quant_sparse_attn_sharedkv_metadata",
     "kv_compress_epilog",
     "npu_scatter_nd_update_v2",
+    "npu_lightning_indexer",
 )
 
 
@@ -148,3 +153,71 @@ def test_a5_mode_survives_the_spec_path_rewrite():
 
         pinned = resolve_dsv4_cache_dtype("bfloat16", "bfloat16")
         assert is_a5_bf16_kv_enabled(_cache_config(pinned))
+
+
+@pytest.mark.parametrize(
+    ("device_type", "cache_dtype", "expected_dtype"),
+    [
+        (AscendDeviceType.A3, "bfloat16", torch.int8),
+        (AscendDeviceType.A5, "bfloat16", torch.bfloat16),
+        (AscendDeviceType.A5, "auto", torch.float8_e4m3fn),
+    ],
+)
+def test_dsv4_indexer_kv_dtype_follows_a5_bf16_switch(device_type, cache_dtype, expected_dtype):
+    with _on(device_type):
+        assert get_dsv4_indexer_kv_dtype(_cache_config(cache_dtype)) == expected_dtype
+
+
+def test_dsa_indexer_uses_quant_only_when_not_a5_bf16():
+    with _on(AscendDeviceType.A5):
+        assert not dsa_indexer_uses_quant(_cache_config("bfloat16"))
+        assert dsa_indexer_uses_quant(_cache_config("auto"))
+    with _on(AscendDeviceType.A3):
+        assert dsa_indexer_uses_quant(_cache_config("bfloat16"))
+
+
+def test_dsv4_indexer_key_seq_lens_floor_divides_by_cmp_ratio():
+    seq_lens = torch.tensor([0, 3, 4, 5, 8], dtype=torch.int32)
+    torch.testing.assert_close(
+        get_dsv4_indexer_key_seq_lens(seq_lens),
+        torch.tensor([0, 0, 1, 1, 2], dtype=torch.int32),
+    )
+
+
+def test_select_dsa_indexer_bf16_topk_passes_compressed_key_lens():
+    query = torch.ones((2, 4, 8), dtype=torch.bfloat16)
+    key_cache = torch.ones((1, 4, 1, 8), dtype=torch.bfloat16)
+    weights = torch.ones((2, 4))
+    actual_seq_lengths_query = torch.tensor([2], dtype=torch.int32)
+    actual_seq_lengths_key = torch.tensor([16], dtype=torch.int32)
+    block_table = torch.tensor([[0]], dtype=torch.int32)
+    topk = torch.tensor([[[1, 2]]], dtype=torch.int32)
+
+    with mock.patch.object(
+        torch.ops._C_ascend,
+        "npu_lightning_indexer",
+        create=True,
+        return_value=(topk, None),
+    ) as lightning:
+        actual = select_dsa_indexer_bf16_topk(
+            query=query,
+            key_cache=key_cache,
+            weights=weights,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_key=actual_seq_lengths_key,
+            block_table=block_table,
+            index_topk=2,
+        )
+
+    assert actual is topk
+    kwargs = lightning.call_args.kwargs
+    assert kwargs["query"] is query
+    assert kwargs["key"] is key_cache
+    assert kwargs["layout_query"] == "TND"
+    assert kwargs["layout_key"] == "PA_BSND"
+    assert kwargs["sparse_count"] == 2
+    assert kwargs["weights"].dtype == torch.bfloat16
+    torch.testing.assert_close(
+        kwargs["actual_seq_lengths_key"],
+        torch.tensor([4], dtype=torch.int32),
+    )

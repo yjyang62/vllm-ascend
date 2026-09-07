@@ -227,6 +227,31 @@ def test_build_qli_metadata_parameters_cache_and_builder_buffer():
     assert call_kwargs["cmp_ratio"] == 4
 
 
+def test_build_qli_metadata_skips_quant_op_for_a5_bf16():
+    builder = _make_builder()
+    metadata_cache: dict[str, torch.Tensor] = {}
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=True),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_vllm_quant_lightning_indexer_metadata",
+            create=True,
+        ) as metadata_op,
+    ):
+        result = builder._build_qli_metadata(
+            metadata_cache=metadata_cache,
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            seq_lens=torch.tensor([8], dtype=torch.int32),
+            max_seqlen_q=2,
+            max_seqlen_kv=8,
+        )
+
+    metadata_op.assert_not_called()
+    assert result is builder.qli_metadata_buffer
+    assert "qli" not in metadata_cache
+
+
 @pytest.mark.parametrize("num_prefills", [0, 1])
 def test_build_req_metadata_uses_for_prefill_and_decode(
     num_prefills: int,

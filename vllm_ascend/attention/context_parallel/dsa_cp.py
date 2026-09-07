@@ -17,6 +17,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
+    select_dsa_indexer_bf16_topk,
 )
 from vllm_ascend.attention.dsa_v1 import (
     _dsa_layout_kv,
@@ -1005,7 +1006,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         return self.req_sas_metadata[:1024]
 
     def _build_qli_metadata(self, query_start_loc, seq_lens, seq_lens_q, num_reqs):
-        if self.compressor_ratio != 4:
+        if self.compressor_ratio != 4 or is_a5_bf16_kv_enabled(self.vllm_config):
             return None
 
         cache_key = "cp_qli"
@@ -1846,6 +1847,13 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         if self.indexer.compressor.rotate:
             kv = rotate_activation(kv, indexer_kv_scale_metadata.hadamard)
 
+        if is_a5_bf16_kv_enabled(self.vllm_config):
+            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
+                indexer_k_cache,
+                kv,
+                indexer_slot_mapping,
+            )
+            return
         _, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
             kv,
             indexer_k_cache,
@@ -1902,11 +1910,22 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         q = rotate_activation(q, indexer_kv_scale_metadata.hadamard)
         weights = self.weights_proj(x) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
 
+        assert indexer_kv_scale_metadata.req_metadata is not None
+        block_table = indexer_kv_scale_metadata.req_metadata.block_table
+        if is_a5_bf16_kv_enabled(self.vllm_config):
+            return select_dsa_indexer_bf16_topk(
+                query=q,
+                key_cache=indexer_k_cache,
+                weights=weights,
+                actual_seq_lengths_query=actual_seq_lengths_query[1:],
+                actual_seq_lengths_key=actual_seq_lengths_key,
+                block_table=block_table,
+                index_topk=self.index_topk,
+            )
+
         q, q_scale = DeviceOperator.indexer_quantize_query(q)
 
-        assert indexer_kv_scale_metadata.req_metadata is not None
         qli_metadata = indexer_kv_scale_metadata.req_metadata.qli_metadata
-        block_table = indexer_kv_scale_metadata.req_metadata.block_table
         topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
             query=q,
             key=indexer_k_cache,

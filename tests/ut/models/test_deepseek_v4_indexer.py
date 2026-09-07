@@ -11,6 +11,7 @@ import torch
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
+    AscendDeepseekV4IndexerCache,
     AscendIndexerMetadata,
     AscendIndexerOps,
     DeepseekV4Indexer,
@@ -19,6 +20,7 @@ from vllm_ascend.models.deepseek_v4.indexer import (
     hadamard_scale,
     rotate_activation,
 )
+from vllm_ascend.utils import AscendDeviceType
 
 
 def _make_indexer(topk_indices_buffer: torch.Tensor | None) -> DeepseekV4Indexer:
@@ -447,3 +449,86 @@ class TestIndexerOps:
         assert qli_kwargs["actual_seq_lengths_key"] is metadata.seq_lens
         assert qli_kwargs["block_table"] is metadata.block_table
         assert qli_kwargs["metadata"] is metadata.qli_metadata
+
+    def test_bf16_scatter_then_lightning_indexer(self):
+        vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16"))
+        indexer_ops = AscendIndexerOps(index_topk=3, vllm_config=vllm_config)
+        key_cache = torch.empty((1, 1, 1, 4), dtype=torch.bfloat16)
+        query = torch.ones((2, 2, 4), dtype=torch.bfloat16)
+        key = torch.ones((1, 1, 4), dtype=torch.bfloat16)
+        weights = torch.ones((2, 2))
+        slot_mapping = torch.zeros((1, 2), dtype=torch.int32)
+        topk_indices = torch.tensor([[[1, 2, 3]]], dtype=torch.int32)
+        metadata = SimpleNamespace(
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            seq_lens=torch.tensor([8], dtype=torch.int32),
+            block_table=torch.tensor([[0]], dtype=torch.int32),
+            qli_metadata=torch.empty(0, dtype=torch.int32),
+        )
+        plan = MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.dsa_indexer_uses_quant",
+                return_value=False,
+            ),
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.get_dsa_attn_kv_plan",
+                return_value=plan,
+            ),
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.select_dsa_indexer_bf16_topk",
+                return_value=topk_indices,
+            ) as select,
+            patch.object(DeviceOperator, "indexer_quant_scatter") as quant_scatter,
+        ):
+            actual = indexer_ops.quantize_update_cache_and_select_topk(
+                query,
+                key,
+                weights,
+                key_cache,
+                None,
+                None,
+                slot_mapping,
+                metadata,
+            )
+
+        assert actual is topk_indices
+        quant_scatter.assert_not_called()
+        plan.dsa_kv_compress_scatter.assert_called_once_with(key_cache, key, slot_mapping)
+        select.assert_called_once()
+        select_kwargs = select.call_args.kwargs
+        assert select_kwargs["query"] is query
+        assert select_kwargs["key_cache"] is key_cache
+        assert select_kwargs["weights"] is weights
+        assert torch.equal(select_kwargs["actual_seq_lengths_query"], metadata.query_start_loc[1:])
+        assert select_kwargs["actual_seq_lengths_key"] is metadata.seq_lens
+        assert select_kwargs["block_table"] is metadata.block_table
+        assert select_kwargs["index_topk"] == 3
+
+
+class TestIndexerCacheSpec:
+    def test_a5_bf16_drops_scale_dim_and_keeps_bfloat16(self):
+        cache = AscendDeepseekV4IndexerCache.__new__(AscendDeepseekV4IndexerCache)
+        cache.head_dim = 128
+        cache.dtype = torch.float8_e4m3fn
+        cache.compress_ratio = 4
+        cache.cache_config = SimpleNamespace(block_size=128, cache_dtype="bfloat16")
+        vllm_config = SimpleNamespace(cache_config=cache.cache_config)
+
+        with (
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.get_ascend_device_type",
+                return_value=AscendDeviceType.A5,
+            ),
+            patch(
+                "vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type",
+                return_value=AscendDeviceType.A5,
+            ),
+        ):
+            spec = cache.get_kv_cache_spec(vllm_config)
+
+        assert spec.dtype == torch.bfloat16
+        assert spec.scale_dim == 0
+        assert vllm_config.cache_config.cache_dtype == "bfloat16"
+        assert spec.storage_block_size == 128
