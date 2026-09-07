@@ -74,6 +74,11 @@ def dsa_indexer_uses_quant(vllm_config) -> bool:
 
 
 DSA_INDEXER_CMP_RATIO = 4
+# Unquant lightning_indexer has no cmp_ratio. rightDownCausal (mode 3) treats
+# query_len as original tokens and key_len as compressed slots, so prefill
+# validS2Len becomes (S/4 - S) and TopK collapses. defaultMask (mode 0) scores
+# every stored compressed key; SparseFlashMla still applies cmp_ratio causal.
+DSA_INDEXER_FP16_SPARSE_MODE = 0
 
 
 def get_dsv4_indexer_key_seq_lens(seq_lens: torch.Tensor, cmp_ratio: int = DSA_INDEXER_CMP_RATIO) -> torch.Tensor:
@@ -86,6 +91,29 @@ def get_dsv4_indexer_key_seq_lens(seq_lens: torch.Tensor, cmp_ratio: int = DSA_I
     return torch.div(seq_lens, cmp_ratio, rounding_mode="floor")
 
 
+def fill_dsv4_indexer_key_seq_lens(out: torch.Tensor, seq_lens: torch.Tensor) -> torch.Tensor:
+    """Write compressed indexer K lengths into a persistent ACLGraph buffer."""
+    n = seq_lens.shape[0]
+    out[:n].copy_(get_dsv4_indexer_key_seq_lens(seq_lens))
+    return out[:n]
+
+
+def dsa_fp16_indexer_key_seq_lens(metadata) -> torch.Tensor:
+    """Return compressed indexer K lengths, preferring the graph-stable buffer."""
+    key_seq_lens = getattr(metadata, "indexer_key_seq_lens", None)
+    if key_seq_lens is not None:
+        return key_seq_lens
+    return get_dsv4_indexer_key_seq_lens(metadata.seq_lens)
+
+
+def _unquant_lightning_indexer(**kwargs):
+    """Prefer torch_npu on A5; fall back to the custom op for tests/A3 stubs."""
+    op = getattr(torch_npu, "npu_lightning_indexer", None)
+    if callable(op):
+        return op(**kwargs)
+    return torch.ops._C_ascend.npu_lightning_indexer(**kwargs)
+
+
 def select_dsa_indexer_fp16_topk(
     query: torch.Tensor,
     key_cache: torch.Tensor,
@@ -95,20 +123,25 @@ def select_dsa_indexer_fp16_topk(
     block_table: torch.Tensor,
     index_topk: int,
 ) -> torch.Tensor:
-    """Select indexer TopK from FP16 query/key caches."""
+    """Select indexer TopK from FP16 query/key caches.
+
+    ``actual_seq_lengths_key`` must already be compressed (seq_len // 4).
+    Do not divide inside this call: ACLGraph would otherwise capture a fresh
+    tensor instead of the persistent metadata buffer.
+    """
     if query.dtype != key_cache.dtype:
         query = query.to(dtype=key_cache.dtype)
-    topk_idxs, _ = torch.ops._C_ascend.npu_lightning_indexer(
+    topk_idxs, _ = _unquant_lightning_indexer(
         query=query,
         key=key_cache,
         weights=weights.to(dtype=key_cache.dtype),
         actual_seq_lengths_query=actual_seq_lengths_query,
-        actual_seq_lengths_key=get_dsv4_indexer_key_seq_lens(actual_seq_lengths_key),
+        actual_seq_lengths_key=actual_seq_lengths_key,
         block_table=block_table,
         layout_query="TND",
         layout_key="PA_BSND",
         sparse_count=index_topk,
-        sparse_mode=3,
+        sparse_mode=DSA_INDEXER_FP16_SPARSE_MODE,
     )
     return topk_idxs
 

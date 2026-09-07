@@ -16,7 +16,9 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
+    dsa_fp16_indexer_key_seq_lens,
     dsa_indexer_uses_quant,
+    fill_dsv4_indexer_key_seq_lens,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
     select_dsa_indexer_fp16_topk,
@@ -138,6 +140,7 @@ class AscendDSAReqMetadata:
     ori_win_left: int | None = None
     ori_win_right: int = 0
     dspark_swa_indices: torch.Tensor | None = None
+    indexer_key_seq_lens: torch.Tensor | None = None
 
 
 @dataclass
@@ -249,6 +252,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 ),
             )
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
+        self.indexer_key_seq_lens = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.req_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self.req_qli_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self._device_metadata_enabled = False
@@ -715,6 +719,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
+            indexer_key_seq_lens=(
+                fill_dsv4_indexer_key_seq_lens(self.indexer_key_seq_lens, local_seq_lens)
+                if self.compressor_ratio == 4
+                else None
+            ),
         )
 
     def _num_compressor_metadata_rows(
@@ -1020,6 +1029,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_metadata=qli_metadata,
             device_local_metadata_group_id=device_local_metadata_group_id,
             cu_cmp_seqlen_list=cu_cmp_seqlens,
+            indexer_key_seq_lens=(
+                fill_dsv4_indexer_key_seq_lens(self.indexer_key_seq_lens, local_seq_lens)
+                if self.compressor_ratio == 4
+                else None
+            ),
         )
         if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
             assert num_compressed_tokens is not None
@@ -2148,7 +2162,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 key_cache=indexer_k_cache,
                 weights=weights,
                 actual_seq_lengths_query=actual_seq_lengths_query[1:],
-                actual_seq_lengths_key=actual_seq_lengths_key,
+                actual_seq_lengths_key=dsa_fp16_indexer_key_seq_lens(indexer_kv_scale_metadata.req_metadata),
                 block_table=block_table,
                 index_topk=self.index_topk,
             )

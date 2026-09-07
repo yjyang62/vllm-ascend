@@ -23,6 +23,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     dsa_indexer_uses_quant,
+    fill_dsv4_indexer_key_seq_lens,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
 )
@@ -357,6 +358,7 @@ class AscendDSAReqMetadata:
     ori_win_right: int | None = None
     dspark_swa_indices: torch.Tensor | None = None
     vision_swa_indices: torch.Tensor | None = None
+    indexer_key_seq_lens: torch.Tensor | None = None
 
 
 @dataclass
@@ -669,6 +671,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.qli_metadata_buffer: torch.Tensor = torch.zeros(
             DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
+        self.indexer_key_seq_lens = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self._device_metadata_enabled = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
@@ -1024,6 +1027,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         dspark_swa_indices = None
         vision_swa_indices = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
+        indexer_key_seq_lens = (
+            fill_dsv4_indexer_key_seq_lens(self.indexer_key_seq_lens, seq_lens) if self.compressor_ratio == 4 else None
+        )
         if not has_prefill and not common_attn_metadata.causal:
             # DSpark non-causal parallel drafting: every draft query attends to
             # the trailing context window plus the whole current draft block.
@@ -1178,6 +1184,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
             vision_swa_indices=vision_swa_indices,
+            indexer_key_seq_lens=indexer_key_seq_lens,
         )
         if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
             assert num_compressed_tokens is not None

@@ -347,6 +347,13 @@ def test_build_req_metadata_defers_device_work_to_fixed_buffers(
 
     assert req_metadata.sas_metadata is builder.sas_metadata_buffer
     assert (req_metadata.qli_metadata is builder.qli_metadata_buffer) is (compressor_ratio == 4)
+    if compressor_ratio == 4:
+        torch.testing.assert_close(
+            req_metadata.indexer_key_seq_lens,
+            torch.tensor([2, 1], dtype=torch.int32),
+        )
+    else:
+        assert req_metadata.indexer_key_seq_lens is None
     builder._build_sas_metadata.assert_not_called()
     builder._build_qli_metadata.assert_not_called()
 
