@@ -188,7 +188,7 @@ def _scatter_index_cache(
         return
 
     flat_cache = cache.view(-1, cache.shape[-1])
-    torch.ops._C_ascend.npu_scatter_nd_update_v2(
+    torch.ops._C_ascend.npu_scatter_nd_update_sk(
         flat_cache,
         slots.view(-1, 1),
         updates,
@@ -982,8 +982,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self._enable_eagle3_aux_hidden_states = (
-            vllm_config.speculative_config is not None and vllm_config.speculative_config.method == "eagle3"
+        spec_config = vllm_config.speculative_config
+        self._enable_eagle3_aux_hidden_states = spec_config is not None and spec_config.method in (
+            "eagle3",
+            "extract_hidden_states",
+            "dflash",
+            "dspark",
         )
 
         self.vocab_size = text_config.vocab_size
