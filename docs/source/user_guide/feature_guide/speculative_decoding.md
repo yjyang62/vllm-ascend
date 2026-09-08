@@ -456,7 +456,8 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 > `HiddenStateCacheSpec`. After
 > [vLLM #51718](https://github.com/vllm-project/vllm/pull/51718) (0828 pin),
 > hidden-state layers keep private `[B, H, N, C]` buffers so they cannot overlay
-> the standardized hybrid Attention/Mamba backing.
+> the standardized hybrid Attention/Mamba backing or DeepSeek-V4 shared-tuple
+> storage.
 
 - Offline inference
 

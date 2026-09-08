@@ -796,6 +796,87 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
     assert cache.dtype == dtype
 
 
+@pytest.mark.parametrize("dump_tensor_matches_mla_size", [False, True])
+def test_mrv2_dsv4_keeps_hidden_state_cache_off_shared_backing(monkeypatch, dump_tensor_matches_mla_size):
+    """DSV4 shared-tuple backing must not overlay extract_hidden_states dumps.
+
+    Dump descriptors often have a different tensor.size than MLA pages, which
+    used to fail the DSV4 uniqueness check. Even when sizes match, dumps are
+    live at the same time as MLA and must not share storage.
+    """
+    from vllm.model_executor.models.extract_hidden_states import (
+        CacheOnlyAttentionBackend,
+    )
+
+    mla_name = "model.layers.0.self_attn.attn"
+    dump_name = "draft.cache_only_layers.36"
+    mla_spec = _make_dsv4_mla_spec(block_size=32, compress_ratio=4)
+    dump_spec = HiddenStateCacheSpec(
+        block_size=16,
+        num_kv_heads=3,
+        head_size=8,
+        dtype=torch.bfloat16,
+    )
+    num_blocks = 4
+    mla_size = num_blocks * mla_spec.page_size_bytes
+    dump_size = num_blocks * dump_spec.page_size_bytes
+    assert dump_size != mla_size
+    dump_tensor_size = mla_size if dump_tensor_matches_mla_size else dump_size
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(mla_size, [mla_name], mla_spec.page_size_bytes),
+            _make_kv_cache_tensor(dump_tensor_size, [dump_name], dump_spec.page_size_bytes),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=[mla_name], kv_cache_spec=mla_spec),
+            KVCacheGroupSpec(layer_names=[dump_name], kv_cache_spec=dump_spec),
+        ],
+    )
+
+    monkeypatch.setattr(
+        attn_utils,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(
+            kv_transfer_config=None,
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(compress_ratios=[4])),
+            quant_config=None,
+            cache_config=SimpleNamespace(cache_dtype="auto"),
+        ),
+    )
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _cfg: False)
+
+    raw = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device="cpu")
+    mla_raw = raw[mla_name]
+    dump_raw = raw[dump_name]
+    assert isinstance(mla_raw, torch.Tensor)
+    assert isinstance(dump_raw, torch.Tensor)
+    assert dump_raw.numel() == dump_size
+    assert mla_raw.untyped_storage().data_ptr() != dump_raw.untyped_storage().data_ptr()
+
+    attn_groups = [
+        AttentionGroup(
+            backend=CacheOnlyAttentionBackend,
+            layer_names=[dump_name],
+            kv_cache_spec=dump_spec,
+            kv_cache_group_id=1,
+        )
+    ]
+    reshaped = attn_utils._reshape_kv_cache_v2(
+        attn_groups=attn_groups,
+        kv_cache_raw_tensors=raw,
+        cache_dtype="auto",
+        kernel_block_sizes=[mla_spec.block_size, dump_spec.block_size],
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )
+    cache = reshaped[dump_name]
+    assert isinstance(cache, torch.Tensor)
+    assert cache.shape == (num_blocks, dump_spec.num_kv_heads, dump_spec.block_size, dump_spec.head_size)
+    assert cache.dtype == dump_spec.dtype
+
+
 class _PrefillStateBuilder:
     def build(self, common_prefix_len, common_attn_metadata):
         assert common_prefix_len == 0

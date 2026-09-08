@@ -4410,55 +4410,69 @@ class NPUModelRunner(GPUModelRunner):
         # allocate exactly once and expose the contiguous per-layer regions
         # consumed by the existing page-strided DSV4 reshape path.
         if is_dsv4_main and kv_cache_config.kv_cache_tensors:
-            tensor_sizes = {
-                descriptor.size
+            # extract_hidden_states dumps stay off the shared DSV4 backing:
+            # they are live at the same time as MLA pages. Dump-only
+            # descriptors may also have a different tensor.size.
+            dsv4_descriptors = [
+                descriptor
                 for descriptor in kv_cache_config.kv_cache_tensors
-            }
-            if len(tensor_sizes) != 1:
-                raise ValueError(
-                    "DeepSeek-V4 KV cache descriptors must share one backing "
-                    "allocation."
+                if any(
+                    not is_hidden_state_cache_spec(layer_kv_cache_spec[layer_name])
+                    for layer_name in get_kv_cache_tensor_layers(descriptor)
                 )
-            backing_size = tensor_sizes.pop()
-            dsv4_regions: list[tuple[str, int, int]] = []
-            for descriptor in kv_cache_config.kv_cache_tensors:
-                for layer_idx, layer_name in enumerate(
-                    get_kv_cache_tensor_layers(descriptor)
-                ):
-                    spec = layer_kv_cache_spec[layer_name]
-                    if descriptor.block_stride != spec.page_size_bytes:
-                        raise ValueError(
-                            "DeepSeek-V4 requires contiguous per-layer pages, "
-                            f"but {layer_name} has block_stride="
-                            f"{descriptor.block_stride} and page_size="
-                            f"{spec.page_size_bytes}."
-                        )
-                    layer_size = (
-                        kv_cache_config.num_blocks * spec.page_size_bytes
+            ]
+            if dsv4_descriptors:
+                tensor_sizes = {
+                    descriptor.size
+                    for descriptor in dsv4_descriptors
+                }
+                if len(tensor_sizes) != 1:
+                    raise ValueError(
+                        "DeepSeek-V4 KV cache descriptors must share one backing "
+                        "allocation."
                     )
-                    start = (
-                        descriptor.offset
-                        + layer_idx * descriptor.layer_stride
-                    )
-                    if start < 0 or start + layer_size > backing_size:
-                        raise ValueError(
-                            f"DeepSeek-V4 KV cache view for {layer_name} "
-                            "exceeds the shared backing allocation."
+                backing_size = tensor_sizes.pop()
+                dsv4_regions: list[tuple[str, int, int]] = []
+                for descriptor in dsv4_descriptors:
+                    for layer_idx, layer_name in enumerate(
+                        get_kv_cache_tensor_layers(descriptor)
+                    ):
+                        spec = layer_kv_cache_spec[layer_name]
+                        if is_hidden_state_cache_spec(spec):
+                            continue
+                        if descriptor.block_stride != spec.page_size_bytes:
+                            raise ValueError(
+                                "DeepSeek-V4 requires contiguous per-layer pages, "
+                                f"but {layer_name} has block_stride="
+                                f"{descriptor.block_stride} and page_size="
+                                f"{spec.page_size_bytes}."
+                            )
+                        layer_size = (
+                            kv_cache_config.num_blocks * spec.page_size_bytes
                         )
-                    dsv4_regions.append((layer_name, start, layer_size))
+                        start = (
+                            descriptor.offset
+                            + layer_idx * descriptor.layer_stride
+                        )
+                        if start < 0 or start + layer_size > backing_size:
+                            raise ValueError(
+                                f"DeepSeek-V4 KV cache view for {layer_name} "
+                                "exceeds the shared backing allocation."
+                            )
+                        dsv4_regions.append((layer_name, start, layer_size))
 
-            if not dsv4_regions:
-                raise ValueError(
-                    "DeepSeek-V4 KV cache config has no materializable layers."
+                if not dsv4_regions:
+                    raise ValueError(
+                        "DeepSeek-V4 KV cache config has no materializable layers."
+                    )
+                backing = self._allocate_int8_cache_tensor(
+                    backing_size,
+                    alignment,
                 )
-            backing = self._allocate_int8_cache_tensor(
-                backing_size,
-                alignment,
-            )
-            for layer_name, start, layer_size in dsv4_regions:
-                kv_cache_raw_tensors[layer_name] = backing[
-                    start : start + layer_size
-                ]
+                for layer_name, start, layer_size in dsv4_regions:
+                    kv_cache_raw_tensors[layer_name] = backing[
+                        start : start + layer_size
+                    ]
 
         # The standardized main descriptors all refer to the same backing
         # allocation. Ascend attention and Mamba backends still require

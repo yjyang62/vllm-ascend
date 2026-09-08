@@ -599,40 +599,53 @@ def _allocate_kv_cache(
     # shared-tuple backing and emits every KVCacheTensor as a view into it.
     # Validate all descriptors before allocating so an unsupported geometry
     # cannot partially materialize and then fall back to duplicate buffers.
+    # extract_hidden_states dumps are live at the same time as MLA pages, so
+    # keep HiddenStateCacheSpec off this backing (same reason as hybrid).
     dsv4_backing: torch.Tensor | None = None
     if is_dsv4_model:
-        tensor_sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
-        if len(tensor_sizes) != 1:
-            raise ValueError("DeepSeek-V4 KV cache descriptors must share one backing allocation.")
-        backing_size = tensor_sizes.pop()
-        dsv4_regions: list[tuple[str, int, int]] = []
-        for descriptor in kv_cache_config.kv_cache_tensors:
-            for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
-                spec = layer_kv_cache_spec[layer_name]
-                if descriptor.block_stride != spec.page_size_bytes:
-                    raise ValueError(
-                        "DeepSeek-V4 requires contiguous per-layer pages, "
-                        f"but {layer_name} has block_stride="
-                        f"{descriptor.block_stride} and page_size="
-                        f"{spec.page_size_bytes}."
-                    )
-                layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
-                start = descriptor.offset + layer_idx * descriptor.layer_stride
-                if start < 0 or start + layer_size > backing_size:
-                    raise ValueError(
-                        f"DeepSeek-V4 KV cache view for {layer_name} exceeds the shared backing allocation."
-                    )
-                dsv4_regions.append((layer_name, start, layer_size))
+        dsv4_descriptors = [
+            descriptor
+            for descriptor in kv_cache_config.kv_cache_tensors
+            if any(
+                not is_hidden_state_cache_spec(layer_kv_cache_spec[layer_name])
+                for layer_name in get_kv_cache_tensor_layers(descriptor)
+            )
+        ]
+        if dsv4_descriptors:
+            tensor_sizes = {descriptor.size for descriptor in dsv4_descriptors}
+            if len(tensor_sizes) != 1:
+                raise ValueError("DeepSeek-V4 KV cache descriptors must share one backing allocation.")
+            backing_size = tensor_sizes.pop()
+            dsv4_regions: list[tuple[str, int, int]] = []
+            for descriptor in dsv4_descriptors:
+                for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
+                    spec = layer_kv_cache_spec[layer_name]
+                    if is_hidden_state_cache_spec(spec):
+                        continue
+                    if descriptor.block_stride != spec.page_size_bytes:
+                        raise ValueError(
+                            "DeepSeek-V4 requires contiguous per-layer pages, "
+                            f"but {layer_name} has block_stride="
+                            f"{descriptor.block_stride} and page_size="
+                            f"{spec.page_size_bytes}."
+                        )
+                    layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
+                    start = descriptor.offset + layer_idx * descriptor.layer_stride
+                    if start < 0 or start + layer_size > backing_size:
+                        raise ValueError(
+                            f"DeepSeek-V4 KV cache view for {layer_name} exceeds the shared backing allocation."
+                        )
+                    dsv4_regions.append((layer_name, start, layer_size))
 
-        if not dsv4_regions:
-            raise ValueError("DeepSeek-V4 KV cache config has no materializable layers.")
-        dsv4_backing = _allocate_int8_cache_tensor(
-            backing_size,
-            alignment,
-            device,
-        )
-        for layer_name, start, layer_size in dsv4_regions:
-            kv_cache_raw_tensors[layer_name] = dsv4_backing[start : start + layer_size]
+            if not dsv4_regions:
+                raise ValueError("DeepSeek-V4 KV cache config has no materializable layers.")
+            dsv4_backing = _allocate_int8_cache_tensor(
+                backing_size,
+                alignment,
+                device,
+            )
+            for layer_name, start, layer_size in dsv4_regions:
+                kv_cache_raw_tensors[layer_name] = dsv4_backing[start : start + layer_size]
 
     # vLLM #51718 changed every KVCacheTensor to describe a view into one
     # common backing allocation. Hybrid groups overlay that backing from byte
@@ -660,6 +673,30 @@ def _allocate_kv_cache(
         if not shared_names:
             continue
 
+        # extract_hidden_states dumps are live at the same time as the target
+        # model's Attention/Mamba/DSV4 caches. Handle them before the DSV4
+        # continue so HiddenStateCacheSpec never stays as a view on
+        # dsv4_backing. Keep dumps off the #51718 hybrid backing so float32
+        # SSM writes cannot overlay bfloat16 hidden states, and size each
+        # dump from its own page.
+        if any(is_hidden_state_cache_spec(layer_kv_cache_spec[ln]) for ln in shared_names):
+            for layer_idx, layer_name in enumerate(shared_names):
+                layer_spec = layer_kv_cache_spec[layer_name]
+                if is_hidden_state_cache_spec(layer_spec) or hybrid_backing is None:
+                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(
+                        kv_cache_config.num_blocks * layer_spec.page_size_bytes,
+                        alignment,
+                        device,
+                    )
+                    continue
+                layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
+                start = kv_cache_tensor.offset + layer_idx * kv_cache_tensor.layer_stride
+                end = start + layer_size
+                if end > hybrid_backing.numel():
+                    raise ValueError(f"Hybrid KV cache view for {layer_name} exceeds the backing allocation.")
+                kv_cache_raw_tensors[layer_name] = hybrid_backing[start:end]
+            continue
+
         if dsv4_backing is not None:
             continue
 
@@ -680,28 +717,6 @@ def _allocate_kv_cache(
 
         example_layer_name = shared_names[0]
         example_spec = layer_kv_cache_spec[example_layer_name]
-
-        # extract_hidden_states dumps are live at the same time as the target
-        # model's Attention/Mamba caches. Keep HiddenStateCacheSpec off the
-        # #51718 hybrid backing so float32 SSM writes cannot overlay bfloat16
-        # hidden states, and size each dump from its own page.
-        if any(is_hidden_state_cache_spec(layer_kv_cache_spec[ln]) for ln in shared_names):
-            for layer_idx, layer_name in enumerate(shared_names):
-                layer_spec = layer_kv_cache_spec[layer_name]
-                if is_hidden_state_cache_spec(layer_spec) or hybrid_backing is None:
-                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(
-                        kv_cache_config.num_blocks * layer_spec.page_size_bytes,
-                        alignment,
-                        device,
-                    )
-                    continue
-                layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
-                start = kv_cache_tensor.offset + layer_idx * kv_cache_tensor.layer_stride
-                end = start + layer_size
-                if end > hybrid_backing.numel():
-                    raise ValueError(f"Hybrid KV cache view for {layer_name} exceeds the backing allocation.")
-                kv_cache_raw_tensors[layer_name] = hybrid_backing[start:end]
-            continue
 
         if hybrid_backing is not None:
             for layer_idx, layer_name in enumerate(shared_names):

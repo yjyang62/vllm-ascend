@@ -50,4 +50,5 @@ to get specific plans.
     After vLLM #51718 (0828 pin), every KV descriptor is a view into one
     shared backing with `[B, H, N, C]` pages. Hidden-state dumps stay on
     per-layer private buffers so they cannot overlay hybrid Attention/Mamba
-    storage, and reshape matches `CacheOnlyAttentionLayer.basic_cache`.
+    or DeepSeek-V4 shared-tuple storage, and reshape matches
+    `CacheOnlyAttentionLayer.basic_cache`.
