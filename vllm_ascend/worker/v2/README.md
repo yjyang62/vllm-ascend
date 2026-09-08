@@ -45,7 +45,8 @@ to get specific plans.
     `ExtractHiddenStatesSpeculator` via `init_speculator` dispatch and keeps
     `HiddenStateCacheSpec` on a private single-tensor allocate/reshape path.
     `use_aux_hidden_state_outputs` is enabled by upstream
-    `GPUModelRunner.__init__`.
+    `GPUModelRunner.__init__`. Currently validated on Qwen3 (dense) and
+    Qwen3.5 (hybrid Attention/Mamba).
 
     After vLLM #51718 (0828 pin), every KV descriptor is a view into one
     shared backing with `[B, H, N, C]` pages. Hidden-state dumps stay on

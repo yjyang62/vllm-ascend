@@ -22,7 +22,7 @@ The following speculative decoding methods are supported:
 | `dflash` | Block diffusion-based parallel draft model |
 | `dspark` | Semi-autoregressive block drafting with a sequential Markov logit-bias head |
 | `draft_model` | Generic external draft LLM |
-| `extract_hidden_states` | Extract hidden states for EAGLE training |
+| `extract_hidden_states` | Extract hidden states for EAGLE training (currently Qwen3 / Qwen3.5) |
 
 ## Common Configuration
 
@@ -442,6 +442,11 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
 
 > [!NOTE]
 > This method produces only 1 output token per request. The primary output is the hidden states saved to disk, not the generated text.
+> On Ascend, `extract_hidden_states` currently supports **Qwen3** and **Qwen3.5**
+> models: **Qwen3** dense models (for example `Qwen/Qwen3-8B`) and **Qwen3.5**
+> hybrid Attention/Mamba models (for example `Qwen/Qwen3.5-0.8B`). Other model
+> families are not yet supported. Set `eagle_aux_hidden_state_layer_ids` to valid
+> layer indices for the chosen model.
 
 Both Model Runner V1 and Model Runner V2 are supported on Ascend. Enable V2 with:
 
@@ -522,11 +527,21 @@ export VLLM_USE_V2_MODEL_RUNNER=1
       --kv-transfer-config '{"kv_connector": "ExampleHiddenStatesConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"shared_storage_path": "/dev/shm/hidden_states"}}'
     ```
 
+    Qwen3.5 hybrid models use the same flags. Replace the model path and layer
+    indices, for example:
+
+    ```shell
+    vllm serve Qwen/Qwen3.5-0.8B \
+      --tensor-parallel-size 1 \
+      --speculative-config '{"method": "extract_hidden_states", "num_speculative_tokens": 1, "draft_model_config": {"hf_config": {"eagle_aux_hidden_state_layer_ids": [5, 11, 17]}}}' \
+      --kv-transfer-config '{"kv_connector": "ExampleHiddenStatesConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"shared_storage_path": "/dev/shm/hidden_states"}}'
+    ```
+
 Key configuration parameters:
 
 1. **`num_speculative_tokens`**: Must be set to `1`. This method does not perform actual speculation, so the value is fixed.
 
-2. **`eagle_aux_hidden_state_layer_ids`**: List of layer indices from which to extract hidden states. For example, `[2, 18, 34]` extracts from layers 2, 18, and 34.
+2. **`eagle_aux_hidden_state_layer_ids`**: List of layer indices from which to extract hidden states. For Qwen3-8B, `[2, 18, 34]` extracts from layers 2, 18, and 34. For Qwen3.5-0.8B, use indices such as `[5, 11, 17]`.
 
 3. **`kv_connector`**: Must be set to `"ExampleHiddenStatesConnector"` to enable saving hidden states to disk.
 
