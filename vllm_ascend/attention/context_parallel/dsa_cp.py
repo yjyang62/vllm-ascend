@@ -1323,7 +1323,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cache_key = "cp_qli"
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
 
-        if metadata is None:
+        if metadata is None and not is_a5_bf16_kv_enabled(self.vllm_config):
             metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
                 num_heads_q=self.model_config.hf_config.index_n_heads,
                 num_heads_k=1,
@@ -1342,8 +1342,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 cmp_ratio=4,
                 device=str(self.seqused_q.device),
             )
-        self.common_ratio_to_sas_metadata[cache_key] = metadata
-        self.req_qli_metadata[:SAS_METADATA_SIZE] = metadata
+        if metadata is not None:
+            self.common_ratio_to_sas_metadata[cache_key] = metadata
+            self.req_qli_metadata[:SAS_METADATA_SIZE] = metadata
         return self.req_qli_metadata[:SAS_METADATA_SIZE]
 
     def build_for_graph_capture(
@@ -2143,6 +2144,14 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         if self.indexer.compressor.rotate:
             kv = rotate_activation(kv, indexer_kv_scale_metadata.hadamard)
 
+        if is_a5_bf16_kv_enabled(self.vllm_config):
+            self.indexer.ops.quantize_key_and_update_cache(
+                kv,
+                indexer_k_cache,
+                indexer_full_cache,
+                indexer_slot_mapping,
+            )
+            return
         _, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
             kv,
             indexer_k_cache,
@@ -2196,6 +2205,17 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         )
         q = rotate_activation(q, indexer_kv_scale_metadata.hadamard)
         weights = self.weights_proj(x) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
+
+        if is_a5_bf16_kv_enabled(self.vllm_config):
+            assert indexer_kv_scale_metadata.req_metadata is not None
+            return self.indexer.ops.select_topk(
+                q,
+                weights,
+                None,
+                indexer_k_cache,
+                None,
+                indexer_kv_scale_metadata.req_metadata,
+            )
 
         q, q_scale = DeviceOperator.indexer_quantize_query(q)
 

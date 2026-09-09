@@ -39,7 +39,7 @@ from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled
+from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan, is_a5_bf16_kv_enabled
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -94,9 +94,10 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        use_bf16_indexer_kv = is_a5_bf16_kv_enabled(vllm_config)
         if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
-            self.dtype = torch.float8_e4m3fn
-            if not is_a5_bf16_kv_enabled(vllm_config):
+            self.dtype = torch.bfloat16 if use_bf16_indexer_kv else torch.float8_e4m3fn
+            if not use_bf16_indexer_kv:
                 vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
@@ -117,7 +118,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             dtype=self.dtype,
             model_version="deepseek_v4",
             cache_dtype_str=self.cache_config.cache_dtype,
-            scale_dim=1 if self.head_dim == 128 else 0,
+            scale_dim=0 if use_bf16_indexer_kv or self.head_dim != 128 else 1,
             scale_dtype=torch.float
             if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
             else torch.float16,
@@ -154,16 +155,20 @@ class IndexerOverlapPlan:
 
 
 class AscendIndexerOps:
-    def __init__(self, index_topk: int) -> None:
+    def __init__(self, index_topk: int, vllm_config: VllmConfig | None = None) -> None:
         from vllm_ascend.device.device_op import DeviceOperator
 
         self.device_operator = DeviceOperator
         self.index_topk = index_topk
+        self.vllm_config = vllm_config
+        self.use_bf16 = vllm_config is not None and is_a5_bf16_kv_enabled(vllm_config)
 
     def unpack_dsa_indexer_kv_cache(self, kv_cache: tuple[torch.Tensor, ...]):
         return self.device_operator.unpack_dsa_indexer_kv_cache(kv_cache)
 
-    def quantize_query(self, query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def quantize_query(self, query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.use_bf16:
+            return query, None
         return self.device_operator.indexer_quantize_query(query)
 
     def quantize_key_and_update_cache(
@@ -173,6 +178,11 @@ class AscendIndexerOps:
         full_cache: torch.Tensor | None,
         slot_mapping: torch.Tensor,
     ):
+        if self.use_bf16:
+            if key.dtype != key_cache.dtype:
+                key = key.to(dtype=key_cache.dtype)
+            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(key_cache, key, slot_mapping)
+            return key, None
         return self.device_operator.indexer_quant_scatter_part1(
             key,
             key_cache,
@@ -186,6 +196,8 @@ class AscendIndexerOps:
         scale_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
+        if key_scale is None:
+            return
         self.device_operator.dsa_indexer_scatter_scale_part3(
             key_scale,
             scale_cache,
@@ -196,12 +208,29 @@ class AscendIndexerOps:
         self,
         query: torch.Tensor,
         weights: torch.Tensor,
-        query_scale: torch.Tensor,
+        query_scale: torch.Tensor | None,
         key_cache: torch.Tensor,
-        scale_cache: torch.Tensor,
+        scale_cache: torch.Tensor | None,
         metadata: typing.Any,
     ) -> torch.Tensor:
         wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
+        if self.use_bf16:
+            op = getattr(torch_npu, "npu_lightning_indexer", None) or torch.ops._C_ascend.npu_lightning_indexer
+            if query.dtype != key_cache.dtype:
+                query = query.to(dtype=key_cache.dtype)
+            topk_idxs, _ = op(
+                query=query,
+                key=key_cache,
+                weights=weights.to(dtype=key_cache.dtype),
+                actual_seq_lengths_query=metadata.qli_cu_seqlens_q[1:],
+                actual_seq_lengths_key=metadata.qli_seqused_k,
+                block_table=metadata.block_table,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=self.index_topk,
+                sparse_mode=0,
+            )
+            return topk_idxs
         topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             query=query,
             key=key_cache,
@@ -234,6 +263,10 @@ class AscendIndexerOps:
         slot_mapping: torch.Tensor,
         metadata: typing.Any,
     ) -> torch.Tensor:
+        if self.use_bf16:
+            if key is not None:
+                self.quantize_key_and_update_cache(key, key_cache, full_cache, slot_mapping)
+            return self.select_topk(query, weights, None, key_cache, None, metadata)
         query, query_scale, _, _ = self.device_operator.indexer_quant_scatter(
             query,
             key,
@@ -291,7 +324,7 @@ class DeepseekV4Indexer(nn.Module):
         self.topk_indices_buffer = topk_indices_buffer
         if self.skip_topk and self.topk_indices_buffer is None:
             raise ValueError("skip_topk requires topk_indices_buffer")
-        self.ops = AscendIndexerOps(index_topk=self.index_topk)
+        self.ops = AscendIndexerOps(index_topk=self.index_topk, vllm_config=vllm_config)
         self.weights_proj = ReplicatedLinear(
             config.hidden_size,
             self.n_heads,
@@ -300,14 +333,11 @@ class DeepseekV4Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
-        k_dtype = (
-            torch.float8_e4m3fn
-            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
-            else torch.int8
-        )
+        k_dtype = torch.int8
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+            k_dtype = torch.bfloat16 if is_a5_bf16_kv_enabled(vllm_config) else torch.float8_e4m3fn
 
         if self.compress_ratio == 4:
-            # TODO(cmq): change the dtype of cache
             self.k_cache = AscendDeepseekV4IndexerCache(
                 head_dim=self.head_dim,
                 dtype=k_dtype,

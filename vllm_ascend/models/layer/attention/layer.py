@@ -43,9 +43,10 @@ def get_dsv4_block_sizes(use_a5_bf16_kv: bool = False):
         32: [[32, 32, 2, 4], [4224, 20480]],
     }
     _DSV4_BLOCK_SIZES_A5_BF16 = {
-        128: [[128, 128, 8, 16], [16896, 131072]],
-        64: [[64, 64, 4, 8], [8448, 65536]],
-        32: [[32, 32, 2, 4], [4224, 32768]],
+        # t1 = block * 128 * 2 (BF16 indexer K, no scale). t2 is attention.
+        128: [[128, 128, 8, 16], [32768, 131072]],
+        64: [[64, 64, 4, 8], [16384, 65536]],
+        32: [[32, 32, 2, 4], [8192, 32768]],
     }
     if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
         if use_a5_bf16_kv:

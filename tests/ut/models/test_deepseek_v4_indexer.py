@@ -9,8 +9,10 @@ import pytest
 import torch
 
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
+    AscendDeepseekV4IndexerCache,
     AscendIndexerMetadata,
     AscendIndexerOps,
     DeepseekV4Indexer,
@@ -19,6 +21,7 @@ from vllm_ascend.models.deepseek_v4.indexer import (
     hadamard_scale,
     rotate_activation,
 )
+from vllm_ascend.utils import AscendDeviceType
 
 
 def _make_indexer(topk_indices_buffer: torch.Tensor | None) -> DeepseekV4Indexer:
@@ -454,3 +457,111 @@ class TestIndexerOps:
         assert qli_kwargs["layout_k"] == "PA_BBND"
         assert qli_kwargs["mask_mode"] == 3
         assert qli_kwargs["cmp_ratio"] == 4
+
+    def test_bf16_scatter_then_lightning_indexer(self):
+        vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16"))
+        key_cache = torch.empty((1, 1, 1, 4), dtype=torch.bfloat16)
+        query = torch.ones((2, 2, 4), dtype=torch.bfloat16)
+        key = torch.ones((1, 1, 4), dtype=torch.bfloat16)
+        weights = torch.ones((2, 2))
+        slot_mapping = torch.zeros((1, 2), dtype=torch.int32)
+        topk_indices = torch.tensor([[[1, 2, 3]]], dtype=torch.int32)
+        metadata = SimpleNamespace(
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            seq_lens=torch.tensor([8], dtype=torch.int32),
+            block_table=torch.tensor([[0]], dtype=torch.int32),
+            qli_metadata=torch.empty(0, dtype=torch.int32),
+            qli_cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+            qli_seqused_k=torch.tensor([2], dtype=torch.int32),
+        )
+        plan = MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.is_a5_bf16_kv_enabled",
+                return_value=True,
+            ),
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.wait_for_device_metadata",
+            ),
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.get_dsa_attn_kv_plan",
+                return_value=plan,
+            ),
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.torch_npu.npu_lightning_indexer",
+                create=True,
+                return_value=(topk_indices, None),
+            ) as lightning,
+            patch.object(DeviceOperator, "indexer_quant_scatter") as quant_scatter,
+        ):
+            indexer_ops = AscendIndexerOps(index_topk=3, vllm_config=vllm_config)
+            actual = indexer_ops.quantize_update_cache_and_select_topk(
+                query,
+                key,
+                weights,
+                key_cache,
+                None,
+                None,
+                slot_mapping,
+                metadata,
+            )
+
+        assert actual is topk_indices
+        quant_scatter.assert_not_called()
+        scatter_key = plan.dsa_kv_compress_scatter.call_args.args[1]
+        assert scatter_key.dtype == torch.bfloat16
+        plan.dsa_kv_compress_scatter.assert_called_once()
+        kwargs = lightning.call_args.kwargs
+        assert kwargs["query"] is query
+        assert kwargs["key"] is key_cache
+        assert kwargs["weights"].dtype == torch.bfloat16
+        assert torch.equal(kwargs["actual_seq_lengths_query"], metadata.qli_cu_seqlens_q[1:])
+        assert kwargs["actual_seq_lengths_key"] is metadata.qli_seqused_k
+        assert kwargs["block_table"] is metadata.block_table
+        assert kwargs["layout_query"] == "TND"
+        assert kwargs["layout_key"] == "PA_BSND"
+        assert kwargs["sparse_count"] == 3
+        assert kwargs["sparse_mode"] == 0
+
+
+class TestIndexerCacheSpec:
+    def test_a5_bf16_drops_scale_dim_and_keeps_launch_cache_dtype(self):
+        cache = AscendDeepseekV4IndexerCache.__new__(AscendDeepseekV4IndexerCache)
+        cache.head_dim = 128
+        cache.dtype = torch.float8_e4m3fn
+        cache.compress_ratio = 4
+        cache.cache_config = SimpleNamespace(block_size=128, cache_dtype="bfloat16")
+        vllm_config = SimpleNamespace(cache_config=cache.cache_config)
+
+        with (
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+            patch(
+                "vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+        ):
+            spec = cache.get_kv_cache_spec(vllm_config)
+
+        assert spec.dtype == torch.bfloat16
+        assert spec.scale_dim == 0
+        assert vllm_config.cache_config.cache_dtype == "bfloat16"
+        assert spec.storage_block_size == 128
+        assert spec.real_page_size_bytes == 32768
+
+    def test_a5_bf16_block_table_pads_indexer_page(self):
+        from vllm_ascend.models.layer.attention.layer import get_dsv4_block_sizes
+
+        with patch(
+            "vllm_ascend.models.layer.attention.layer.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A5),
+        ):
+            table = get_dsv4_block_sizes(use_a5_bf16_kv=True)
+
+        assert table[128][0] == [128, 128, 8, 16]
+        assert table[128][1] == [32768, 131072]
+        assert table[64][1][0] == 16384
+        assert table[32][1][0] == 8192
