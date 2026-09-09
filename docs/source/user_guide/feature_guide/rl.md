@@ -260,26 +260,38 @@ limitations.
 
 ## Tokens in, tokens out
 
-The experimental tokens-only endpoint accepts pre-tokenized prompts and
-returns generated token IDs. Start the normal `serve` command with
-`--tokens-only`:
+The experimental endpoint accepts pre-tokenized prompts and returns generated
+token IDs. Ordinary `vllm serve` already exposes `POST /inference/v1/generate`.
+`--tokens-only` is optional: it only hides the standard OpenAI chat/completions
+routes. See [Token In / Token Out](token_in_token_out.md) for the full
+verification flow.
 
 ```bash
-vllm serve Qwen/Qwen3-0.6B --tokens-only
+vllm serve /mnt/share/weights/Qwen3.5-35B-A3B \
+  --tensor-parallel-size 8 \
+  --enforce-eager \
+  --max-model-len 4096 \
+  --gpu-memory-utilization 0.9 \
+  --served-model-name auto \
+  --max-num-seqs 16 \
+  --port 8008
 ```
 
 Send requests to `/inference/v1/generate`:
 
 ```bash
-curl http://127.0.0.1:8000/inference/v1/generate \
+curl http://127.0.0.1:8008/inference/v1/generate \
     -H "Content-Type: application/json" \
     -d '{
+        "model": "auto",
         "request_id": "rollout-001",
         "token_ids": [151644, 8948, 198],
         "sampling_params": {
-            "temperature": 1.0,
-            "max_tokens": 32,
-            "logprobs": 1
+            "temperature": 0.0,
+            "max_tokens": 16,
+            "min_tokens": 16,
+            "ignore_eos": true,
+            "detokenize": false
         }
     }'
 ```
@@ -289,7 +301,7 @@ A non-streaming response has the following shape:
 ```json
 {
   "request_id": "rollout-001",
-  "model": "Qwen/Qwen3-0.6B",
+  "model": "auto",
   "choices": [
     {
       "index": 0,

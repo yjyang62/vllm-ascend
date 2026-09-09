@@ -309,6 +309,7 @@ nav:
         - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/batch_job_aware_scheduler.md
         - user_guide/feature_guide/rl.md
+        - user_guide/feature_guide/token_in_token_out.md
     - Deployment Guide:
         - user_guide/deployment_guide/index.md
         - user_guide/deployment_guide/using_volcano_kthena.md

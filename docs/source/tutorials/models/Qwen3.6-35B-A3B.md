@@ -266,6 +266,23 @@ curl http://<server_ip>:<port>/v1/completions \
 
 Expected result: the HTTP status is 200 and the JSON response contains a `choices` field with generated text.
 
+### 6.1 Token In / Token Out
+
+`Qwen3.5-35B-A3B` and `Qwen3.6-35B-A3B` share the same generate path. After
+starting the server (including the TP8 eager command on port `8008` with
+`--served-model-name auto`), verify token in / token out:
+
+```bash
+python tools/verify_token_in_token_out.py \
+  --base-url http://127.0.0.1:8008 \
+  --model auto \
+  --max-tokens 16
+```
+
+See [Token In / Token Out](../../user_guide/feature_guide/token_in_token_out.md)
+for the HTTP contract, streaming checks, and OpenAI `return_token_ids`
+usage validation.
+
 ## 7 Accuracy Evaluation
 
 Here are two accuracy evaluation methods.
