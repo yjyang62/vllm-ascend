@@ -2145,17 +2145,26 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         if self.indexer.compressor.rotate:
             kv = rotate_activation(kv, indexer_kv_scale_metadata.hadamard)
 
-        _, kv_scale = self.indexer.ops.quantize_key_and_update_cache(
+        if is_a5_bf16_kv_enabled(self.vllm_config):
+            self.indexer.ops.quantize_key_and_update_cache(
+                kv,
+                indexer_k_cache,
+                indexer_full_cache,
+                indexer_slot_mapping,
+            )
+            return
+        _, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
             kv,
             indexer_k_cache,
             indexer_full_cache,
             indexer_slot_mapping,
         )
-        self.indexer.ops.update_scale_cache(
-            kv_scale,
-            indexer_scale_cache,
-            indexer_slot_mapping,
-        )
+        if kv_scale is not None:
+            DeviceOperator.dsa_indexer_scatter_scale_part3(
+                kv_scale,
+                indexer_scale_cache,
+                indexer_slot_mapping,
+            )
 
     def _indexer_select_topk(
         self,
@@ -2198,17 +2207,42 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         q = rotate_activation(q, indexer_kv_scale_metadata.hadamard)
         weights = self.weights_proj(x) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
 
+        if is_a5_bf16_kv_enabled(self.vllm_config):
+            assert indexer_kv_scale_metadata.req_metadata is not None
+            return self.indexer.ops.select_topk(
+                q,
+                weights,
+                None,
+                indexer_k_cache,
+                None,
+                indexer_kv_scale_metadata.req_metadata,
+            )
+
+        q, q_scale = DeviceOperator.indexer_quantize_query(q)
+
         assert indexer_kv_scale_metadata.req_metadata is not None
         dsa_meta = indexer_kv_scale_metadata.req_metadata
-        q, q_scale = self.indexer.ops.quantize_query(q)
-        return self.indexer.ops.select_topk(
-            q,
-            weights,
-            q_scale,
-            indexer_k_cache,
-            indexer_scale_cache,
-            dsa_meta,
+        wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(dsa_meta.qli_metadata))
+        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+            query=q,
+            key=indexer_k_cache,
+            weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
+            query_dequant_scale=DeviceOperator.prepare_dsa_indexer_query_scale(q_scale),
+            key_dequant_scale=DeviceOperator.prepare_dsa_indexer_key_scale(indexer_scale_cache),
+            topk=self.index_topk,
+            quant_mode=2,
+            cu_seqlens_q=dsa_meta.qli_cu_seqlens_q,
+            seqused_k=dsa_meta.qli_seqused_k,
+            cmp_residual_k=dsa_meta.qli_cmp_residual_k,
+            block_table=dsa_meta.block_table,
+            metadata=dsa_meta.qli_metadata,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            mask_mode=3,
+            cmp_ratio=4,
+            return_value=0,
         )
+        return topk_idxs
 
 
 # =============================================================================

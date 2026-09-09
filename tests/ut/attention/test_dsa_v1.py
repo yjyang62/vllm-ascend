@@ -51,7 +51,6 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
-    AscendIndexerOps,
     IndexerOverlapPlan,
 )
 from vllm_ascend.worker.device_metadata import (
@@ -763,7 +762,6 @@ def test_dsa_cp_indexer_waits_before_qli_consumer(monkeypatch):
     impl.weights_proj = MagicMock(return_value=torch.ones((1, 1)))
     impl.indexer_softmax_scale = 1.0
     impl.index_topk = 1
-    impl.indexer = SimpleNamespace(ops=AscendIndexerOps(index_topk=1))
     qli_metadata = torch.zeros(1024, dtype=torch.int32)
     indexer_cache = SimpleNamespace(
         req_metadata=SimpleNamespace(
@@ -801,7 +799,7 @@ def test_dsa_cp_indexer_waits_before_qli_consumer(monkeypatch):
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *_, **__: None, raising=False)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2", run_indexer, raising=False)
     monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.rotate_activation", lambda value, _: value)
-    monkeypatch.setattr("vllm_ascend.models.deepseek_v4.indexer.wait_for_device_metadata", record_wait)
+    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.wait_for_device_metadata", record_wait)
     impl._indexer_select_topk(
         x=torch.ones((1, 2)),
         qr=torch.ones((1, 2)),
