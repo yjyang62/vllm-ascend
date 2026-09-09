@@ -63,7 +63,7 @@ DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
 @dataclass(frozen=True)
 class DsaAttnKvPlan:
-    """Attention-KV plan. Indexer KV follows the A5 BF16 switch as BF16."""
+    """The attention-KV plan only; indexer KV remains independently FP8."""
 
     uses_sparse_flash_mla: bool
     uses_kv_compress_epilog: bool

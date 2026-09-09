@@ -215,9 +215,7 @@ class AscendIndexerOps:
     ) -> torch.Tensor:
         wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
         if self.use_bf16:
-            op = getattr(torch_npu, "npu_lightning_indexer", None)
-            if not callable(op):
-                op = torch.ops._C_ascend.npu_lightning_indexer
+            op = getattr(torch_npu, "npu_lightning_indexer", None) or torch.ops._C_ascend.npu_lightning_indexer
             if query.dtype != key_cache.dtype:
                 query = query.to(dtype=key_cache.dtype)
             topk_idxs, _ = op(
