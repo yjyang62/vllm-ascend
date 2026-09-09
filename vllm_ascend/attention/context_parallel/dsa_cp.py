@@ -1320,12 +1320,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             4,
             out=qli_cmp_residual_k,
         )
-        if is_a5_bf16_kv_enabled(self.vllm_config):
-            return self.req_qli_metadata[:SAS_METADATA_SIZE]
         cache_key = "cp_qli"
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
 
-        if metadata is None:
+        if metadata is None and not is_a5_bf16_kv_enabled(self.vllm_config):
             metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
                 num_heads_q=self.model_config.hf_config.index_n_heads,
                 num_heads_k=1,
@@ -1344,8 +1342,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 cmp_ratio=4,
                 device=str(self.seqused_q.device),
             )
-        self.common_ratio_to_sas_metadata[cache_key] = metadata
-        self.req_qli_metadata[:SAS_METADATA_SIZE] = metadata
+        if metadata is not None:
+            self.common_ratio_to_sas_metadata[cache_key] = metadata
+            self.req_qli_metadata[:SAS_METADATA_SIZE] = metadata
         return self.req_qli_metadata[:SAS_METADATA_SIZE]
 
     def build_for_graph_capture(

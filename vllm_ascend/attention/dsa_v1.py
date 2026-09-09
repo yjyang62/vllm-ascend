@@ -966,29 +966,29 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 4,
                 out=qli_cmp_residual_k,
             )
-            if is_a5_bf16_kv_enabled(self.vllm_config):
-                return self.qli_metadata_buffer
-            qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
-                num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
-                num_heads_k=1,
-                head_dim=self.model_config.hf_config.index_head_dim,  # 128
-                topk=self.model_config.hf_config.index_topk,
-                quant_mode=2,
-                cu_seqlens_q=query_start_loc,
-                seqused_k=qli_seqused_k,
-                cmp_residual_k=qli_cmp_residual_k,
-                batch_size=len(seq_lens),
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_kv // 4,
-                layout_q="TND",
-                layout_k="PA_BBND",
-                mask_mode=3,
-                cmp_ratio=4,
-                device=str(self.seqused_q.device),
-            )
-            metadata_cache["qli"] = qli_metadata
+            if not is_a5_bf16_kv_enabled(self.vllm_config):
+                qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+                    num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
+                    num_heads_k=1,
+                    head_dim=self.model_config.hf_config.index_head_dim,  # 128
+                    topk=self.model_config.hf_config.index_topk,
+                    quant_mode=2,
+                    cu_seqlens_q=query_start_loc,
+                    seqused_k=qli_seqused_k,
+                    cmp_residual_k=qli_cmp_residual_k,
+                    batch_size=len(seq_lens),
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_kv // 4,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=4,
+                    device=str(self.seqused_q.device),
+                )
+                metadata_cache["qli"] = qli_metadata
 
-        self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
+        if qli_metadata is not None:
+            self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
         return self.qli_metadata_buffer
 
     def enable_device_metadata(self) -> None:
