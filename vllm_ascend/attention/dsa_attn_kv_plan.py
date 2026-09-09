@@ -57,36 +57,6 @@ def get_dsv4_attn_kv_dtype(vllm_config) -> torch.dtype:
     )
 
 
-def select_dsa_indexer_unquant_topk(
-    query: torch.Tensor,
-    key_cache: torch.Tensor,
-    weights: torch.Tensor,
-    actual_seq_lengths_query: torch.Tensor,
-    actual_seq_lengths_key: torch.Tensor,
-    block_table: torch.Tensor,
-    index_topk: int,
-) -> torch.Tensor:
-    """TopK from BF16 indexer K. ``actual_seq_lengths_key`` is seq_len // 4."""
-    op = getattr(torch_npu, "npu_lightning_indexer", None)
-    if not callable(op):
-        op = torch.ops._C_ascend.npu_lightning_indexer
-    if query.dtype != key_cache.dtype:
-        query = query.to(dtype=key_cache.dtype)
-    topk_idxs, _ = op(
-        query=query,
-        key=key_cache,
-        weights=weights.to(dtype=key_cache.dtype),
-        actual_seq_lengths_query=actual_seq_lengths_query,
-        actual_seq_lengths_key=actual_seq_lengths_key,
-        block_table=block_table,
-        layout_query="TND",
-        layout_key="PA_BSND",
-        sparse_count=index_topk,
-        sparse_mode=0,
-    )
-    return topk_idxs
-
-
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 

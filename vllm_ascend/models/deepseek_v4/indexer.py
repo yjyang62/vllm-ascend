@@ -39,11 +39,7 @@ from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.dsa_attn_kv_plan import (
-    get_dsa_attn_kv_plan,
-    is_a5_bf16_kv_enabled,
-    select_dsa_indexer_unquant_topk,
-)
+from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan, is_a5_bf16_kv_enabled
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -165,25 +161,13 @@ class AscendIndexerOps:
         self.device_operator = DeviceOperator
         self.index_topk = index_topk
         self.vllm_config = vllm_config
-
-    def _use_bf16(self) -> bool:
-        return self.vllm_config is not None and is_a5_bf16_kv_enabled(self.vllm_config)
-
-    def _scatter_unquant_key(
-        self,
-        key: torch.Tensor,
-        key_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-    ) -> None:
-        if key.dtype != key_cache.dtype:
-            key = key.to(dtype=key_cache.dtype)
-        get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(key_cache, key, slot_mapping)
+        self.use_bf16 = vllm_config is not None and is_a5_bf16_kv_enabled(vllm_config)
 
     def unpack_dsa_indexer_kv_cache(self, kv_cache: tuple[torch.Tensor, ...]):
         return self.device_operator.unpack_dsa_indexer_kv_cache(kv_cache)
 
     def quantize_query(self, query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if self._use_bf16():
+        if self.use_bf16:
             return query, None
         return self.device_operator.indexer_quantize_query(query)
 
@@ -194,8 +178,10 @@ class AscendIndexerOps:
         full_cache: torch.Tensor | None,
         slot_mapping: torch.Tensor,
     ):
-        if self._use_bf16():
-            self._scatter_unquant_key(key, key_cache, slot_mapping)
+        if self.use_bf16:
+            if key.dtype != key_cache.dtype:
+                key = key.to(dtype=key_cache.dtype)
+            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(key_cache, key, slot_mapping)
             return key, None
         return self.device_operator.indexer_quant_scatter_part1(
             key,
@@ -210,7 +196,7 @@ class AscendIndexerOps:
         scale_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        if key_scale is None or self._use_bf16():
+        if key_scale is None:
             return
         self.device_operator.dsa_indexer_scatter_scale_part3(
             key_scale,
@@ -227,18 +213,26 @@ class AscendIndexerOps:
         scale_cache: torch.Tensor | None,
         metadata: typing.Any,
     ) -> torch.Tensor:
-        if self._use_bf16():
-            wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
-            return select_dsa_indexer_unquant_topk(
+        wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
+        if self.use_bf16:
+            op = getattr(torch_npu, "npu_lightning_indexer", None)
+            if not callable(op):
+                op = torch.ops._C_ascend.npu_lightning_indexer
+            if query.dtype != key_cache.dtype:
+                query = query.to(dtype=key_cache.dtype)
+            topk_idxs, _ = op(
                 query=query,
-                key_cache=key_cache,
-                weights=weights,
-                actual_seq_lengths_query=metadata.query_start_loc[1:],
+                key=key_cache,
+                weights=weights.to(dtype=key_cache.dtype),
+                actual_seq_lengths_query=metadata.qli_cu_seqlens_q[1:],
                 actual_seq_lengths_key=metadata.qli_seqused_k,
                 block_table=metadata.block_table,
-                index_topk=self.index_topk,
+                layout_query="TND",
+                layout_key="PA_BSND",
+                sparse_count=self.index_topk,
+                sparse_mode=0,
             )
-        wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
+            return topk_idxs
         topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             query=query,
             key=key_cache,
@@ -271,17 +265,10 @@ class AscendIndexerOps:
         slot_mapping: torch.Tensor,
         metadata: typing.Any,
     ) -> torch.Tensor:
-        if self._use_bf16():
+        if self.use_bf16:
             if key is not None:
-                self._scatter_unquant_key(key, key_cache, slot_mapping)
-            return self.select_topk(
-                query,
-                weights,
-                None,
-                key_cache,
-                None,
-                metadata,
-            )
+                self.quantize_key_and_update_cache(key, key_cache, full_cache, slot_mapping)
+            return self.select_topk(query, weights, None, key_cache, None, metadata)
         query, query_scale, _, _ = self.device_operator.indexer_quant_scatter(
             query,
             key,

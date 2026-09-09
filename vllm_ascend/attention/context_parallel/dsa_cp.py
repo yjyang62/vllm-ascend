@@ -18,7 +18,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
-    select_dsa_indexer_unquant_topk,
 )
 from vllm_ascend.attention.dsa_v1 import (
     _dsa_layout_kv,
@@ -2147,11 +2146,10 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             kv = rotate_activation(kv, indexer_kv_scale_metadata.hadamard)
 
         if is_a5_bf16_kv_enabled(self.vllm_config):
-            if kv.dtype != indexer_k_cache.dtype:
-                kv = kv.to(dtype=indexer_k_cache.dtype)
-            get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
-                indexer_k_cache,
+            self.indexer.ops.quantize_key_and_update_cache(
                 kv,
+                indexer_k_cache,
+                indexer_full_cache,
                 indexer_slot_mapping,
             )
             return
@@ -2212,15 +2210,13 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         assert indexer_kv_scale_metadata.req_metadata is not None
         dsa_meta = indexer_kv_scale_metadata.req_metadata
         if is_a5_bf16_kv_enabled(self.vllm_config):
-            wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(dsa_meta.qli_metadata))
-            return select_dsa_indexer_unquant_topk(
-                query=q,
-                key_cache=indexer_k_cache,
-                weights=weights,
-                actual_seq_lengths_query=dsa_meta.qli_cu_seqlens_q[1:],
-                actual_seq_lengths_key=dsa_meta.qli_seqused_k,
-                block_table=dsa_meta.block_table,
-                index_topk=self.index_topk,
+            return self.indexer.ops.select_topk(
+                q,
+                weights,
+                None,
+                indexer_k_cache,
+                None,
+                dsa_meta,
             )
 
         q, q_scale = DeviceOperator.indexer_quantize_query(q)
