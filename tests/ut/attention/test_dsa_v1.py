@@ -368,6 +368,13 @@ def test_build_req_metadata_defers_device_work_to_fixed_buffers(
 
     assert req_metadata.sas_metadata is builder.sas_metadata_buffer
     assert (req_metadata.qli_metadata is builder.qli_metadata_buffer) is (compressor_ratio == 4)
+    if compressor_ratio == 4:
+        torch.testing.assert_close(
+            req_metadata.indexer_key_seq_lens,
+            torch.tensor([2, 1], dtype=torch.int32),
+        )
+    else:
+        assert req_metadata.indexer_key_seq_lens is None
     builder._build_sas_metadata.assert_not_called()
     builder._build_qli_metadata.assert_not_called()
 
@@ -392,6 +399,31 @@ def test_build_req_metadata_defers_device_work_to_fixed_buffers(
         builder._build_qli_metadata.assert_called_once()
     else:
         builder._build_qli_metadata.assert_not_called()
+
+
+def test_build_qli_metadata_skips_quant_op_for_unquant_indexer():
+    builder = _make_builder()
+    metadata_cache: dict[str, torch.Tensor] = {}
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.dsa_indexer_uses_quant", return_value=False),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_quant_lightning_indexer_v2_metadata",
+            create=True,
+        ) as metadata_op,
+    ):
+        result = builder._build_qli_metadata(
+            metadata_cache=metadata_cache,
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            seq_lens=torch.tensor([8], dtype=torch.int32),
+            max_seqlen_q=2,
+            max_seqlen_kv=8,
+        )
+
+    metadata_op.assert_not_called()
+    assert result is builder.qli_metadata_buffer
+    assert "qli" not in metadata_cache
 
 
 def test_full_graph_compressor_metadata_uses_capture_bucket_extent():
