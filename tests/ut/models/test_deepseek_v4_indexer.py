@@ -472,13 +472,17 @@ class TestIndexerOps:
             seq_lens=torch.tensor([8], dtype=torch.int32),
             block_table=torch.tensor([[0]], dtype=torch.int32),
             qli_metadata=torch.empty(0, dtype=torch.int32),
+            qli_seqused_k=torch.tensor([2], dtype=torch.int32),
         )
         plan = MagicMock()
 
         with (
             patch(
-                "vllm_ascend.models.deepseek_v4.indexer.dsa_indexer_uses_quant",
-                return_value=False,
+                "vllm_ascend.models.deepseek_v4.indexer.is_a5_bf16_kv_enabled",
+                return_value=True,
+            ),
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.wait_for_device_metadata",
             ),
             patch(
                 "vllm_ascend.models.deepseek_v4.indexer.get_dsa_attn_kv_plan",
@@ -512,10 +516,7 @@ class TestIndexerOps:
         assert select_kwargs["key_cache"] is key_cache
         assert select_kwargs["weights"] is weights
         assert torch.equal(select_kwargs["actual_seq_lengths_query"], metadata.query_start_loc[1:])
-        torch.testing.assert_close(
-            select_kwargs["actual_seq_lengths_key"],
-            torch.tensor([2], dtype=torch.int32),
-        )
+        assert select_kwargs["actual_seq_lengths_key"] is metadata.qli_seqused_k
         assert select_kwargs["block_table"] is metadata.block_table
         assert select_kwargs["index_topk"] == 3
 

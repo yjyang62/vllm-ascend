@@ -16,9 +16,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
-    dsa_indexer_uses_quant,
-    dsa_unquant_indexer_key_seq_lens,
-    fill_dsv4_indexer_key_seq_lens,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
     select_dsa_indexer_unquant_topk,
@@ -143,7 +140,6 @@ class AscendDSAReqMetadata:
     ori_win_left: int | None = None
     ori_win_right: int = 0
     dspark_swa_indices: torch.Tensor | None = None
-    indexer_key_seq_lens: torch.Tensor | None = None
 
 
 @dataclass
@@ -272,7 +268,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # +1 holds the FIA dummy request inserted by mixed-batch padding.
         self.qli_seqused_k = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
         self.qli_cmp_residual_k = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
-        self.indexer_key_seq_lens = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
         self._device_metadata_enabled = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
@@ -771,11 +766,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
-            indexer_key_seq_lens=(
-                fill_dsv4_indexer_key_seq_lens(self.indexer_key_seq_lens, local_seq_lens)
-                if self.compressor_ratio == 4
-                else None
-            ),
         )
 
     def _num_compressor_metadata_rows(
@@ -1011,7 +1001,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     max_seqlen_k=max_local_seq_lens,
                 )
 
-            if self.compressor_ratio == 4 and dsa_indexer_uses_quant(self.vllm_config):
+            if self.compressor_ratio == 4:
                 self._device_metadata_tasks = (
                     local_metadata_task,
                     DeviceMetadataTask(DeviceMetadataStage.INDEXER, build_qli_metadata, id(self.req_qli_metadata)),
@@ -1023,11 +1013,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.req_sas_metadata)),
                 )
             sas_metadata = self.req_sas_metadata
-            qli_metadata = (
-                self.req_qli_metadata
-                if self.compressor_ratio == 4 and dsa_indexer_uses_quant(self.vllm_config)
-                else None
-            )
+            qli_metadata = self.req_qli_metadata if self.compressor_ratio == 4 else None
         else:
             device_local_metadata_group_id = None
             self._device_metadata_tasks = ()
@@ -1084,11 +1070,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_cmp_residual_k=self.qli_cmp_residual_k[:num_reqs] if self.compressor_ratio == 4 else None,
             device_local_metadata_group_id=device_local_metadata_group_id,
             cu_cmp_seqlen_list=cu_cmp_seqlens,
-            indexer_key_seq_lens=(
-                fill_dsv4_indexer_key_seq_lens(self.indexer_key_seq_lens, local_seq_lens)
-                if self.compressor_ratio == 4
-                else None
-            ),
         )
         if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
             assert num_compressed_tokens is not None
@@ -1324,7 +1305,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_q,
         max_seqlen_k,
     ):
-        if self.compressor_ratio != 4 or not dsa_indexer_uses_quant(self.vllm_config):
+        if self.compressor_ratio != 4:
             return None
 
         # QLI v2 PA_BBND reads the compressed K length plus the residual from
@@ -1340,6 +1321,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             4,
             out=qli_cmp_residual_k,
         )
+        if is_a5_bf16_kv_enabled(self.vllm_config):
+            return self.req_qli_metadata[:SAS_METADATA_SIZE]
         cache_key = "cp_qli"
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
 
@@ -2229,15 +2212,13 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         assert indexer_kv_scale_metadata.req_metadata is not None
         dsa_meta = indexer_kv_scale_metadata.req_metadata
         if is_a5_bf16_kv_enabled(self.vllm_config):
-            local_query_start_loc = dsa_meta.qli_cu_seqlens_q
-            if local_query_start_loc is None:
-                local_query_start_loc = dsa_meta.cp_metadata.local_query_start_loc
+            wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(dsa_meta.qli_metadata))
             return select_dsa_indexer_unquant_topk(
                 query=q,
                 key_cache=indexer_k_cache,
                 weights=weights,
-                actual_seq_lengths_query=local_query_start_loc[1:],
-                actual_seq_lengths_key=dsa_unquant_indexer_key_seq_lens(dsa_meta),
+                actual_seq_lengths_query=dsa_meta.qli_cu_seqlens_q[1:],
+                actual_seq_lengths_key=dsa_meta.qli_seqused_k,
                 block_table=dsa_meta.block_table,
                 index_topk=self.index_topk,
             )

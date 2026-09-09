@@ -22,8 +22,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
-    dsa_indexer_uses_quant,
-    fill_dsv4_indexer_key_seq_lens,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
 )
@@ -360,7 +358,6 @@ class AscendDSAReqMetadata:
     ori_win_right: int | None = None
     dspark_swa_indices: torch.Tensor | None = None
     vision_swa_indices: torch.Tensor | None = None
-    indexer_key_seq_lens: torch.Tensor | None = None
 
 
 @dataclass
@@ -691,7 +688,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # +1 holds the FIA dummy request inserted by mixed-batch padding.
         self.qli_seqused_k: torch.Tensor = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
         self.qli_cmp_residual_k: torch.Tensor = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
-        self.indexer_key_seq_lens = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
         self._device_metadata_enabled = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
@@ -953,8 +949,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_q: int,
         max_seqlen_kv: int,
     ) -> torch.Tensor:
-        if not dsa_indexer_uses_quant(self.vllm_config):
-            return self.qli_metadata_buffer
         qli_metadata = metadata_cache.get("qli")
         if qli_metadata is None:
             # QLI v2 PA_BBND reads the compressed K length plus the residual
@@ -972,6 +966,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 4,
                 out=qli_cmp_residual_k,
             )
+            if is_a5_bf16_kv_enabled(self.vllm_config):
+                return self.qli_metadata_buffer
             qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
                 num_heads_k=1,
@@ -1060,9 +1056,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         dspark_swa_indices = None
         vision_swa_indices = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
-        indexer_key_seq_lens = (
-            fill_dsv4_indexer_key_seq_lens(self.indexer_key_seq_lens, seq_lens) if self.compressor_ratio == 4 else None
-        )
         if not has_prefill and not common_attn_metadata.causal:
             # DSpark non-causal parallel drafting: every draft query attends to
             # the trailing context window plus the whole current draft block.
@@ -1146,7 +1139,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     max_seqlen_kv=max_seqlen_kv,
                 )
 
-            if self.compressor_ratio == 4 and dsa_indexer_uses_quant(self.vllm_config):
+            if self.compressor_ratio == 4:
                 self._device_metadata_tasks = (
                     DeviceMetadataTask(DeviceMetadataStage.INDEXER, build_qli_metadata, id(self.qli_metadata_buffer)),
                     DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
@@ -1156,11 +1149,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
                 )
             sas_metadata = self.sas_metadata_buffer
-            qli_metadata = (
-                self.qli_metadata_buffer
-                if self.compressor_ratio == 4 and dsa_indexer_uses_quant(self.vllm_config)
-                else None
-            )
+            qli_metadata = self.qli_metadata_buffer if self.compressor_ratio == 4 else None
         else:
             self._device_metadata_tasks = ()
             sas_metadata = self._build_sas_metadata(
@@ -1231,7 +1220,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
             vision_swa_indices=vision_swa_indices,
-            indexer_key_seq_lens=indexer_key_seq_lens,
         )
         if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
             assert num_compressed_tokens is not None
