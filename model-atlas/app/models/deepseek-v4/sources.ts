@@ -1,0 +1,17 @@
+export const ASCEND_COMMIT = "0ba11235fda3bace1557abbc68cfbe1f9f0e10e6";
+export const CODE_URL = `https://github.com/yjyang62/vllm-ascend/blob/${ASCEND_COMMIT}/vllm_ascend/models/deepseek_v4/model.py`;
+export const INDEXER_URL = `https://github.com/yjyang62/vllm-ascend/blob/${ASCEND_COMMIT}/vllm_ascend/models/deepseek_v4/indexer.py`;
+export const COMPRESSOR_URL = `https://github.com/yjyang62/vllm-ascend/blob/${ASCEND_COMMIT}/vllm_ascend/models/deepseek_v4/compressor.py`;
+export const KV_PLAN_URL = `https://github.com/yjyang62/vllm-ascend/blob/${ASCEND_COMMIT}/vllm_ascend/attention/dsa_attn_kv_plan.py`;
+export const UTILS_URL = `https://github.com/yjyang62/vllm-ascend/blob/${ASCEND_COMMIT}/vllm_ascend/utils.py`;
+export const WEIGHTS_URL = "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash";
+export const CONFIG_URL = "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/config.json";
+export const PAPER_URL = "https://arxiv.org/abs/2606.19348";
+export const VLLM_BLOG_URL = "https://vllm-project.github.io/2026/04/24/deepseek-v4.html";
+export const DECODER_FORWARD_URL = `${CODE_URL}#L722-L742`;
+export const ATTENTION_INIT_URL = `${CODE_URL}#L447-L643`;
+export const MOE_FORWARD_URL = `${CODE_URL}#L363-L447`;
+export const COMPRESS_RATIO_URL = `${UTILS_URL}#L113-L118`;
+export const INDEXER_TOPK_URL = `${INDEXER_URL}#L209-L238`;
+export const COMPRESSOR_FORWARD_URL = `${COMPRESSOR_URL}#L193-L224`;
+export const KV_PLAN_COMMENT_URL = `${KV_PLAN_URL}#L51-L67`;

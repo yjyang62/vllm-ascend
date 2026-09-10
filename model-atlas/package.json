@@ -1,0 +1,30 @@
+{
+  "name": "model-atlas",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "check": "tsc --noEmit",
+    "build": "npm run check && vite build --base=./",
+    "preview": "vite preview",
+    "test": "npm run build && node --experimental-strip-types --test tests/*.test.mjs && npm run test:skill",
+    "test:skill": "node --test app/skills/model-atlas-adapter/scripts/fingerprint.test.mjs",
+    "test:browser": "node tests/browser-regression.mjs"
+  },
+  "dependencies": {
+    "katex": "^0.18.4",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@types/katex": "^0.16.8",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "typescript": "5.9.3",
+    "vite": "^8.2.2"
+  },
+  "type": "module"
+}
