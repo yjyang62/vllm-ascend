@@ -95,15 +95,19 @@ app/skills/model-atlas-adapter 目录中的技能。
 
 ## GitHub Pages 部署
 
-仓库包含 [`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml)。推送到 `main` 后，GitHub Actions 会自动构建并发布 `dist/`。
+公开地址：
 
-首次使用时，在 GitHub 仓库中打开：
+**https://yjyang62.github.io/vllm-ascend/?model=deepseek-v4**
+
+仓库根目录的 [`.github/workflows/deploy-model-atlas.yml`](../.github/workflows/deploy-model-atlas.yml) 会在推送到 `main`（以及当前 atlas 分支）时构建 `model-atlas/` 并发布。
+
+首次部署需要仓库打开 Pages：
 
 1. **Settings → Pages**
-2. 将 **Build and deployment → Source** 设置为 **GitHub Actions**
-3. 推送 `main`，或在 **Actions → Deploy GitHub Pages** 中手动运行
+2. **Build and deployment → Source** 选 **GitHub Actions**
+3. 等 **Deploy Model Atlas** 工作流变绿
 
-Vite 使用相对资源路径，因此项目页（`https://<user>.github.io/<repo>/`）和自定义域名均可使用同一份构建产物。
+之后站点即是 `https://<owner>.github.io/<repo>/`。DeepSeek-V4 为默认模型。
 
 ## 运行时依赖
 
