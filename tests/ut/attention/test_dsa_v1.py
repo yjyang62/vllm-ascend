@@ -169,23 +169,34 @@ def _make_vllm_config(num_speculative_tokens: int | None = None) -> SimpleNamesp
     )
 
 
-def _make_kv_cache_spec(compressor_ratio: int) -> SimpleNamespace:
+def _make_kv_cache_spec(
+    compressor_ratio: int,
+    *,
+    use_tokens_per_state: bool = False,
+) -> SimpleNamespace:
     physical_block_size = 128
     logical_compress_ratio = 128 if compressor_ratio > 4 else compressor_ratio
-    return SimpleNamespace(
-        compress_ratio=compressor_ratio,
+    # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
+    ratio_kwargs = (
+        {"tokens_per_state": compressor_ratio} if use_tokens_per_state else {"compress_ratio": compressor_ratio}
+    )
+    kv_cache_spec = SimpleNamespace(
         block_size=physical_block_size * logical_compress_ratio,
         storage_block_size=physical_block_size,
+        **ratio_kwargs,
     )
+    return kv_cache_spec
 
 
 def _make_builder(
     compressor_ratio: int = 4,
     num_speculative_tokens: int | None = None,
+    *,
+    use_tokens_per_state: bool = False,
 ) -> AscendDSAMetadataBuilder:
     vllm_config = _make_vllm_config(num_speculative_tokens)
     builder = AscendDSAMetadataBuilder(
-        kv_cache_spec=_make_kv_cache_spec(compressor_ratio),
+        kv_cache_spec=_make_kv_cache_spec(compressor_ratio, use_tokens_per_state=use_tokens_per_state),
         layer_names=["model.layers.0.self_attn.attn"],
         vllm_config=vllm_config,
         device=torch.device("cpu"),
@@ -236,6 +247,35 @@ def _build_draft_req_metadata(
         torch.ones(num_tokens),
         torch.zeros(num_tokens),
     )
+
+
+@pytest.mark.parametrize("use_tokens_per_state", [False, True])
+def test_metadata_builder_accepts_compression_ratio_aliases(
+    use_tokens_per_state: bool,
+):
+    builder = _make_builder(4, use_tokens_per_state=use_tokens_per_state)
+
+    assert builder.compressor_ratio == 4
+
+
+@pytest.mark.parametrize(
+    ("compressor_ratio", "num_tokens", "num_reqs", "expected_rows"),
+    [
+        (1, 13, 3, 13),
+        (4, 13, 3, 6),
+        (128, 13, 3, 3),
+    ],
+)
+def test_num_compressor_metadata_rows(
+    compressor_ratio: int,
+    num_tokens: int,
+    num_reqs: int,
+    expected_rows: int,
+):
+    builder = _make_builder(compressor_ratio)
+    builder.num_actual_tokens = num_tokens
+
+    assert builder._num_compressor_metadata_rows(num_reqs) == expected_rows
 
 
 def test_draft_swa_and_sas_share_attention_task():
@@ -574,13 +614,12 @@ def test_dsa_cp_device_local_metadata_is_deferred_and_reused():
 
 def test_dsa_cp_qli_metadata_uses_host_maxima():
     builder = _make_cp_builder()
-    seq_lens = MagicMock()
-    seq_lens.clone.return_value = torch.tensor([8, 6], dtype=torch.int32)
+    seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     generated_metadata = torch.arange(1024, dtype=torch.int32)
 
     with patch.object(
         torch.ops._C_ascend,
-        "npu_vllm_quant_lightning_indexer_metadata",
+        "npu_quant_lightning_indexer_v2_metadata",
         create=True,
         return_value=generated_metadata,
     ) as metadata_op:
@@ -592,9 +631,11 @@ def test_dsa_cp_qli_metadata_uses_host_maxima():
             max_seqlen_k=8,
         )
 
-    seq_lens.max.assert_not_called()
     assert metadata_op.call_args.kwargs["max_seqlen_q"] == 2
-    assert metadata_op.call_args.kwargs["max_seqlen_k"] == 8
+    assert metadata_op.call_args.kwargs["max_seqlen_k"] == 8 // 4
+    # QLI v2 derives seqused_k / cmp_residual_k on the host from seq_lens.
+    assert torch.equal(builder.qli_seqused_k[:2], torch.tensor([2, 1], dtype=torch.int32))
+    assert torch.equal(builder.qli_cmp_residual_k[:2], torch.tensor([0, 2], dtype=torch.int32))
 
 
 def test_build_compressor_metadata_out_uses_fixed_outputs():
@@ -718,6 +759,9 @@ def test_dsa_cp_indexer_waits_before_qli_consumer(monkeypatch):
     indexer_cache = SimpleNamespace(
         req_metadata=SimpleNamespace(
             qli_metadata=qli_metadata,
+            qli_cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+            qli_seqused_k=torch.tensor([1], dtype=torch.int32),
+            qli_cmp_residual_k=torch.tensor([0], dtype=torch.int32),
             block_table=torch.zeros((1, 1), dtype=torch.int32),
         ),
         hadamard=torch.eye(2),
@@ -746,7 +790,7 @@ def test_dsa_cp_indexer_waits_before_qli_consumer(monkeypatch):
     for name in ("prepare_dsa_indexer_weights", "prepare_dsa_indexer_query_scale", "prepare_dsa_indexer_key_scale"):
         monkeypatch.setattr(DeviceOperator, name, lambda value: value)
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *_, **__: None, raising=False)
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_vllm_quant_lightning_indexer", run_indexer, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2", run_indexer, raising=False)
     monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.rotate_activation", lambda value, _: value)
     monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.wait_for_device_metadata", record_wait)
     impl._indexer_select_topk(
@@ -756,8 +800,6 @@ def test_dsa_cp_indexer_waits_before_qli_consumer(monkeypatch):
         metadata=layer_metadata,
         cos=torch.ones((1, 1, 1, 2)),
         sin=torch.zeros((1, 1, 1, 2)),
-        actual_seq_lengths_query=torch.tensor([0, 1], dtype=torch.int32),
-        actual_seq_lengths_key=torch.tensor([1], dtype=torch.int32),
     )
 
     assert waited
@@ -769,7 +811,7 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int, monkeyp
         "vllm_ascend.attention.context_parallel.dsa_cp.get_tp_group",
         lambda: SimpleNamespace(world_size=1, rank_in_group=0),
     )
-    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.enable_dsa_cp_with_o_proj_tp", lambda: False)
+    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.enable_dsa_cp_full_o_proj", lambda: False)
     monkeypatch.setattr(
         "vllm_ascend.attention.context_parallel.dsa_cp.get_current_vllm_config",
         _make_vllm_config,
@@ -1585,7 +1627,6 @@ def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
 
     with (
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
-        patch("vllm_ascend.attention.dsa_v1.olora_tp_enable", return_value=False),
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul", return_value=projected) as batched,
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_dynamic_mx_quant") as quant,
     ):
@@ -1839,6 +1880,8 @@ def test_pcp_metadata_builds_from_manager_global_view():
     )
     pcp_manager._global_batch_slot_mappings = global_slot_mappings
     pcp_manager._hidden_restore_idx = hidden_restore_idx
+    pcp_manager._padded_gather_idx = None
+    pcp_manager._gathered_kv_write_mask = None
     pcp_context = pcp_manager.build_attention_context()
     global_metadata = AscendDSAMetadata(
         num_actual_tokens=5,

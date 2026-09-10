@@ -534,6 +534,10 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_a",
             return_bias=False,
         )
+        # Every DSA o_proj path consumes wo_a.weight directly via
+        # npu_transpose_batchmatmul / npu_transpose_quant_batchmatmul,
+        # so the weight must remain ND.
+        self.wo_a.skip_weight_nz_conversion = True
         self.wo_b = RowParallelLinear(
             self.n_groups * config.o_lora_rank,
             self.dim,
