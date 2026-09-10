@@ -157,6 +157,7 @@ __aicore__ inline void LightningIndexerKernel<LIT>::InitTilingData(const LITilin
     constInfo.kCacheBlockSize = tilingData->blockSize;
     constInfo.maxBlockNumPerBatch = tilingData->maxBlockNumPerBatch;
     constInfo.sparseCount = tilingData->sparseCount;
+    constInfo.cmpRatio = tilingData->cmpRatio == 0 ? 1 : tilingData->cmpRatio;
     constInfo.outputLayout = LAYOUT_T;  // 输出和输入形状一致
     if constexpr (std::is_same_v<K_T, float16_t>) {
         constInfo.INVALID_VAL = 0xFC00;
@@ -234,23 +235,28 @@ __aicore__ inline void LightningIndexerKernel<LIT>::GetS1S2ActualSeqLen(uint32_t
 {
     actS1Size = GetActualSeqLen(bIdx, constInfo.actualLenQDims, constInfo.isAccumSeqS1, actualSeqLengthsGmQ,
                                 constInfo.qSeqSize);
-    actS2SizeOrig =
-        GetActualSeqLen(bIdx, constInfo.actualLenDims,
-                         constInfo.isAccumSeqS2, actualSeqLengthsGmKv, constInfo.kSeqSize);
-    actS2Size = actS2SizeOrig;
+    if (constInfo.actualLenDims == 0) {
+        actS2SizeOrig = constInfo.kSeqSize * constInfo.cmpRatio;
+    } else {
+        actS2SizeOrig =
+            GetActualSeqLen(bIdx, constInfo.actualLenDims,
+                             constInfo.isAccumSeqS2, actualSeqLengthsGmKv, constInfo.kSeqSize);
+    }
+    actS2Size = actS2SizeOrig / constInfo.cmpRatio;
 }
 
 template <typename LIT>
 __aicore__ inline uint32_t LightningIndexerKernel<LIT>::GetS2BaseBlockNumOnMask(uint32_t s1gIdx, uint32_t actS1Size,
                                                                      uint32_t actS2SizeOrig)
 {
-    if (actS2SizeOrig == 0) {
+    if (actS2SizeOrig / constInfo.cmpRatio == 0) {
         return 0;
     }
     uint32_t s1Offset = constInfo.s1BaseSize * s1gIdx;
     int32_t validS2LenBase = static_cast<int32_t>(actS2SizeOrig) - static_cast<int32_t>(actS1Size);
-    int32_t validS2Len = (static_cast<int32_t>(s1Offset) + validS2LenBase + static_cast<int32_t>(constInfo.s1BaseSize));
-    validS2Len = Min(validS2Len, static_cast<int32_t>(actS2SizeOrig));
+    int32_t validS2Len = (static_cast<int32_t>(s1Offset) + validS2LenBase + static_cast<int32_t>(constInfo.s1BaseSize)) /
+                         static_cast<int32_t>(constInfo.cmpRatio);
+    validS2Len = Min(validS2Len, static_cast<int32_t>(actS2SizeOrig) / static_cast<int32_t>(constInfo.cmpRatio));
     validS2Len = Max(validS2Len, 1);
     return (validS2Len + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize;
 }
@@ -562,6 +568,7 @@ __aicore__ inline void LightningIndexerKernel<LIT>::CalcRunInfo(uint32_t loop,
     uint64_t actualSeqKPrefixSum;
     if constexpr (K_LAYOUT_T == LI_LAYOUT::TND) { // T N2 D
         actualSeqKPrefixSum = (runInfo.bIdx <= 0) ? 0 : actualSeqLengthsGmKv.GetValue(runInfo.bIdx - 1);
+        actualSeqKPrefixSum = actualSeqKPrefixSum / constInfo.cmpRatio;
     } else {
         actualSeqKPrefixSum = (runInfo.bIdx <= 0) ? 0 : runInfo.bIdx * constInfo.kSeqSize;
     }

@@ -2189,7 +2189,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "int sparse_count=2048, int sparse_mode=3, "
             "int pre_tokens=9223372036854775807, "
             "int next_tokens=9223372036854775807, "
-            "bool return_value=False"
+            "bool return_value=False, int cmp_ratio=1"
         ") -> (Tensor sparse_indices, Tensor sparse_values)"
     );
     ops.impl("npu_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer);

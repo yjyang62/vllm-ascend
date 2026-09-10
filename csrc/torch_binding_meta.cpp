@@ -213,13 +213,14 @@ std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_meta(
     const c10::optional<at::Tensor> &actual_seq_lengths_key,
     const c10::optional<at::Tensor> &block_table, c10::string_view layout_query,
     c10::string_view layout_key, int64_t sparse_count, int64_t sparse_mode,
-    int64_t pre_tokens, int64_t next_tokens, bool return_value)
+    int64_t pre_tokens, int64_t next_tokens, bool return_value, int64_t cmp_ratio)
 {
     constexpr int64_t DIM_0 = 0;
     constexpr int64_t DIM_1 = 1;
     constexpr int64_t DIM_2 = 2;
 
     TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
+    (void)cmp_ratio;
 
     std::string query_layout_str = std::string(layout_query);
     std::string key_layout_str = std::string(layout_key);

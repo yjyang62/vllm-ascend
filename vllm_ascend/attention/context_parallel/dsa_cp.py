@@ -17,7 +17,6 @@ from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     dsa_indexer_uses_quant,
-    dsa_unquant_indexer_key_seq_lens,
     fill_dsv4_indexer_key_seq_lens,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
@@ -2162,7 +2161,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 key_cache=indexer_k_cache,
                 weights=weights,
                 actual_seq_lengths_query=actual_seq_lengths_query[1:],
-                actual_seq_lengths_key=dsa_unquant_indexer_key_seq_lens(indexer_kv_scale_metadata.req_metadata),
+                actual_seq_lengths_key=indexer_kv_scale_metadata.req_metadata.seq_lens,
                 block_table=block_table,
                 index_topk=self.index_topk,
             )

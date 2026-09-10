@@ -112,6 +112,7 @@ struct ConstInfo {
     int64_t preTokens = INT64_MAX;
     int64_t nextTokens = INT64_MAX;
     bool returnValue = false;
+    uint32_t cmpRatio = 1;
 
     uint32_t actualLenQDims = 0U; // query的actualSeqLength 的维度
     uint32_t actualLenDims = 0U;  // KV 的actualSeqLength 的维度

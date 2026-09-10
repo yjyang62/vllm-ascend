@@ -65,6 +65,7 @@ public:
         this->Attr("pre_tokens").AttrType(OPTIONAL).Int(INT64_MAX);
         this->Attr("next_tokens").AttrType(OPTIONAL).Int(INT64_MAX);
         this->Attr("return_values").AttrType(OPTIONAL).Bool(false);
+        this->Attr("cmp_ratio").AttrType(OPTIONAL).Int(1);          // 1: key compression ratio
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)
             .DynamicFormatFlag(true)

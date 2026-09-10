@@ -61,6 +61,7 @@ constexpr uint32_t ATTR_SPARSE_MODE_INDEX = 3;
 constexpr uint32_t ATTR_PRE_TOKENS_INDEX = 4;
 constexpr uint32_t ATTR_NEXT_TOKENS_INDEX = 5;
 constexpr uint32_t ATTR_RETURN_VALUE_INDEX = 6;
+constexpr uint32_t ATTR_CMP_RATIO_INDEX = 7;
 // Dim Index
 constexpr uint32_t DIM_IDX_ONE = 1;
 constexpr uint32_t DIM_IDX_TWO = 2;
@@ -90,6 +91,7 @@ TILING_DATA_FIELD_DEF(uint32_t, sparseMode)
 TILING_DATA_FIELD_DEF(int64_t, preTokens)
 TILING_DATA_FIELD_DEF(int64_t, nextTokens)
 TILING_DATA_FIELD_DEF(uint32_t, returnValue)
+TILING_DATA_FIELD_DEF(uint32_t, cmpRatio)
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(LightningIndexer, LITilingData)
 
@@ -115,6 +117,7 @@ struct LiParaInfo {
     const int64_t *preTokens = nullptr;
     const int64_t *nextTokens = nullptr;
     const bool *returnValue = nullptr;
+    const int64_t *cmpRatio = nullptr;
 };
 
 // -----------算子Tiling入参信息类---------------
@@ -143,6 +146,7 @@ public:
     int64_t preTokens = INT64_MAX;
     int64_t nextTokens = INT64_MAX;
     bool returnValue = false;
+    uint32_t cmpRatio = 1;
     // DType
     ge::DataType inputQType = ge::DT_FLOAT16;
     ge::DataType inputKType = ge::DT_FLOAT16;

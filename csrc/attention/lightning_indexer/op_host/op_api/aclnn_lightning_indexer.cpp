@@ -36,7 +36,7 @@ extern aclnnStatus aclnnInnerLightningIndexerGetWorkspaceSize(
     const aclTensor *actualSeqLengthsQueryOptional, const aclTensor *actualSeqLengthsKeyOptional,
     const aclTensor *blockTableOptional, char *layoutQueryOptional,
     char *layoutKeyOptional, int64_t sparseCount, int64_t sparseMode,
-    int64_t preTokens, int64_t nextTokens, bool returnValues,
+    int64_t preTokens, int64_t nextTokens, bool returnValues, int64_t cmpRatio,
     const aclTensor *sparseIndicesOut, const aclTensor *sparseValuesOut,
     uint64_t *workspaceSize, aclOpExecutor **executor);
 
@@ -96,6 +96,7 @@ aclnnStatus aclnnLightningIndexerGetWorkspaceSize(
         int64_t preTokens,
         int64_t nextTokens,
         bool returnValues,
+        int64_t cmpRatio,
         const aclTensor *sparseIndicesOut,
         const aclTensor *sparseValuesOut,
         uint64_t *workspaceSize,
@@ -121,7 +122,7 @@ aclnnStatus aclnnLightningIndexerGetWorkspaceSize(
 
     return aclnnInnerLightningIndexerGetWorkspaceSize(
         query, key, weights, actualSeqLengthsQueryOptional, actualSeqLengthsKeyOptional, blockTableOptional,
-        layoutQueryOptional, layoutKeyOptional, sparseCount, sparseMode, preTokens, nextTokens, returnValues,
+        layoutQueryOptional, layoutKeyOptional, sparseCount, sparseMode, preTokens, nextTokens, returnValues, cmpRatio,
         sparseIndicesOut, sparseValuesOut, workspaceSize, executor);
 }
 

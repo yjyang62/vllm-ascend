@@ -152,6 +152,7 @@ ge::graphStatus LIInfoParser::GetAndCheckAttrParaInfo()
     opParamInfo_.preTokens = attrs->GetAttrPointer<int64_t>(ATTR_PRE_TOKENS_INDEX);
     opParamInfo_.nextTokens = attrs->GetAttrPointer<int64_t>(ATTR_NEXT_TOKENS_INDEX);
     opParamInfo_.returnValue = attrs->GetAttrPointer<bool>(ATTR_RETURN_VALUE_INDEX);
+    opParamInfo_.cmpRatio = attrs->GetAttrPointer<int64_t>(ATTR_CMP_RATIO_INDEX);
     if (opParamInfo_.layOut != nullptr) {
         OP_LOGI(context_->GetNodeName(), "layout_query is:%s", opParamInfo_.layOut);
     }
@@ -172,6 +173,9 @@ ge::graphStatus LIInfoParser::GetAndCheckAttrParaInfo()
     }
     if (opParamInfo_.returnValue != nullptr) {
         OP_LOGI(context_->GetNodeName(), "return value is:%d", *opParamInfo_.returnValue);
+    }
+    if (opParamInfo_.cmpRatio != nullptr) {
+        OP_LOGI(context_->GetNodeName(), "cmp ratio is:%ld", *opParamInfo_.cmpRatio);
     }
     OP_LOGI(context_->GetNodeName(), "GetAndCheckAttrParaInfo end");
     OP_CHECK_IF(
@@ -195,6 +199,19 @@ ge::graphStatus LIInfoParser::GetAndCheckAttrParaInfo()
                OP_LOGE(opName_, "input attr pre_tokens only supported INT64_MAX."), return ge::GRAPH_FAILED);
     OP_CHECK_IF(*opParamInfo_.nextTokens != INT64_MAX,
                OP_LOGE(opName_, "input attr nextTokens only supported INT64_MAX."), return ge::GRAPH_FAILED);
+    int64_t cmpRatio = (opParamInfo_.cmpRatio == nullptr) ? 1 : *opParamInfo_.cmpRatio;
+    if ((socVersion_ == platform_ascendc::SocVersion::ASCEND910B) ||
+        (socVersion_ == platform_ascendc::SocVersion::ASCEND910_93)) {
+        OP_CHECK_IF((cmpRatio <= 0) || (cmpRatio > 128) || ((cmpRatio & (cmpRatio - 1)) != 0),
+                   OP_LOGE(opName_,
+                           "input attr cmp_ratio must > 0 and <= 128 and should be powers of 2, but now cmp_ratio is %ld.",
+                           cmpRatio),
+                   return ge::GRAPH_FAILED);
+    } else if (socVersion_ == platform_ascendc::SocVersion::ASCEND950) {
+        OP_CHECK_IF((cmpRatio != 1) && (cmpRatio != 4) && (cmpRatio != 128),
+                   OP_LOGE(opName_, "input attr cmp_ratio must be 1, 4 or 128, but now cmp_ratio is %ld.", cmpRatio),
+                   return ge::GRAPH_FAILED);
+    }
 
     return ge::GRAPH_SUCCESS;
 }
@@ -692,6 +709,7 @@ void LIInfoParser::GenerateInfo(LITilingInfo &liInfo)
     liInfo.preTokens = *opParamInfo_.preTokens;
     liInfo.nextTokens = *opParamInfo_.nextTokens;
     liInfo.returnValue = *opParamInfo_.returnValue;
+    liInfo.cmpRatio = (opParamInfo_.cmpRatio == nullptr) ? 1 : static_cast<uint32_t>(*opParamInfo_.cmpRatio);
 
     liInfo.inputQLayout = qLayout_;
     liInfo.inputKLayout = kLayout_;
@@ -788,6 +806,7 @@ ge::graphStatus LightningIndexerTiling::DoTiling(LITilingInfo *tilingInfo)
     tilingData_.set_preTokens(tilingInfo->preTokens);
     tilingData_.set_nextTokens(tilingInfo->nextTokens);
     tilingData_.set_returnValue(tilingInfo->returnValue);
+    tilingData_.set_cmpRatio(tilingInfo->cmpRatio);
     tilingData_.set_usedCoreNum(blockDim);
     tilingData_.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
     context_->GetRawTilingData()->SetDataSize(tilingData_.GetDataSize());

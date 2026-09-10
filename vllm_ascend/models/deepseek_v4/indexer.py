@@ -41,7 +41,6 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     dsa_indexer_uses_quant,
-    dsa_unquant_indexer_key_seq_lens,
     get_dsa_attn_kv_plan,
     get_dsv4_indexer_kv_dtype,
     is_a5_bf16_kv_enabled,
@@ -228,7 +227,7 @@ class AscendIndexerOps:
                 key_cache=key_cache,
                 weights=weights,
                 actual_seq_lengths_query=metadata.query_start_loc[1:],
-                actual_seq_lengths_key=dsa_unquant_indexer_key_seq_lens(metadata),
+                actual_seq_lengths_key=metadata.seq_lens,
                 block_table=metadata.block_table,
                 index_topk=self.index_topk,
             )

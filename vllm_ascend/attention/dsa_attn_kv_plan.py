@@ -74,19 +74,17 @@ def dsa_indexer_uses_quant(vllm_config) -> bool:
 
 
 DSA_INDEXER_CMP_RATIO = 4
-# Unquant lightning_indexer has no cmp_ratio. rightDownCausal (mode 3) treats
-# query_len as original tokens and key_len as compressed slots, so prefill
-# validS2Len becomes (S/4 - S) and TopK collapses. defaultMask (mode 0) scores
-# every stored compressed key; SparseFlashMla still applies cmp_ratio causal.
-DSA_INDEXER_UNQUANT_SPARSE_MODE = 0
+# Unquant lightning_indexer now accepts cmp_ratio. Pass original sequence
+# lengths with rightDownCausal (mode 3) so visible compressed keys are
+# (i + 1) / cmp_ratio, matching A3 quant TopK.
+DSA_INDEXER_UNQUANT_SPARSE_MODE = 3
 
 
 def get_dsv4_indexer_key_seq_lens(seq_lens: torch.Tensor, cmp_ratio: int = DSA_INDEXER_CMP_RATIO) -> torch.Tensor:
-    """Return compressed indexer K lengths for unquantized lightning_indexer.
+    """Return compressed indexer K lengths (seq_len // cmp_ratio).
 
-    Quant lightning indexer consumes original sequence lengths plus
-    ``cmp_ratio``. The unquantized operator has no compression attribute, so
-    callers must pass the number of compressed keys actually stored in cache.
+    Kept for ACLGraph buffers and tests. TopK itself should pass original
+    sequence lengths plus ``cmp_ratio``.
     """
     return torch.div(seq_lens, cmp_ratio, rounding_mode="floor")
 
@@ -107,10 +105,11 @@ def dsa_unquant_indexer_key_seq_lens(metadata) -> torch.Tensor:
 
 
 def _unquant_lightning_indexer(**kwargs):
-    """Prefer torch_npu on A5; fall back to the custom op for tests/A3 stubs."""
-    op = getattr(torch_npu, "npu_lightning_indexer", None)
-    if callable(op):
-        return op(**kwargs)
+    """Call the custom unquant indexer so ``cmp_ratio`` is honored.
+
+    ``torch_npu.npu_lightning_indexer`` is the CANN copy and has no
+    ``cmp_ratio``. DSV4 compressed TopK must use ``_C_ascend``.
+    """
     return torch.ops._C_ascend.npu_lightning_indexer(**kwargs)
 
 
@@ -125,9 +124,8 @@ def select_dsa_indexer_unquant_topk(
 ) -> torch.Tensor:
     """Select indexer TopK from unquantized (BF16) query/key caches.
 
-    ``actual_seq_lengths_key`` must already be compressed (seq_len // 4).
-    Do not divide inside this call: ACLGraph would otherwise capture a fresh
-    tensor instead of the persistent metadata buffer.
+    ``actual_seq_lengths_key`` is original token length. The kernel converts
+    causal visibility with ``cmp_ratio``.
     """
     if query.dtype != key_cache.dtype:
         query = query.to(dtype=key_cache.dtype)
@@ -142,6 +140,7 @@ def select_dsa_indexer_unquant_topk(
         layout_key="PA_BSND",
         sparse_count=index_topk,
         sparse_mode=DSA_INDEXER_UNQUANT_SPARSE_MODE,
+        cmp_ratio=DSA_INDEXER_CMP_RATIO,
     )
     return topk_idxs
 

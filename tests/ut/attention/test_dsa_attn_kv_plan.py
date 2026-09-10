@@ -270,17 +270,18 @@ def test_fill_dsv4_indexer_key_seq_lens_writes_persistent_prefix():
     torch.testing.assert_close(out, torch.tensor([2, 1, -1, -1], dtype=torch.int32))
 
 
-def test_select_dsa_indexer_unquant_topk_uses_default_mask_and_compressed_key_lens():
+def test_select_dsa_indexer_unquant_topk_uses_causal_mask_and_cmp_ratio():
     query = torch.ones((2, 4, 8), dtype=torch.bfloat16)
     key_cache = torch.ones((1, 4, 1, 8), dtype=torch.bfloat16)
     weights = torch.ones((2, 4))
     actual_seq_lengths_query = torch.tensor([2], dtype=torch.int32)
-    actual_seq_lengths_key = torch.tensor([4], dtype=torch.int32)
+    actual_seq_lengths_key = torch.tensor([8], dtype=torch.int32)
     block_table = torch.tensor([[0]], dtype=torch.int32)
     topk = torch.tensor([[[1, 2]]], dtype=torch.int32)
 
-    with mock.patch(
-        "vllm_ascend.attention.dsa_attn_kv_plan.torch_npu.npu_lightning_indexer",
+    with mock.patch.object(
+        torch.ops._C_ascend,
+        "npu_lightning_indexer",
         create=True,
         return_value=(topk, None),
     ) as lightning:
@@ -303,7 +304,8 @@ def test_select_dsa_indexer_unquant_topk_uses_default_mask_and_compressed_key_le
     assert kwargs["layout_key"] == "PA_BSND"
     assert kwargs["sparse_count"] == 2
     assert kwargs["sparse_mode"] == DSA_INDEXER_UNQUANT_SPARSE_MODE
+    assert kwargs["cmp_ratio"] == 4
     torch.testing.assert_close(
         kwargs["actual_seq_lengths_key"],
-        torch.tensor([4], dtype=torch.int32),
+        torch.tensor([8], dtype=torch.int32),
     )

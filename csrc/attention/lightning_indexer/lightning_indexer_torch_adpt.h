@@ -74,7 +74,7 @@ std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer(
     const c10::optional<at::Tensor>& actual_seq_lengths_key,
     const c10::optional<at::Tensor>& block_table, c10::string_view layout_query,
     c10::string_view layout_key, int64_t sparse_count, int64_t sparse_mode,
-    int64_t pre_tokens, int64_t next_tokens, bool return_value)
+    int64_t pre_tokens, int64_t next_tokens, bool return_value, int64_t cmp_ratio)
 {
     TORCH_CHECK(query.numel() > 0, "Tensor query is empty.");
     TORCH_CHECK(key.numel() > 0, "Tensor key is empty.");
@@ -95,7 +95,7 @@ std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer(
     EXEC_NPU_CMD(aclnnLightningIndexer, query, key, weights,
                  actual_seq_lengths_query, actual_seq_lengths_key, block_table,
                  query_layout_ptr, key_layout_ptr, sparse_count, sparse_mode,
-                 pre_tokens, next_tokens, return_value, sparse_indices_out,
+                 pre_tokens, next_tokens, return_value, cmp_ratio, sparse_indices_out,
                  sparse_values_out);
 
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out,
