@@ -95,19 +95,24 @@ app/skills/model-atlas-adapter 目录中的技能。
 
 ## GitHub Pages 部署
 
-公开地址：
+目标公开地址（仓库主人打开 Pages 后生效）：
 
 **https://yjyang62.github.io/vllm-ascend/?model=deepseek-v4**
 
-仓库根目录的 [`.github/workflows/deploy-model-atlas.yml`](../.github/workflows/deploy-model-atlas.yml) 会在推送到 `main`（以及当前 atlas 分支）时构建 `model-atlas/` 并发布。
+仓库根目录的 [`.github/workflows/deploy-model-atlas.yml`](../.github/workflows/deploy-model-atlas.yml) 会构建 `model-atlas/`，上传 Pages artifact，并把同一份静态文件推到 `gh-pages` 分支。
 
-首次部署需要仓库打开 Pages：
+GitHub 不允许 Actions / App token 创建 Pages 站点。首次发布必须由仓库主人（或 admin）点一次：
 
-1. **Settings → Pages**
+1. 打开 [Settings → Pages](https://github.com/yjyang62/vllm-ascend/settings/pages)
 2. **Build and deployment → Source** 选 **GitHub Actions**
-3. 等 **Deploy Model Atlas** 工作流变绿
+3. 打开 [Deploy Model Atlas](https://github.com/yjyang62/vllm-ascend/actions/workflows/deploy-model-atlas.yml) 点 **Run workflow**（或再推一次本分支）
 
 之后站点即是 `https://<owner>.github.io/<repo>/`。DeepSeek-V4 为默认模型。
+
+打开 Pages 之前，同一份静态站已经在 `gh-pages` 分支，可用这些地址立刻打开：
+
+- [jsDelivr 预览](https://cdn.jsdelivr.net/gh/yjyang62/vllm-ascend@gh-pages/index.html?model=deepseek-v4)
+- [raw.githack 预览](https://raw.githack.com/yjyang62/vllm-ascend/gh-pages/index.html?model=deepseek-v4)
 
 ## 运行时依赖
 

@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -42,14 +42,43 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Build for GitHub Pages
-        # Project site: https://<user>.github.io/vllm-ascend/
-        run: npx vite build --base=/vllm-ascend/
+      - name: Prepare GitHub Pages files
+        run: |
+          # Relative base works at https://<user>.github.io/vllm-ascend/
+          cp dist/index.html dist/404.html
+          touch dist/.nojekyll
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
           path: model-atlas/dist
+
+      - name: Upload branch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-atlas-dist
+          path: model-atlas/dist
+
+  publish-gh-pages:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download site
+        uses: actions/download-artifact@v4
+        with:
+          name: model-atlas-dist
+          path: dist
+
+      - name: Publish gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: dist
+          force_orphan: true
+          commit_message: "docs: publish Model Atlas static site"
 
   deploy:
     environment:
@@ -58,6 +87,16 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
+      - name: Require Pages source GitHub Actions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/pages" >/dev/null 2>&1; then
+            exit 0
+          fi
+          echo "::error title=GitHub Pages is not enabled::Open https://github.com/${GITHUB_REPOSITORY}/settings/pages and set Build and deployment → Source to GitHub Actions, then re-run this workflow. Public URL: https://yjyang62.github.io/vllm-ascend/"
+          exit 1
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
