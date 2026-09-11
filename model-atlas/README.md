@@ -95,7 +95,7 @@ app/skills/model-atlas-adapter 目录中的技能。
 
 ## GitHub Pages 部署
 
-目标公开地址（仓库主人打开 Pages 后生效）：
+目标公开地址（仓库已打开 GitHub Pages，Source = GitHub Actions）：
 
 **https://yjyang62.github.io/vllm-ascend/?model=deepseek-v4**
 
