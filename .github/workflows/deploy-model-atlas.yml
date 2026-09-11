@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - cursor/dsv4-model-atlas-07dc
     paths:
       - "model-atlas/**"
       - ".github/workflows/deploy-model-atlas.yml"
