@@ -47,6 +47,7 @@ from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     get_potential_max_tokens,
+    is_950,
     npu_stream_switch,
     oproj_tp_enable,
 )
@@ -1764,14 +1765,15 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         )
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
-
+        # Ascend950 tiling rejects negate_sin=True (#16134); -sin is equivalent.
+        negate_sin = not is_950()
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             o_proj_input[:actual_tokens].unsqueeze(1),
             cos[:actual_tokens],
-            sin[:actual_tokens],
+            sin[:actual_tokens] if negate_sin else -sin[:actual_tokens],
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
-            negate_sin=True,
+            negate_sin=negate_sin,
         )
 
         # o

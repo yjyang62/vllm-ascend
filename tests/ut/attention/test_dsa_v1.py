@@ -1205,6 +1205,63 @@ def test_forward_runs_mixed_prefill_and_decode_in_one_attention_call():
     assert not call.kwargs
 
 
+@pytest.mark.parametrize("a5", [False, True], ids=["non_a5", "a5"])
+def test_forward_output_rope_falls_back_to_host_neg_on_a5(a5: bool):
+    impl = _make_impl()
+    hidden_states = torch.arange(20, dtype=torch.float32).reshape(5, 4)
+    unified_output = torch.arange(10, dtype=torch.float32).reshape(5, 1, 2)
+    output = torch.empty((5, 2), dtype=torch.float32)
+    sin = torch.tensor([0.25, -0.5, 0.75, 1.0, -1.25])
+    req_metadata = _make_req_metadata()
+    req_metadata.sin = {"layer": sin}
+    req_metadata.cos = {"layer": torch.ones(5)}
+    metadata = AscendDSAMetadata(
+        num_actual_tokens=5,
+        num_decodes=1,
+        num_decode_tokens=2,
+        num_prefills=1,
+        req_metadata=req_metadata,
+    )
+    rotary = MagicMock()
+
+    with (
+        patch(
+            "vllm_ascend.ascend_forward_context.get_forward_context",
+            return_value=SimpleNamespace(num_tokens=5),
+        ),
+        patch("vllm_ascend.attention.dsa_v1.wait_for_kv_layer_from_connector"),
+        patch("vllm_ascend.attention.dsa_v1.maybe_save_kv_layer_to_connector"),
+        patch.object(
+            torch.ops.vllm,
+            "maybe_all_gather_and_maybe_unpad",
+            create=True,
+            side_effect=lambda tensor, _: tensor,
+        ),
+        patch("vllm_ascend.attention.dsa_v1.is_950", return_value=a5),
+        patch.object(
+            torch.ops._C_ascend,
+            "inplace_partial_rotary_mul",
+            rotary,
+            create=True,
+        ),
+        patch.object(impl, "_forward_attention", return_value=unified_output),
+        patch.object(impl, "_forward_o_proj"),
+    ):
+        impl.forward(
+            layer_name="layer",
+            hidden_states=hidden_states,
+            kv_cache=(torch.empty(0),),
+            attn_metadata={"swa_cache": metadata},
+            output=output,
+        )
+
+    rotary.assert_called_once()
+    passed_sin = rotary.call_args.args[2]
+    assert rotary.call_args.kwargs["negate_sin"] is not a5
+    expected_sin = -sin if a5 else sin
+    assert torch.equal(passed_sin, expected_sin)
+
+
 @pytest.mark.parametrize(
     ("num_prefills", "num_decodes", "num_decode_tokens"),
     [
