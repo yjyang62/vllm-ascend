@@ -167,9 +167,12 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
+        dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
+        sync_state = dp_sync
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
@@ -188,7 +191,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 next_prefill_tokens,
                 temperature,
                 seeds,
-                num_tokens_across_dp,
+                sync_state,
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,
