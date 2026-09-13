@@ -58,6 +58,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
+from vllm_ascend.worker.mm_encoder_profile import profile_mm_encoder_cache, skip_parent_mm_profiling
 
 if not vllm_version_is("0.27.1"):
     from vllm.v1.worker.gpu.model_runner import BatchReqState
@@ -290,18 +291,23 @@ class NPUModelRunner(GPUModelRunner):
         """Override GPUModelRunner.profile_run for Ascend NPUs.
         When running moe models, we need an extra dummy run with mc2_tokens_capacity tokens to reserve
         necessary HCCL buffer for the MC2 operator before standard `profile_run`. Additionally, we set
-        override_mrv2_in_profile_run to True to force moe load to be balanced when executing `profile_run`
+        override_mrv2_in_profile_run to True to force moe load to be balanced when executing `profile_run`.
+
+        Multimodal encoder profiling runs first so ViT workspace is not stacked
+        on top of torch.compile graphs created by the dummy runs.
         """
+        profile_mm_encoder_cache(self)
         mc2_tokens_capacity = get_mc2_tokens_capacity()
-        with override_mrv2_in_profile_run(True):
-            if (
-                mc2_tokens_capacity is not None
-                and self.max_num_tokens > mc2_tokens_capacity
-                and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
-                in {MoECommType.MC2, MoECommType.FUSED_MC2}
-            ):
-                self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
-            super().profile_run()
+        with skip_parent_mm_profiling(self.model_config):
+            with override_mrv2_in_profile_run(True):
+                if (
+                    mc2_tokens_capacity is not None
+                    and self.max_num_tokens > mc2_tokens_capacity
+                    and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
+                    in {MoECommType.MC2, MoECommType.FUSED_MC2}
+                ):
+                    self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
+                super().profile_run()
 
     if vllm_version_is("0.27.1"):
 
