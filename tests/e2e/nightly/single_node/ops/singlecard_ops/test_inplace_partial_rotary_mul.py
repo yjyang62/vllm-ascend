@@ -3,7 +3,7 @@ import gc
 import pytest
 import torch
 
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, is_950
 
 enable_custom_op()
 
@@ -76,30 +76,32 @@ def test_inplace_partial_rotary_mul(num_tokens: int, dtype, atol, rtol):
     ref = golden_inplace_partial_rotary_mul(x, cos, sin, negate_sin=False)
     torch.testing.assert_close(out.cpu(), ref.to(dtype), atol=atol, rtol=rtol)
 
-    # ---- 2. negative sin: raw sin + negate_sin=True ----
-    out_neg = x.clone().npu()
-    torch.ops._C_ascend.inplace_partial_rotary_mul(
-        out_neg,
-        cos.npu(),
-        sin.npu(),
-        rotary_mode="interleave",
-        partial_slice=[NOPE_DIM, HEAD_DIM],
-        negate_sin=True,
-    )
-    ref_neg = golden_inplace_partial_rotary_mul(x, cos, sin, negate_sin=True)
-    torch.testing.assert_close(out_neg.cpu(), ref_neg.to(dtype), atol=atol, rtol=rtol)
+    # Ascend950 tiling rejects negate_sin=True; DSV4 uses host -sin instead.
+    if not is_950():
+        # ---- 2. negative sin: raw sin + negate_sin=True ----
+        out_neg = x.clone().npu()
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            out_neg,
+            cos.npu(),
+            sin.npu(),
+            rotary_mode="interleave",
+            partial_slice=[NOPE_DIM, HEAD_DIM],
+            negate_sin=True,
+        )
+        ref_neg = golden_inplace_partial_rotary_mul(x, cos, sin, negate_sin=True)
+        torch.testing.assert_close(out_neg.cpu(), ref_neg.to(dtype), atol=atol, rtol=rtol)
 
-    # ---- 3. cross check: negate_sin=True equals -sin input (legacy), bit-wise ----
-    out_neg2 = x.clone().npu()
-    torch.ops._C_ascend.inplace_partial_rotary_mul(
-        out_neg2,
-        cos.npu(),
-        (-sin).npu(),
-        rotary_mode="interleave",
-        partial_slice=[NOPE_DIM, HEAD_DIM],
-        negate_sin=False,
-    )
-    assert torch.equal(out_neg.cpu(), out_neg2.cpu())
+        # ---- 3. cross check: negate_sin=True equals -sin input (legacy), bit-wise ----
+        out_neg2 = x.clone().npu()
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            out_neg2,
+            cos.npu(),
+            (-sin).npu(),
+            rotary_mode="interleave",
+            partial_slice=[NOPE_DIM, HEAD_DIM],
+            negate_sin=False,
+        )
+        assert torch.equal(out_neg.cpu(), out_neg2.cpu())
 
     gc.collect()
     torch.npu.empty_cache()
