@@ -1,6 +1,7 @@
 from vllm.config.vllm import VllmConfig
 
 from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.pp_utils import resolve_spec_pp_support
 
 # Drive use_v2_model_runner from the Ascend model/feature whitelist instead of
@@ -20,6 +21,10 @@ _ASCEND_V1_SUPPORTED_FEATURES = frozenset(
 
 def _patched_get_unsupported_features(self) -> list[str]:
     unsupported = _original_get_unsupported_features(self)
+    if vllm_version_is("0.28.0") and "prefill context parallelism" in unsupported:
+        # The release GPU runner rejects non-MLA PCP. AscendPCPManager owns
+        # PCP execution and validates its model, graph and speculator limits.
+        unsupported.remove("prefill context parallelism")
     support = resolve_spec_pp_support(self)
     unsupported_feature = support.unsupported_feature if support is not None else None
     if unsupported_feature is not None and unsupported_feature in unsupported:
