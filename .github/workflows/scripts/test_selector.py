@@ -254,19 +254,138 @@ class CoverageSelector:
         def_lines = set()
         try:
             with open(filepath, encoding="utf-8") as f:
-                tree = ast.parse(f.read(), filename=filepath)
+                source = f.read()
+                lines = source.splitlines()
+
+            tree = ast.parse(source, filename=filepath)
+
+            TARGET_DECORATORS = {"staticmethod", "classmethod", "property"}
             for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # Add decorator lines (only @staticmethod, @classmethod, @property)
+                    for decorator in node.decorator_list:
+                        if isinstance(decorator, ast.Name) and decorator.id in TARGET_DECORATORS:
+                            if hasattr(decorator, "lineno") and decorator.lineno:
+                                def_lines.add(decorator.lineno)
+                                # Handle multi-line decorator expressions
+                                if hasattr(decorator, "end_lineno") and decorator.end_lineno:
+                                    for i in range(decorator.lineno, decorator.end_lineno + 1):
+                                        def_lines.add(i)
+
                     def_lines.add(node.lineno)
+
+                    # Bracket counting to find header end
+                    start_idx = node.lineno - 1
+                    paren_count = lines[start_idx].count("(") - lines[start_idx].count(")")
+
+                    line_idx = start_idx
+                    while paren_count > 0 and line_idx < len(lines):
+                        line_idx += 1
+                        paren_count += lines[line_idx].count("(") - lines[line_idx].count(")")
+
+                    header_end = line_idx + 1  # Convert to 1-indexed
+
+                    # Extend to return type annotation if present
+                    if node.returns:
+                        header_end = max(header_end, node.returns.end_lineno)
+
+                    # Record all lines from def to header end
+                    for i in range(node.lineno, header_end + 1):
+                        def_lines.add(i)
         except Exception:
             pass
         return def_lines
+
+    def _get_class_def_lines(self, filepath: str) -> set[int]:
+        """
+        Get line numbers of all class definition lines.
+
+        Args:
+            filepath: Source file path
+
+        Returns:
+            Set of line numbers where class definitions occur
+        """
+        class_lines = set()
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                tree = ast.parse(f.read(), filename=filepath)
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    class_lines.add(node.lineno)
+        except Exception:
+            pass
+        return class_lines
+
+    def _get_docstring_lines(self, filepath: str) -> set[int]:
+        """
+        Get line numbers of all docstring lines (module, class, and function).
+
+        Docstrings are string literals that appear as the first statement
+        in a module, class, or function body.
+
+        Args:
+            filepath: Source file path
+
+        Returns:
+            Set of line numbers where docstrings occur
+        """
+        docstring_lines = set()
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                tree = ast.parse(f.read(), filename=filepath)
+
+            # Module-level docstring
+            if tree.body and isinstance(tree.body[0], ast.Expr) and isinstance(tree.body[0].value, ast.Constant):
+                docstring_lines.add(tree.body[0].lineno)
+
+            # Class and function docstrings
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if (
+                        node.body
+                        and isinstance(node.body[0], ast.Expr)
+                        and isinstance(node.body[0].value, ast.Constant)
+                    ):
+                        docstring_lines.add(node.body[0].lineno)
+        except Exception:
+            pass
+        return docstring_lines
+
+    @staticmethod
+    def _get_blank_lines(filepath: str) -> set[int]:
+        """
+        Get line numbers of all blank/whitespace-only lines in file.
+
+        Coverage arc data can record blank lines as control-flow nodes
+        (e.g., block boundaries after if/return statements). These lines
+        are not executable and must be filtered out to avoid false matches.
+
+        Args:
+            filepath: Source file path
+
+        Returns:
+            Set of line numbers that are blank or whitespace-only
+        """
+        blank_lines = set()
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                for line_no, line in enumerate(f, start=1):
+                    if not line.strip():
+                        blank_lines.add(line_no)
+        except Exception:
+            pass
+        return blank_lines
 
     def _filter_noise_lines(self, filepath: str, lines: set[int]) -> set[int]:
         """
         Filter out invalid noise lines from coverage data:
         1. import/from...import statement lines
         2. Function definition lines (def line only)
+        3. Class definition lines
+        4. Docstring lines
+        5. Blank/whitespace-only lines
 
         Args:
             filepath: Source file path
@@ -281,9 +400,11 @@ class CoverageSelector:
         # Use cache to avoid re-parsing the same file multiple times
         if filepath not in self._noise_lines_cache:
             import_lines = FunctionParser._get_import_lines(filepath)
-            # Get function definition lines
             def_lines = self._get_function_def_lines(filepath)
-            self._noise_lines_cache[filepath] = import_lines | def_lines
+            class_lines = self._get_class_def_lines(filepath)
+            docstring_lines = self._get_docstring_lines(filepath)
+            blank_lines = self._get_blank_lines(filepath)
+            self._noise_lines_cache[filepath] = import_lines | def_lines | class_lines | docstring_lines | blank_lines
 
         return lines - self._noise_lines_cache[filepath]
 
@@ -326,7 +447,9 @@ class CoverageSelector:
                             source_file = self._resolve_source_file(filename)
                             if source_file and source_file.exists():
                                 lines = self._filter_noise_lines(str(source_file), lines)
-                        file_lines_map[filename].update(lines)
+                        # Skip files with no coverage after filtering
+                        if lines:
+                            file_lines_map[filename].update(lines)
 
             normalized_name = self.normalize_test_name(test_case)
             self.test_case_map[normalized_name] = {
@@ -349,7 +472,7 @@ class CoverageSelector:
                 "line_count": data["line_count"],
             }
 
-        with open(output_path, "w", encoding="utf-8") as f:
+        with open(output_path, "w", encoding="utf-8", newline="\n") as f:
             json.dump(serializable_map, f, indent=2, ensure_ascii=False)
         print(f"\nTest case mapping saved to: {output_path}")
 
@@ -479,8 +602,8 @@ class CodeChangeDetector:
                     old_count = int(match.group(2)) if match.group(2) else 1
                     # Rule: start line = old_start + 2, end line = old_start + old_count - 3
                     start_line = old_start + 2
-                    end_line = old_start + old_count - 3
-                    if end_line <= start_line:
+                    end_line = old_start + old_count - 4
+                    if end_line < start_line:
                         end_line = old_start + old_count
                     # Collect all lines in hunk, check if there are new lines (starting with +)
                     hunk_lines = []
@@ -497,7 +620,6 @@ class CodeChangeDetector:
                     has_addition = any(hline.lstrip().startswith("+") for hline in hunk_lines)
                     if not has_addition:
                         start_line += 1
-                        end_line -= 1
                     for line_no in range(start_line, end_line + 1):
                         changed_files[current_file].add(line_no)
 
