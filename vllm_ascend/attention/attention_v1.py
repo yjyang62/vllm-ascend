@@ -40,7 +40,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, is_acl_full_graph_capturing
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -65,7 +65,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
 
-if vllm_version_is("0.27.1"):
+if vllm_version_is("0.28.0"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 else:
     from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
@@ -114,6 +114,8 @@ class AscendAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
+        if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
+            return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -492,6 +494,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.alibi_slopes = alibi_slopes
         self.attn_type = attn_type
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        self.kv_cache_layout = envs_vllm.VLLM_KV_CACHE_LAYOUT
+        self.use_bnsd_kv_cache = self.kv_cache_layout in ("LBHNC", "HND")
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -538,6 +542,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
             else:
                 graph_params = get_graph_params()
             with torch.npu.stream(update_stream):
+                # The workspace size depends only on shapes and seq_lens, which
+                # are shared by all layers within one graph-param update pass,
+                # so one get_workspace call per pass is sufficient. Reuse the
+                # workspace across layers and re-query only when any
+                # size-relevant input changes. This mirrors the FIA path, which already
+                # reuses graph_params.workspaces[num_tokens], and removes the
+                # redundant per-layer get_workspace calls (each backed by a
+                # ~36-54MB buffer allocation) per decode step.
+                step_ws_key = None
+                workspace = None
                 for key, param, handle, event in zip(
                     forward_context.attn_metadata,
                     graph_params.attn_params[num_tokens],
@@ -557,17 +571,39 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     ) = param
                     seq_lens = forward_context.attn_metadata[key].seq_lens
 
-                    workspace = torch_npu._npu_paged_attention_get_workspace(
-                        query=query,
-                        key_cache=key_cache,
-                        value_cache=value_cache,
-                        num_kv_heads=num_kv_heads,
-                        num_heads=num_heads,
-                        scale_value=scale,
-                        block_table=block_table,
-                        context_lens=seq_lens,
-                        out=output,
+                    # The key covers every size-relevant input, so models
+                    # with heterogeneous layer configs simply trigger a
+                    # re-query instead of reusing a wrong-sized workspace.
+                    ws_key = (
+                        seq_lens.data_ptr(),
+                        tuple(seq_lens.shape),
+                        query.shape,
+                        query.dtype,
+                        key_cache.shape,
+                        key_cache.dtype,
+                        value_cache.shape,
+                        value_cache.dtype,
+                        block_table.shape if block_table is not None else None,
+                        block_table.dtype if block_table is not None else None,
+                        output.shape,
+                        output.dtype,
+                        num_kv_heads,
+                        num_heads,
+                        scale,
                     )
+                    if step_ws_key != ws_key:
+                        workspace = torch_npu._npu_paged_attention_get_workspace(
+                            query=query,
+                            key_cache=key_cache,
+                            value_cache=value_cache,
+                            num_kv_heads=num_kv_heads,
+                            num_heads=num_heads,
+                            scale_value=scale,
+                            block_table=block_table,
+                            context_lens=seq_lens,
+                            out=output,
+                        )
+                        step_ws_key = ws_key
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu._npu_paged_attention(
                         query=query,
@@ -1199,7 +1235,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         graph_params = get_graph_params()
         num_tokens = query.shape[0]
-        if _EXTRA_CTX.capturing:
+        if is_acl_full_graph_capturing():
             # Get workspace from cache or calculate it if not present.
             workspace = graph_params.workspaces.get(num_tokens)
             if workspace is None:
@@ -1257,6 +1293,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             graph_params.handles[num_tokens].append(handle)
             return output
 
+    def _get_kv_cache_view(self, key: torch.Tensor, value: torch.Tensor):
+        if not self.use_bnsd_kv_cache:
+            num_block, block_size, _, _ = key.shape
+            key = key.view(num_block, block_size, -1)
+            value = value.view(num_block, block_size, -1)
+        else:
+            _, _, block_size, _ = key.shape
+        return key, value, block_size
+
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
         # PrefillNoCache doesn't need key_cache, but other modes do
         # Only initialize/require cache for modes that actually use it
@@ -1272,9 +1317,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 ):
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
-            if self.key_cache is None:
+            if self.key_cache is None or self.value_cache is None:
                 raise RuntimeError(
-                    f"key_cache is None in _get_fia_params for mode {attn_metadata.attn_state}. kv_cache={kv_cache}"
+                    "key_cache or value_cache is None in _get_fia_params for "
+                    f"mode {attn_metadata.attn_state}. kv_cache={kv_cache}"
                 )
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
@@ -1286,33 +1332,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
             batch_size = attn_metadata.seq_lens.shape[0]
             block_table = attn_metadata.block_tables[:batch_size, :]
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
+            key, value, block_size = self._get_kv_cache_view(self.key_cache, self.value_cache)
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
+            key, value, block_size = self._get_kv_cache_view(self.key_cache, self.value_cache)
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         # chunked prefill.
         else:
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
+            key, value, block_size = self._get_kv_cache_view(self.key_cache, self.value_cache)
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
@@ -1326,10 +1354,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         kv_cache=None,
     ):
-        # we inherit ForwardContext in model runner v2, when enable model
-        # runner v2, there is not capturing attribute in forward_context,
-        # just use getattr to avoid attribute error.
-        if _EXTRA_CTX.capturing:
+        # GPU V2's ctx.capturing is not ACL stream capture; require the live
+        # stream check so piecewise/warmup cannot call graph_task_group_begin.
+        if is_acl_full_graph_capturing():
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
@@ -1546,7 +1573,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if _EXTRA_CTX.capturing:
+        if is_acl_full_graph_capturing():
             return self.full_graph_pa(query, attn_metadata, output)
         torch_npu._npu_paged_attention(
             query=query,
@@ -1605,6 +1632,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key_cache=self.key_cache,
             value_cache=self.value_cache,
             slot_mapping=slot_mapping,
+            use_bnsd=self.use_bnsd_kv_cache,
         )
 
     def reshape_and_cache(
@@ -1627,14 +1655,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return query, key, value, output
             slots = attn_metadata.slot_mapping
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
+            key_to_cache = key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key
+            value_to_cache = value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value
+            # quick fix to make sure slots is int32 for cross attention case.
+            # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
+            slots_to_cache = slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32)
             DeviceOperator.reshape_and_cache(
-                key=key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key,
-                value=value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value,
+                key=key_to_cache,
+                value=value_to_cache,
                 key_cache=self.key_cache,
                 value_cache=self.value_cache,
-                # quick fix to make sure slots is int32 for cross attention case.
-                # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
-                slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32),
+                slot_mapping=slots_to_cache,
+                use_bnsd=self.use_bnsd_kv_cache,
             )
             notify_kv_cache_written()
         return query, key, value, output
@@ -1824,7 +1856,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
             # When `modelrunnerv2` compiles the graph, the value of `attn_metadata.attn_state` is `None`;
             # therefore, the graph-mode condition needs to be evaluated earlier.
-            if _EXTRA_CTX.capturing:
+            if is_acl_full_graph_capturing():
                 attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
@@ -1869,7 +1901,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
-                if _EXTRA_CTX.capturing:
+                if is_acl_full_graph_capturing():
                     attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output, layer)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
