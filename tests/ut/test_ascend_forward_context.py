@@ -103,7 +103,8 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
 
     from vllm_ascend.models.deepseek_v4 import model as deepseek_v4
 
-    monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
+    monkeypatch.setattr(afc, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: True)
     monkeypatch.setattr(
         deepseek_v4,
         "get_pp_group",
@@ -115,6 +116,7 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     layer.side_effect = lambda _positions, hidden_states, *_args, **_kwargs: (hidden_states, None)
     model = SimpleNamespace(
         hc_mult=1,
+        use_sequence_parallel_moe=False,
         layers=[layer],
         start_layer=0,
         end_layer=1,
@@ -147,17 +149,8 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     assert "input_ids" not in forward_context.additional_kwargs
 
 
-def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank(monkeypatch):
-    monkeypatch.setattr(
-        afc,
-        "get_ascend_config",
-        lambda: SimpleNamespace(
-            enable_prefill_mc2=False,
-            enable_fused_mc2=0,
-            scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
-        ),
-    )
-    vllm_config = _make_vllm_config(tensor_parallel_size=6, kv_role="kv_consumer")
+def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
+    vllm_config = _make_vllm_config(tensor_parallel_size=6)
 
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=200, uniform_decode_query_len=3)
 
@@ -519,3 +512,103 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
         assert seen["config"] is vllm_config
 
     assert seen["inside"] is False
+
+
+def _is_dynamo_disabled(fn) -> bool:
+    # torch 2.10 tags `_torchdynamo_disable`; older torch used `_dynamo_disable`.
+    return bool(getattr(fn, "_torchdynamo_disable", False) or getattr(fn, "_dynamo_disable", False))
+
+
+def test_extra_ctx_v2_isolation_is_dynamo_disabled():
+    # Compiled attention/MoE read _EXTRA_CTX. Dynamo cannot trace
+    # use_v2_model_runner's logger.warning_once / info_once.
+    assert _is_dynamo_disabled(afc._use_v2_extra_kwargs)
+    assert _is_dynamo_disabled(afc._extra_ctx_getattr)
+    assert _is_dynamo_disabled(afc._extra_ctx_setattr)
+
+
+def test_extra_ctx_whitelist_v2_hides_gpu_capturing_flag(monkeypatch):
+    # GPU V2 ForwardContext has no vllm_config. Isolation must follow
+    # use_v2_model_runner(get_current_vllm_config()), not ctx.vllm_config.
+    monkeypatch.setattr(afc, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: True)
+    forward_context = SimpleNamespace(
+        additional_kwargs={},
+        capturing=True,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._EXTRA_CTX.capturing is None
+    afc._EXTRA_CTX.capturing = False
+    assert afc._EXTRA_CTX.capturing is False
+    assert forward_context.capturing is True
+    assert forward_context.additional_kwargs["capturing"] is False
+
+
+def test_extra_ctx_v1_stores_capturing_on_context(monkeypatch):
+    monkeypatch.setattr(afc, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: False)
+    forward_context = SimpleNamespace(
+        additional_kwargs={},
+        capturing=False,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    afc._EXTRA_CTX.capturing = True
+    assert afc._EXTRA_CTX.capturing is True
+    assert forward_context.capturing is True
+    assert "capturing" not in forward_context.additional_kwargs
+
+
+def test_extra_ctx_env_override_wins_over_whitelist(monkeypatch):
+    monkeypatch.setattr(afc, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: False)
+    forward_context = SimpleNamespace(
+        additional_kwargs={},
+        capturing=False,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    afc._EXTRA_CTX.capturing = True
+    assert forward_context.capturing is True
+    assert "capturing" not in forward_context.additional_kwargs
+
+
+def test_extra_ctx_magicmock_forward_context_stays_on_v1_attrs(monkeypatch):
+    monkeypatch.setattr(afc, "get_current_vllm_config", lambda: MagicMock())
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: MagicMock())
+    forward_context = MagicMock(capturing=False)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._EXTRA_CTX.capturing is False
+    afc._EXTRA_CTX.capturing = True
+    assert forward_context.capturing is True
+
+
+def test_extra_ctx_unset_vllm_config_stays_on_v1_attrs(monkeypatch):
+    def _unset_config():
+        raise AssertionError("Current vLLM config is not set.")
+
+    monkeypatch.setattr(afc, "get_current_vllm_config", _unset_config)
+    forward_context = MagicMock(capturing=False)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._EXTRA_CTX.capturing is False
+    afc._EXTRA_CTX.capturing = True
+    assert forward_context.capturing is True
+
+
+def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
+    monkeypatch.setattr(afc, "get_current_vllm_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: True)
+    forward_context = SimpleNamespace(
+        additional_kwargs={},
+        capturing=True,
+    )
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+
+    assert afc._EXTRA_CTX.capturing is None
+    afc._EXTRA_CTX.capturing = False
+    assert afc._EXTRA_CTX.capturing is False
+    assert forward_context.capturing is True
+    assert forward_context.additional_kwargs["capturing"] is False

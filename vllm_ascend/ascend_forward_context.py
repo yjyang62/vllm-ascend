@@ -5,8 +5,7 @@ from enum import Enum
 from typing import Any
 
 import torch
-import vllm.envs as envs_vllm
-from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config, set_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
@@ -17,6 +16,8 @@ from vllm_ascend.device.hardware_profile import (
     MoECommPolicy,
     get_current_hardware_profile,
 )
+from vllm_ascend.mrv2_utils import use_v2_model_runner
+from vllm_ascend.quantization.quant_type import A5_SUPPORT_MEGA_MOE_QUANT_TYPES, QuantType
 from vllm_ascend.utils import (
     has_layer_idx,
     is_moe_model,
@@ -33,7 +34,7 @@ class MoECommType(Enum):
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
 
 
-_MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
+_MEGA_MOE_TOKENS_PER_RANK_LIMIT = 16384
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
 
@@ -112,6 +113,7 @@ def set_ascend_forward_context(
     skip_compiled: bool = False,
     max_tokens_across_pcp: int = 0,
     draft_attn_metadatas=None,
+    device_metadata_executor=None,
     has_sinks=False,
     eplb_heat_collection_status: bool = False,
 ):
@@ -138,19 +140,28 @@ def set_ascend_forward_context(
     with set_current_vllm_config(vllm_config), set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
         forward_context.draft_attn_metadatas = draft_attn_metadatas
+        forward_context.device_metadata_executor = device_metadata_executor
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
+        if is_draft_model:
+            draft_model_config = getattr(vllm_config.speculative_config, "draft_model_config", None)
+            draft_moe_quant_type = getattr(draft_model_config, "draft_moe_quant_type", QuantType.NONE)
+        else:
+            draft_moe_quant_type = QuantType.NONE
         moe_comm_type = select_moe_comm_method(
             max_num_tokens,
             vllm_config,
+            is_draft_model=is_draft_model,
+            draft_moe_quant_type=draft_moe_quant_type,
         )
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
         forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
         forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
+        forward_context.draft_moe_quant_type = draft_moe_quant_type
 
         tp_world_size = get_tensor_model_parallel_world_size()
 
@@ -282,6 +293,8 @@ def _select_capacity_and_expert_density_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
+    is_draft_model: bool = False,
+    draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
     num_experts = vllm_config.model_config.get_num_experts()
     ep_world_size = (
@@ -301,6 +314,8 @@ def _select_fused_or_capacity_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
+    is_draft_model: bool = False,
+    draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
     if use_cann_megamoe(vllm_config):
         return MoECommType.FUSED_MC2
@@ -317,7 +332,19 @@ def _select_capacity_and_world_size_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
+    is_draft_model: bool = False,
+    draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
+    if get_ascend_config().enable_fused_mc2 == 1:
+        if is_mega_moe_supported():
+            if is_draft_model and draft_moe_quant_type not in A5_SUPPORT_MEGA_MOE_QUANT_TYPES:
+                # The A5 mega moe (FUSED_MC2) operator only supports a subset of
+                # quantized weight layouts. An unquantized (or unsupported-quantized)
+                # MTP draft MoE layer must skip FUSED_MC2 and fall through to the
+                # original MoE path (MC2/ALLGATHER/ALLTOALL) below.
+                pass
+            else:
+                return MoECommType.FUSED_MC2
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
         "num_experts_per_tok",
@@ -338,13 +365,21 @@ _MOE_COMM_SELECTORS = {
 }
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
+def select_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    is_draft_model: bool = False,
+    draft_moe_quant_type: QuantType = QuantType.NONE,
+) -> MoECommType | None:
     """Select the MoE communication method from the active hardware policy,
     parallel settings, and token count.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
+        is_draft_model (bool): Whether the model runs in MTP mode.
+        draft_moe_quant_type (QuantType): The draft model's MoE quantization
+            type, used on A5 to decide whether the draft can use mega moe.
     Returns:
         MoECommType | None: The selected MoE communication method.
     """
@@ -369,15 +404,42 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
             num_tokens,
             vllm_config,
             mc2_tokens_capacity,
+            is_draft_model,
+            draft_moe_quant_type,
         )
     logger.debug(
-        "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
+        "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
+        "is_draft_model=%s, draft_moe_quant_type=%r",
         moe_comm_policy,
         moe_comm_type,
         num_tokens,
         mc2_tokens_capacity,
+        is_draft_model,
+        draft_moe_quant_type,
     )
     return moe_comm_type
+
+
+@torch._dynamo.disable
+def _use_v2_extra_kwargs() -> bool:
+    """Return whether Ascend extras belong in ``ctx.additional_kwargs``.
+
+    GPU V2 stores its own ``capturing`` flag on the forward-context object.
+    Isolate extras when Ascend enables V2, including whitelist-default V2
+    with ``VLLM_USE_V2_MODEL_RUNNER`` unset.
+
+    ``get_current_vllm_config()`` raises when no config is set (cpu-ut
+    attention fixtures). Treat that as V1 so FIA can read ``capturing``.
+    Require an actual bool: MagicMock configs can be truthy.
+
+    Disabled under Dynamo: ``use_v2_model_runner`` logs with
+    ``warning_once`` / ``info_once``, which Dynamo cannot trace.
+    """
+    try:
+        vllm_config = get_current_vllm_config()
+    except Exception:
+        return False
+    return use_v2_model_runner(vllm_config) is True
 
 
 class _ExtraForwardContextProxy:
@@ -396,6 +458,7 @@ class _ExtraForwardContextProxy:
         "mc2_mask",
         "is_draft_model",
         "is_draft_model_prefill",
+        "draft_moe_quant_type",
         "prefetch_mlp_gate_up_proj",
         "prefetch_mlp_down_proj",
         "model_instance",
@@ -421,21 +484,31 @@ class _ExtraForwardContextProxy:
         return get_forward_context()
 
     def __getattr__(self, name: str) -> Any:
-        self.check_extra_attr(name)
-        ctx = self._ctx()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            # Unset known extras default to None so optional flags (e.g. `sinks`)
-            # can be read with truthiness checks before the V2 path populates them.
-            return ctx.additional_kwargs.get(name)
-        return getattr(ctx, name, None)
+        return _extra_ctx_getattr(self, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        self.check_extra_attr(name)
-        ctx = self._ctx()
-        if envs_vllm.VLLM_USE_V2_MODEL_RUNNER:
-            ctx.additional_kwargs[name] = value
-        else:
-            setattr(ctx, name, value)
+        _extra_ctx_setattr(self, name, value)
+
+
+@torch._dynamo.disable
+def _extra_ctx_getattr(proxy: _ExtraForwardContextProxy, name: str) -> Any:
+    proxy.check_extra_attr(name)
+    ctx = proxy._ctx()
+    if _use_v2_extra_kwargs():
+        # Unset known extras default to None so optional flags (e.g. `sinks`)
+        # can be read with truthiness checks before the V2 path populates them.
+        return ctx.additional_kwargs.get(name)
+    return getattr(ctx, name, None)
+
+
+@torch._dynamo.disable
+def _extra_ctx_setattr(proxy: _ExtraForwardContextProxy, name: str, value: Any) -> None:
+    proxy.check_extra_attr(name)
+    ctx = proxy._ctx()
+    if _use_v2_extra_kwargs():
+        ctx.additional_kwargs[name] = value
+    else:
+        setattr(ctx, name, value)
 
 
 # usage: from vllm_ascend.ascend_forward_context import _EXTRA_CTX

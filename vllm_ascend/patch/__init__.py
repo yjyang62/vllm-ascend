@@ -48,6 +48,28 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 2. File: platform/patch_deepseek_v4_vision.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.model_arch_config_convertor.MODEL_ARCH_CONFIG_CONVERTORS`
+#    Why:
+#       The supported vLLM revision has the generic DeepSeek-V4 text config
+#       conversion but does not identify a checkpoint with `vision_n_layers`
+#       as the multimodal conditional-generation architecture. Without this
+#       distinction, vllm-ascend cannot select its DeepSeek-V4 vision wrapper
+#       or enable bidirectional attention over the image prefix.
+#    How:
+#       Register an Ascend DeepSeek-V4 config conversion handler. For vision checkpoints
+#       it selects `DeepseekV4ForConditionalGeneration`, enables multimodal
+#       prefix-LM attention, and records the prefix-padding constraints used by
+#       the Ascend DSA path. Text-only DeepSeek-V4 behavior is unchanged.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54566
+#    Future Plan:
+#       Remove this patch once the supported vLLM revision natively maps
+#       DeepSeek-V4 vision checkpoints to the conditional-generation model and
+#       exposes the required multimodal prefix-LM and padding metadata without
+#       replacing `MODEL_ARCH_CONFIG_CONVERTORS["deepseek_v4"]`.
+#
 # ** 3. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.distributed.all_reduce`, `torch.distributed.broadcast`
@@ -147,6 +169,23 @@
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
 #       for selecting the MoE runner implementation.
+#
+#   2. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
+#    Why:
+#       DeepSeek-V4 vision routing supplies `bias_vl` and
+#       `image_sentinel_lo` through the upstream MoE factory. The Ascend
+#       replacement factory must preserve those arguments so image tokens use
+#       the checkpoint's vision-specific expert-routing bias.
+#    How:
+#       Accept the two DeepSeek-V4 vision arguments in `_ascend_FusedMoE` and
+#       pass them to the Ascend router while leaving every other model's
+#       defaults unchanged.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54566
+#    Future Plan:
+#       Remove this DeepSeek-V4-specific argument bridge once upstream exposes
+#       a backend-neutral router configuration object or MoE factory extension
+#       hook that carries vision routing metadata into the Ascend runner.
 #
 # ** 7a. File: platform/patch_glm5next_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -533,6 +572,24 @@
 #       models without a custom `hf_config_override`, or exposes a plugin hook
 #       for MTP model_type/architecture remapping.
 #
+#   2. `vllm.config.speculative.SpeculativeConfig.__post_init__`
+#    Why:
+#       DeepSeek-V4 Vision uses the target checkpoint for its DSpark drafter.
+#       Multimodal model-architecture conversion can overwrite the draft's
+#       `DSparkDraftModel` architecture with the full conditional-generation
+#       architecture, which constructs a second target model and produces
+#       duplicate attention-layer registrations.
+#    How:
+#       After upstream speculative-config initialization, restore the draft's
+#       `DSparkDraftModel` architecture in both Hugging Face and normalized
+#       model configs, then refresh the cached registry inspection result.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54566
+#    Future Plan:
+#       Remove this normalization once upstream performs multimodal conversion
+#       before DSpark draft selection, or otherwise guarantees that rebuilding
+#       `model_arch_config` preserves the selected draft architecture.
+#
 # ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
@@ -554,6 +611,28 @@
 #       Remove this patch once upstream vLLM either enforces backend consistency
 #       before grammar compilation or safely handles mixed-backend grammar
 #       failures without killing the engine.
+#
+#   2. `vllm.v1.structured_output.backend_outlines.OutlinesGrammar.accept_tokens`
+#    Why:
+#       After the outlines FSM finishes (e.g. the JSON is complete), the
+#       scheduler emits one more mask that allows EOS/stop tokens so the
+#       request can terminate normally. Those tokens are not part of the FSM
+#       alphabet built from the JSON regex, so `guide.accepts_tokens()` rejects
+#       them and the scheduler terminates the request with FINISHED_ERROR,
+#       logging "Unexpected: grammar rejected tokens". The xgrammar backend
+#       already short-circuits in this case (`if self._is_terminated:
+#       return True`); outlines is missing the same guard.
+#    How:
+#       Wrap `OutlinesGrammar.accept_tokens` with a terminal short-circuit
+#       that returns True once `guide.is_finished()` is set, mirroring the
+#       xgrammar behavior. Applies to both model runner v1 and v2 since the
+#       fix targets the scheduler-side grammar class.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/49227 (fixed the analogous
+#       stop-token handling for xgrammar only; outlines was left out)
+#    Future Plan:
+#       Remove this patch once upstream vLLM adds the terminal short-circuit
+#       to the outlines backend.
 #
 # ** 20. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -600,16 +679,20 @@
 #       architecture whitelists, Triton availability, and feature
 #       compatibility checks. On Ascend the NPU v2 runner is not yet
 #       compatible with all upstream-defaulted models and features, so
-#       enabling by model architecture can crash. We override the
-#       property to read only VLLM_USE_V2_MODEL_RUNNER, deferring
-#       model/framework checks to the NPU runner itself.
+#       following upstream defaults can crash. We override the property
+#       with Ascend-owned whitelist heuristics in mrv2_utils (currently
+#       Qwen3ForCausalLM plus eagle3/mtp/dflash spec decode, Triton, and
+#       non-310P). Explicit VLLM_USE_V2_MODEL_RUNNER still wins.
 #    How:
-#       Monkey-patch VllmConfig.use_v2_model_runner to return
-#       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
+#       Call apply_v2_model_runner_config_patch() to install the Ascend
+#       use_v2_model_runner property and neutralize upstream V2
+#       validation. Keep additional patches for V2 spec-PP unsupported
+#       features and Ascend-supported V1 features (dspark / dflash2).
 #       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
 #       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
 #       1. https://github.com/vllm-project/vllm-ascend/pull/11389
+#       2. https://github.com/vllm-project/vllm-ascend/pull/11692
 #    Future Plan:
 #       Remove this patch once vllm-ascend fully supports the v2 model
 #       runner and can rely on upstream's default enablement heuristics
@@ -645,7 +728,11 @@
 #    How:
 #       Skip `Indexer` construction only when the layer both skips top-k and is
 #       explicitly marked `shared` in `indexer_types`. MTP layers always retain
-#       a complete `Indexer`.
+#       a complete `Indexer`. The runtime `skip_topk` handed to the MLA wrapper
+#       is additionally masked with `not is_mtp_layer` (same as upstream
+#       deepseek_v2.py): MTP layers must never start in skip mode, because they
+#       compute their own indices at draft step 0 and toggle at runtime via
+#       `set_skip_topk` (index_share_for_mtp_iteration).
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/45895
 #    Future Plan:
@@ -1153,7 +1240,8 @@
 #    Why:
 #       EngineCore subprocesses only load global/platform patches, while workers
 #       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py`.
+#       in `platform/patch_use_v2_model_runner.py` (whitelist default plus
+#       remaining V2/V1 feature patches).
 #    How：
 #       Reuse the platform patch so EngineCore and worker processes share the
 #       same `use_v2_model_runner` behavior.
@@ -1196,29 +1284,17 @@
 #       Remove this patch once upstream `load_dspark_model` inherits the target
 #       quant config for same-checkpoint drafts.
 #
-# ** 34. File: platform/patch_vision.py**
+# ** 32. File: worker/patch_v2/patch_adaptive_verification.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`
+#   1. `vllm.v1.worker.gpu.spec_decode.adaptive_verification._assign_draft_token_budget_compiled`
 #    Why:
-#       Upstream vLLM uses PyTorch 2.13.0, which requires eps > 0 for training
-#       but allows eps >= 0 for inference. vllm-ascend bundles PyTorch 2.10.0,
-#       which does not distinguish scenarios and requires eps > 0 in all cases.
-#       So when upstream FusedInputNorm passes eps=0.0 to F.batch_norm it works
-#       fine upstream, but fails on vllm-ascend with "batch_norm eps must be
-#       positive".
-#    How：
-#       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
-#       The patch is guarded with contextlib.suppress(ImportError) so it does
-#       not crash on release wheels (v0.26.0) where FusedInputNorm does not exist.
-#       Upstream PR #51734 (dc5101fb1b, Aug 10) rewrote FusedInputNorm.forward to
-#       use a broadcast multiply-add (x * weight + bias) instead of F.batch_norm,
-#       removing running_mean/running_var. That commit is included in the target
-#       16cfe728, so the patch is gated to v0.27.1 only via vllm_version_is;
-#       on newer versions FusedInputNorm.forward is used as-is (multiply-add).
+#       The upstream adaptive-verification draft-budget allocator is wrapped by
+#       `torch.compile`, whose compiled path is not supported on Ascend.
+#    How:
+#       Replace the compiled wrapper with the original eager allocator while
+#       preserving the upstream budget-allocation algorithm.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/50411
-#       https://github.com/vllm-project/vllm/pull/51734
+#       https://github.com/vllm-project/vllm/pull/47808
 #    Future Plan:
-#       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
-#       (which, like upstream, allows eps >= 0 for inference).
+#       Remove this patch when the compiled allocator is supported on Ascend.
 #
