@@ -19,6 +19,7 @@ from vllm_ascend._310p.worker.v2.model_state import (
     Ascend310PModelState,
 )
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -79,6 +80,10 @@ def test_config_accepts_qwen35_hybrid() -> None:
 
 def test_310p_hybrid_model_state_keeps_ascend_hybrid_behavior() -> None:
     assert issubclass(Ascend310PMambaHybridModelState, AscendMambaHybridModelState)
+
+
+def test_310p_v2_does_not_advertise_shared_kv_backing() -> None:
+    assert NPUModelRunner310V2.supports_standardized_shared_kv_backing is False
 
 
 def test_310p_hybrid_postprocess_filters_padding_indices() -> None:
@@ -164,7 +169,7 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
 
     class FakeMambaSpec:
         block_size = 1
-        page_size_bytes = 64
+        page_size_bytes = 80
         shapes = [(4, 8), (2, 4)]
         dtypes = [torch.float16, torch.float16]
 
@@ -173,7 +178,15 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[layer_name])],
-        kv_cache_tensors=[SimpleNamespace(size=128, shared_by=[layer_name])],
+        kv_cache_tensors=[
+            SimpleNamespace(
+                size=160,
+                # vLLM #51718 renamed shared_by to layers; expose both fields
+                # so this focused 310P fixture stays valid on main and 0.28.0.
+                shared_by=[layer_name],
+                layers=[layer_name],
+            )
+        ],
     )
     runner = object.__new__(NPUModelRunner310V2)
     runner.device = torch.device("cpu")
@@ -190,6 +203,59 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     assert states[0].shape == (2, 4, 8)
     assert states[1].shape == (2, 2, 4)
     assert states[0].dtype == torch.float16
+    assert states[0].untyped_storage().nbytes() == 160
+
+
+@pytest.mark.skipif(
+    vllm_version_is("0.28.0"),
+    reason="vLLM #51718 only changed main descriptors",
+)
+def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
+    class FakeMambaSpec:
+        block_size = 1
+        page_size_bytes = 80
+        shapes = [(4, 8), (2, 4)]
+        dtypes = [torch.float16, torch.float16]
+
+    spec = FakeMambaSpec()
+    layer_names = [
+        "model.layers.1.linear_attn",
+        "model.layers.3.linear_attn",
+    ]
+    kv_cache_config = SimpleNamespace(
+        num_blocks=2,
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                layer_names=layer_names,
+            )
+        ],
+        # Deliberately model a full standardized backing much larger than one
+        # layer. The 310P private allocator must not use this as layer bytes.
+        kv_cache_tensors=[
+            SimpleNamespace(
+                size=4096,
+                shared_by=layer_names,
+                layers=layer_names,
+            )
+        ],
+    )
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.device = torch.device("cpu")
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    runner.kernel_block_sizes = [1]
+    runner.attn_groups = [[SimpleNamespace(backend=object, layer_names=layer_names)]]
+
+    with patch.object(model_runner_module, "MambaSpec", FakeMambaSpec):
+        caches = runner._allocate_kv_cache_tensors(kv_cache_config, {})
+
+    first_states = caches[layer_names[0]]
+    second_states = caches[layer_names[1]]
+    assert first_states[0].shape[0] == kv_cache_config.num_blocks
+    assert second_states[0].shape[0] == kv_cache_config.num_blocks
+    assert first_states[0].untyped_storage().data_ptr() != second_states[0].untyped_storage().data_ptr()
+    assert first_states[0].untyped_storage().nbytes() == 160
+    assert second_states[0].untyped_storage().nbytes() == 160
 
 
 def test_runner_installs_310p_request_state() -> None:
@@ -237,10 +303,7 @@ def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
     expected = object()
 
     with patch.object(runner, "_prepare_inputs_310p", return_value=expected) as prepare_inputs_310p:
-        if model_runner_module.vllm_version_is("0.27.1"):
-            result = runner.prepare_inputs(scheduler_output, batch_desc)
-        else:
-            result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc)
+        result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc)
 
     assert result is expected
     prepare_inputs_310p.assert_called_once_with(scheduler_output, batch_desc)
@@ -277,10 +340,19 @@ def test_config_rejects_non_tp_parallelism(setting: str) -> None:
         NPUModelRunner310V2._validate_config(config)
 
 
+def test_config_accepts_mtp_and_rejects_non_mtp() -> None:
+    """310P MRv2 allows method=mtp only."""
+    NPUModelRunner310V2._validate_config(
+        _make_vllm_config(speculative_config=SimpleNamespace(method="mtp", num_speculative_tokens=1))
+    )
+    with pytest.raises(NotImplementedError, match="only supported via MTP"):
+        NPUModelRunner310V2._validate_config(_make_vllm_config(speculative_config=SimpleNamespace(method="eagle")))
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("speculative_config", object(), "Speculative decoding"),
+        ("speculative_config", object(), "only supported via MTP"),
         ("kv_transfer_config", object(), "KV cache transfer"),
         ("lora_config", object(), "LoRA"),
     ],
@@ -290,11 +362,172 @@ def test_config_rejects_out_of_scope_features(field, value, message) -> None:
         NPUModelRunner310V2._validate_config(_make_vllm_config(**{field: value}))
 
 
-def test_sampler_rejects_random_sampling_parameters() -> None:
-    sampler = Ascend310PSampler()
+def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:
+    """Prefix-cache CoW must flatten list[Tensor] mamba layers for upstream copy."""
+    runner = object.__new__(NPUModelRunner310V2)
+    runner._attn_kv_copy_params = []
+    t0 = torch.zeros(4, 2)
+    t1 = torch.zeros(4, 2)
+    runner.kv_caches = [[t0, t1], torch.zeros(2)]  # hybrid: mamba list + other
+    runner.kv_cache_config = SimpleNamespace(num_blocks=4)
+    copies = [SimpleNamespace(src_block_id=0, dst_block_id=1)]
+
+    with patch.object(model_runner_module, "copy_kv_cache_blocks_inplace") as mock_copy:
+        NPUModelRunner310V2._copy_kv_cache_blocks_310p(runner, copies)
+
+    mock_copy.assert_called_once()
+    tensors_arg, num_blocks, copies_arg = mock_copy.call_args[0]
+    assert tensors_arg == [t0, t1]
+    assert num_blocks == 4
+    assert copies_arg is copies
+
+
+def test_sampler_accepts_temperature_and_rejects_penalties() -> None:
+    sampler = Ascend310PSampler(max_num_reqs=4, device="cpu", vocab_size=16)
     sampler.add_request(0, 4, SamplingParams(temperature=0))
+    sampler.add_request(1, 4, SamplingParams(temperature=0.8, top_p=0.9, top_k=8, seed=7))
+    assert sampler.sampling_states.temperature.gpu[1].item() == pytest.approx(0.8)
+    assert sampler.sampling_states.top_p.gpu[1].item() == pytest.approx(0.9)
+    assert int(sampler.sampling_states.top_k.gpu[1].item()) == 8
     with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
-        sampler.add_request(1, 4, SamplingParams(temperature=1))
+        sampler.add_request(2, 4, SamplingParams(temperature=0, frequency_penalty=0.5))
+
+
+def test_sampler_temperature_scales_logits_before_argmax() -> None:
+    """Non-1 temperature must change relative logits before greedy/top paths."""
+    from vllm_ascend._310p.worker.v2.sampler import _apply_temperature_pytorch
+
+    logits = torch.tensor([[2.0, 4.0, 0.0], [1.0, 1.0, 1.0]], dtype=torch.float32)
+    expanded = torch.tensor([0, 1], dtype=torch.int64)
+    temperature = torch.tensor([0.5, 1.0], dtype=torch.float32)
+    _apply_temperature_pytorch(logits, expanded, temperature)
+    torch.testing.assert_close(logits[0], torch.tensor([4.0, 8.0, 0.0]))
+    torch.testing.assert_close(logits[1], torch.tensor([1.0, 1.0, 1.0]))
+
+
+def test_sampler_greedy_call_returns_argmax() -> None:
+    sampler = Ascend310PSampler(max_num_reqs=2, device="cpu", vocab_size=4)
+    sampler.add_request(0, 2, SamplingParams(temperature=0))
+    logits = torch.tensor([[0.1, 3.0, 0.2, 0.0]], dtype=torch.float32)
+    input_batch = SimpleNamespace(
+        expanded_idx_mapping=torch.tensor([0], dtype=torch.int32),
+        idx_mapping_np=np.array([0], dtype=np.int32),
+        num_reqs=1,
+        seq_lens=torch.ones(1, dtype=torch.int32),
+    )
+    out = sampler(logits, input_batch)
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 1
+
+
+def _make_sampler_batch(req_idx: int = 0) -> SimpleNamespace:
+    return SimpleNamespace(
+        expanded_idx_mapping=torch.tensor([req_idx], dtype=torch.int32),
+        idx_mapping_np=np.array([req_idx], dtype=np.int32),
+        num_reqs=1,
+        seq_lens=torch.ones(1, dtype=torch.int32),
+    )
+
+
+def test_310p_mrv2_apply_top_k_top_p_masks_logits() -> None:
+    """Align with MRV1 ``tests/ut/sample/test_sampler.py`` mask checks.
+
+    310P MRV2 calls the same Triton-free ``apply_top_k_top_p`` path; assert
+    discarded logits become ``-inf`` and the kept set size matches top-k / top-p.
+    """
+    from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+
+    # token0 > token1 >> rest
+    logits = torch.tensor([[5.0, 4.0, 1.0, 0.0, -1.0]], dtype=torch.float32)
+    k = torch.tensor([2], dtype=torch.int32)
+    p = torch.tensor([0.5], dtype=torch.float32)
+
+    top_k_only = apply_top_k_top_p(logits.clone(), k, None)
+    finite_k = (top_k_only[0] > float("-inf")).nonzero(as_tuple=False).view(-1)
+    assert finite_k.tolist() == [0, 1]
+    assert top_k_only[0, 0] == pytest.approx(5.0)
+    assert top_k_only[0, 1] == pytest.approx(4.0)
+    assert not torch.isfinite(top_k_only[0, 2:]).any()
+
+    # Mirror MRV1: combined filter keeps finite values and original shape.
+    filtered = apply_top_k_top_p(logits.clone(), k, p)
+    assert filtered.shape == logits.shape
+    assert torch.isfinite(filtered).any()
+    assert 0 in (filtered[0] > float("-inf")).nonzero(as_tuple=False).view(-1).tolist()
+
+    top_p_only = apply_top_k_top_p(logits.clone(), None, p)
+    finite_p = (top_p_only[0] > float("-inf")).nonzero(as_tuple=False).view(-1)
+    assert 0 in finite_p.tolist()
+    assert finite_p.numel() >= 1
+    assert finite_p.numel() < logits.shape[-1]
+
+
+def test_sampler_top_k_restricts_softmax_mass() -> None:
+    """With temp>0, top-k must zero-out discarded tokens before inverse-CDF.
+
+    vLLM clears top_k/top_p when temperature==0, so exercise the random path
+    with ``_random_sample_310p`` mocked (CPU-safe; mirrors MRV1 CDF unit style).
+    """
+    import vllm_ascend._310p.worker.v2.sampler as sampler_mod
+
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
+    sampler.add_request(0, 2, SamplingParams(temperature=0.8, top_k=2, top_p=1.0, seed=7))
+    # max at idx1, second at idx2; top_k=2 must keep only {1,2}
+    logits = torch.tensor([[1.0, 5.0, 4.0, 0.0, -2.0]], dtype=torch.float32)
+    captured: dict[str, torch.Tensor] = {}
+
+    def _capture_and_argmax(probs: torch.Tensor, generators):
+        del generators
+        captured["probs"] = probs.detach().cpu().clone()
+        return probs.argmax(dim=-1)
+
+    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+        out = sampler(logits, _make_sampler_batch())
+
+    probs = captured["probs"][0]
+    assert probs[3:].sum().item() == pytest.approx(0.0, abs=1e-6)
+    assert probs[0].item() == pytest.approx(0.0, abs=1e-6)
+    assert probs[1:3].sum().item() == pytest.approx(1.0, abs=1e-5)
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 1
+
+
+def test_sampler_top_k_one_matches_argmax_with_temperature() -> None:
+    """top_k=1 leaves one candidate; sampled token equals global argmax."""
+    import vllm_ascend._310p.worker.v2.sampler as sampler_mod
+
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
+    sampler.add_request(0, 2, SamplingParams(temperature=0.9, top_k=1, top_p=1.0, seed=3))
+    logits = torch.tensor([[0.2, 0.1, 3.0, 1.5, -1.0]], dtype=torch.float32)
+
+    def _argmax_sample(probs: torch.Tensor, generators):
+        del generators
+        return probs.argmax(dim=-1)
+
+    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_argmax_sample):
+        out = sampler(logits, _make_sampler_batch())
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == int(logits.argmax(dim=-1).item())
+
+
+def test_sampler_top_p_restricts_softmax_mass() -> None:
+    """top_p must drop the long tail before sampling (MRV1-style mask contract)."""
+    import vllm_ascend._310p.worker.v2.sampler as sampler_mod
+
+    sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
+    sampler.add_request(0, 2, SamplingParams(temperature=0.8, top_k=-1, top_p=0.5, seed=11))
+    logits = torch.tensor([[5.0, 4.0, 1.0, 0.0, -1.0]], dtype=torch.float32)
+    captured: dict[str, torch.Tensor] = {}
+
+    def _capture_and_argmax(probs: torch.Tensor, generators):
+        del generators
+        captured["probs"] = probs.detach().cpu().clone()
+        return probs.argmax(dim=-1)
+
+    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+        out = sampler(logits, _make_sampler_batch())
+
+    probs = captured["probs"][0]
+    assert probs[0].item() == pytest.approx(1.0, abs=1e-5) or probs[:2].sum().item() == pytest.approx(1.0, abs=1e-5)
+    assert probs[2:].sum().item() == pytest.approx(0.0, abs=1e-5)
+    assert int(out.sampled_token_ids.view(-1)[0].item()) == 0
 
 
 def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping() -> None:
@@ -359,7 +592,15 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=["model.layers.0.self_attn"])],
-        kv_cache_tensors=[SimpleNamespace(size=8192, shared_by=["model.layers.0.self_attn"])],
+        kv_cache_tensors=[
+            SimpleNamespace(
+                size=8192,
+                # vLLM #51718 renamed shared_by to layers; expose both fields
+                # so this focused 310P fixture stays valid on main and 0.28.0.
+                shared_by=["model.layers.0.self_attn"],
+                layers=["model.layers.0.self_attn"],
+            )
+        ],
     )
     runner = object.__new__(NPUModelRunner310V2)
     runner.device = torch.device("cpu")
@@ -384,6 +625,94 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     assert k_cache.data_ptr() != v_cache.data_ptr()
     assert len(allocations) == 2
     assert all(allocation[3] == model_runner_module.ACL_FORMAT_FRACTAL_NZ for allocation in allocations)
+
+
+@pytest.mark.skipif(
+    vllm_version_is("0.28.0"),
+    reason="vLLM #51718 only changed main descriptors",
+)
+def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
+    class FakeAttentionSpec:
+        block_size = 128
+        storage_block_size = 128
+        page_size_bytes = 128 * 2 * (128 + 128) * 2
+        num_kv_heads = 2
+        head_size = 128
+        head_size_v = 128
+        dtype = torch.float16
+
+    class FakeBackend:
+        @staticmethod
+        def get_kv_cache_shape(
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+            cache_type,
+        ):
+            del cache_type
+            return (
+                2,
+                num_blocks,
+                num_kv_heads * head_size // 16,
+                block_size,
+                16,
+            )
+
+    spec = FakeAttentionSpec()
+    layer_names = [
+        "model.layers.0.self_attn",
+        "model.layers.2.self_attn",
+    ]
+    kv_cache_config = SimpleNamespace(
+        num_blocks=2,
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                layer_names=layer_names,
+            )
+        ],
+        kv_cache_tensors=[
+            SimpleNamespace(
+                size=spec.page_size_bytes * 100,
+                shared_by=layer_names,
+                layers=layer_names,
+            )
+        ],
+    )
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.device = torch.device("cpu")
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    runner.kernel_block_sizes = [64]
+    runner.attn_groups = [[SimpleNamespace(backend=FakeBackend, layer_names=layer_names)]]
+    allocations = []
+
+    def empty_with_format(*, size, dtype, device, acl_format):
+        allocations.append((size, dtype, device, acl_format))
+        return torch.zeros(size, dtype=dtype, device=device)
+
+    with (
+        patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
+        patch.object(
+            model_runner_module,
+            "AscendAttentionBackend310",
+            FakeBackend,
+        ),
+        patch.object(
+            model_runner_module.torch_npu,
+            "empty_with_format",
+            empty_with_format,
+            create=True,
+        ),
+    ):
+        caches = runner._allocate_kv_cache_tensors(kv_cache_config, {})
+
+    assert len(allocations) == 4
+    assert caches[layer_names[0]][0].shape[0] == (kv_cache_config.num_blocks * 2)
+    assert caches[layer_names[0]][0].data_ptr() != caches[layer_names[1]][0].data_ptr()
+    for layer_name in layer_names:
+        k_cache, v_cache = caches[layer_name]
+        assert (k_cache.nbytes + v_cache.nbytes) == kv_cache_config.num_blocks * spec.page_size_bytes
 
 
 def test_model_state_uses_greedy_sampler() -> None:
