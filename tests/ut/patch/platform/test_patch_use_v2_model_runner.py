@@ -4,7 +4,7 @@ from vllm.config.vllm import VllmConfig
 from vllm_ascend.patch.platform import patch_use_v2_model_runner
 
 
-def test_use_v2_model_runner_is_driven_by_ascend_whitelist():
+def test_use_v2_model_runner_is_driven_by_ascend_default():
     assert isinstance(VllmConfig.use_v2_model_runner, property)
     from vllm_ascend.mrv2_utils import use_v2_model_runner
 

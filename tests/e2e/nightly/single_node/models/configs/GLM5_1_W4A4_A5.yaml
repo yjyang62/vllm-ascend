@@ -18,7 +18,6 @@ _envs: &envs
 #  HCCL_INTRA_PCIE_ENABLE: "1"
   HCCL_INTRA_ROCE_ENABLE: "0"
   ASCEND_LAUNCH_BLOCKING: "0"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
 
 _server_cmd: &server_cmd
   - "--port"

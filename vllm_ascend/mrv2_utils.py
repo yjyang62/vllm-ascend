@@ -27,33 +27,12 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
-from vllm_ascend.utils import is_310p
-
-# Architectures for which Model Runner V2 is enabled by default on Ascend.
-DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
-    {
-        "Qwen3ForCausalLM",
-        "Qwen3MoeForCausalLM",
-        "MiniMaxM2ForCausalLM",
-        "DeepseekV3ForCausalLM",
-        "DeepseekV32ForCausalLM",
-        "GlmMoeDsaForCausalLM",
-        "DeepseekV4ForCausalLM",
-        "Qwen3_5MoeForCausalLM",
-    }
-)
-
-
 def _validate_v2_model_runner(vllm_config: VllmConfig) -> None:
     """No-op replacement for the upstream V2 model runner validation.
 
-    Ascend fully owns the V2 model runner enablement decision through the model
-    / feature whitelists in :func:`use_v2_model_runner`, so the upstream checks
-    -- Triton availability plus the list of features the *upstream* GPU V2
-    runner does not yet support -- are intentionally decoupled. Otherwise a V2
-    enablement decision made here (e.g. via an explicit
-    ``VLLM_USE_V2_MODEL_RUNNER=1``) could fail at config construction with
-    upstream checks that do not apply to the Ascend runner.
+    Ascend defaults to V2 and uses ``VLLM_USE_V2_MODEL_RUNNER`` as its only
+    runner-selection control. Upstream GPU-specific model, feature, and Triton
+    checks do not apply to the Ascend runner.
     """
 
 
@@ -62,8 +41,8 @@ def apply_v2_model_runner_config_patch() -> None:
 
     Installs two overrides on the ``VllmConfig`` class:
 
-    * ``use_v2_model_runner`` is driven by the Ascend whitelist default instead
-      of the upstream default decision (see :func:`use_v2_model_runner`).
+    * ``use_v2_model_runner`` defaults to V2 and honors an explicit
+      ``VLLM_USE_V2_MODEL_RUNNER`` override (see :func:`use_v2_model_runner`).
     * ``_validate_v2_model_runner`` is neutralized because the upstream checks
       describe the upstream GPU runner and do not apply to the Ascend runner.
 
@@ -80,110 +59,11 @@ def apply_v2_model_runner_config_patch() -> None:
     VllmConfig._validate_v2_model_runner = _validate_v2_model_runner
 
 
-def is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
-    """Model whitelist: enable V2 for default-V2 architectures.
-
-    Hybrid models (``is_hybrid=True``) are not excluded: a whitelisted
-    architecture still defaults to V2. Attention-free models remain on V1.
-
-    Draft configs (``runner_type="draft"``) are built from a target that already
-    passed this whitelist. Re-checking the draft architecture (for example
-    ``DeepSeekV4MTPModel``) would fall back to V1 inside the V2 runner.
-    """
-    model_config = vllm_config.model_config
-    if model_config is None:
-        return False
-
-    runner_type = getattr(model_config, "runner_type", "generate")
-    if runner_type == "draft":
-        return True
-
-    if runner_type != "generate":
-        return False
-
-    if getattr(model_config, "is_attention_free", False):
-        return False
-
-    architectures = getattr(model_config, "architectures", [])
-    return any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures)
-
-
-def is_supported_v2_model_runner_feature(vllm_config: VllmConfig) -> bool:
-    """Feature whitelist: only whitelisted features may be enabled with a whitelisted model.
-
-    LoRA, batch-size-based dynamic speculative decoding
-    (``num_speculative_tokens_per_batch_size``), and DSpark KV sliding window
-    (``draft_window_size``) are excluded from the default-V2 feature
-    whitelist. Static ``eagle3`` / ``mtp`` / ``dflash`` / ``dspark``
-    (without a draft window) remain supported. ``VLLM_USE_V2_MODEL_RUNNER``
-    still overrides this default decision.
-    """
-    if getattr(vllm_config, "lora_config", None) is not None:
-        logger.warning_once(
-            "Model Runner V2 default is disabled because LoRA is enabled; using the V1 model runner instead."
-        )
-        return False
-
-    speculative_config = vllm_config.speculative_config
-    if speculative_config is None:
-        return True
-
-    if getattr(speculative_config, "num_speculative_tokens_per_batch_size", None):
-        logger.warning_once(
-            "Model Runner V2 default is disabled because dynamic speculative "
-            "decoding (num_speculative_tokens_per_batch_size) is enabled; "
-            "using the V1 model runner instead."
-        )
-        return False
-
-    additional_config = getattr(vllm_config, "additional_config", None)
-    if (
-        speculative_config.method == "dspark"
-        and isinstance(additional_config, dict)
-        and additional_config.get("draft_window_size") is not None
-    ):
-        logger.warning_once(
-            "Model Runner V2 default is disabled because DSpark KV sliding "
-            "window (draft_window_size) is enabled; using the V1 model runner instead."
-        )
-        return False
-
-    if speculative_config.method in ("eagle3", "mtp", "dflash", "dspark"):
-        logger.info_once(
-            "Model Runner V2 is enabled by default for speculative method '%s'.",
-            speculative_config.method,
-        )
-        return True
-    return False
-
-
-def _v2_model_runner_environment_ready(vllm_config: VllmConfig) -> bool:
-    """Check the remaining V2 gates (feature whitelist + platform + Triton)."""
-    if not is_supported_v2_model_runner_feature(vllm_config):
-        return False
-
-    if is_310p():
-        logger.warning_once("Model Runner V2 is not supported on 310P; using the V1 model runner instead.")
-        return False
-
-    from vllm.triton_utils import HAS_TRITON
-
-    if not HAS_TRITON:
-        logger.warning_once("Model Runner V2 requires Triton; using the V1 model runner instead.")
-        return False
-
-    return True
-
-
 def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     """Return whether the V2 model runner should be used on Ascend.
 
-    An explicit ``VLLM_USE_V2_MODEL_RUNNER`` override wins. Otherwise the V2
-    runner is enabled by default only when all of the following hold:
-
-    * the model is on the default-V2 model whitelist,
-    * the enabled features are on the V2 feature whitelist,
-    * the platform is not 310P and the runtime provides Triton.
+    V2 is the default for every configuration. Set
+    ``VLLM_USE_V2_MODEL_RUNNER=0`` to select V1 explicitly.
     """
     use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
     if use_v2_model_runner is not None:
@@ -194,17 +74,5 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
         )
         return use_v2_model_runner
 
-    if is_default_v2_model_runner_model(vllm_config):
-        if _v2_model_runner_environment_ready(vllm_config):
-            architectures = getattr(vllm_config.model_config, "architectures", [])
-            logger.info_once(
-                "Model Runner V2 is enabled for %s.",
-                ", ".join(architectures),
-            )
-            return True
-        return False
-
-    logger.warning_once(
-        "Model Runner V2 model whitelist does not include this model; using the V1 model runner instead."
-    )
-    return False
+    logger.info_once("VLLM_USE_V2_MODEL_RUNNER is unset; using Model Runner V2 by default.")
+    return True
