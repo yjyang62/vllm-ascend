@@ -23,7 +23,7 @@ from vllm_ascend.utils import (
     is_moe_model,
 )
 
-# Dynamo constant-folds this like VLLM_USE_V2_MODEL_RUNNER. Sync from eager
+# Dynamo constant-folds this like VLLM_USE_V1_MODEL_RUNNER. Sync from eager
 # setup so compiled FIA/MoE never traces use_v2_model_runner (warning_once).
 _USE_V2_EXTRA_KWARGS = False
 

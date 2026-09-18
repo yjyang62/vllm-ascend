@@ -50,7 +50,7 @@ def test_qwen3_5_mtp_tp1_eager():
 
 
 @wait_until_npu_memory_free()
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": "0"})
 def test_qwen3_5_mtp_mrv2_tp1_eager():
     """MRv2 MTP eager smoke.
 

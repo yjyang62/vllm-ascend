@@ -65,7 +65,7 @@ def _run_pd_disaggregation_w8a8_sfa(
         "LD_LIBRARY_PATH": f"/usr/local/lib:{ld_library_path}",
     }
     if use_model_runner_v2:
-        env_dict["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        env_dict["VLLM_USE_V1_MODEL_RUNNER"] = "0"
 
     vllm_server_args = [
         [

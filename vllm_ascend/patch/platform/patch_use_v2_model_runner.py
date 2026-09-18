@@ -4,8 +4,8 @@ from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.pp_utils import resolve_spec_pp_support
 
-# Default to the Ascend V2 runner unless the environment explicitly selects
-# V1. Also neutralize upstream GPU-specific V2 validation.
+# Default to the Ascend V2 runner unless VLLM_USE_V1_MODEL_RUNNER=1.
+# Also neutralize upstream GPU-specific V2 validation.
 apply_v2_model_runner_config_patch()
 
 _original_get_unsupported_features = VllmConfig._get_v2_model_runner_unsupported_features

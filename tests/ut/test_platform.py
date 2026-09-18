@@ -732,7 +732,6 @@ class TestNPUPlatform(TestBase):
         dummy_comm_method = object()
 
         with (
-            patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),
             patch("vllm_ascend.platform.is_moe_model", return_value=True),
             patch("vllm_ascend.platform.enable_sp", return_value=False),
             patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=4),
@@ -799,7 +798,6 @@ class TestNPUPlatform(TestBase):
         vllm_config.use_v2_model_runner = True
 
         with (
-            patch("vllm_ascend.platform.envs_vllm.VLLM_USE_V2_MODEL_RUNNER", True, create=True),
             patch("vllm_ascend.platform.is_moe_model", return_value=True),
             patch("vllm_ascend.platform.enable_sp", return_value=False),
             patch("vllm.distributed.get_tensor_model_parallel_world_size", return_value=2),

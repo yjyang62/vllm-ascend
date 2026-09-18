@@ -28,7 +28,7 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 QWEN35_DENSE_MODEL = os.environ.get("QWEN35_DENSE_MODEL", "Qwen/Qwen3.5-27B")
 
 
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": "0"})
 @wait_until_npu_memory_free()
 def test_qwen35_27b_eager_mode():
     example_prompts = [
@@ -50,7 +50,7 @@ def test_qwen35_27b_eager_mode():
         del vllm_model
 
 
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": "0"})
 @wait_until_npu_memory_free()
 def test_qwen35_27b_acl_graph():
     example_prompts = [

@@ -49,7 +49,7 @@ DSPARK_MODELS = ["deepseek-ai/dspark_qwen3_8b_block7"]
         ),
     ],
 )
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": "0"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dspark_spec_decoding(
     model: str,

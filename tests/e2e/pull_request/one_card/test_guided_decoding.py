@@ -279,7 +279,7 @@ def test_guided_json_completion_xgrammar_model_runner_v2(sample_json_schema, req
     users will actually hit once V2 becomes the default.
     TODO: Remove this test once the V2 model runner is the default.
     """
-    env = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
+    env = {"VLLM_USE_V1_MODEL_RUNNER": "0"}
     # The VllmRunner ModelCache key is derived from the model marker kwargs,
     # so tag it with the env to give this test its own engine (the other
     # xgrammar tests in this module run with the env unset).

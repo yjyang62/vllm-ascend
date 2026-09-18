@@ -19,18 +19,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import vllm.envs as envs_vllm
 from vllm.logger import logger
+
+import vllm_ascend.envs as envs
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
 
+
 def _validate_v2_model_runner(vllm_config: VllmConfig) -> None:
     """No-op replacement for the upstream V2 model runner validation.
 
-    Ascend defaults to V2 and uses ``VLLM_USE_V2_MODEL_RUNNER`` as its only
+    Ascend defaults to V2 and uses ``VLLM_USE_V1_MODEL_RUNNER`` as its only
     runner-selection control. Upstream GPU-specific model, feature, and Triton
     checks do not apply to the Ascend runner.
     """
@@ -42,7 +44,7 @@ def apply_v2_model_runner_config_patch() -> None:
     Installs two overrides on the ``VllmConfig`` class:
 
     * ``use_v2_model_runner`` defaults to V2 and honors an explicit
-      ``VLLM_USE_V2_MODEL_RUNNER`` override (see :func:`use_v2_model_runner`).
+      ``VLLM_USE_V1_MODEL_RUNNER=1`` override (see :func:`use_v2_model_runner`).
     * ``_validate_v2_model_runner`` is neutralized because the upstream checks
       describe the upstream GPU runner and do not apply to the Ascend runner.
 
@@ -63,16 +65,11 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     """Return whether the V2 model runner should be used on Ascend.
 
     V2 is the default for every configuration. Set
-    ``VLLM_USE_V2_MODEL_RUNNER=0`` to select V1 explicitly.
+    ``VLLM_USE_V1_MODEL_RUNNER=1`` to select V1 explicitly.
     """
-    use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
-    if use_v2_model_runner is not None:
-        logger.info_once(
-            "VLLM_USE_V2_MODEL_RUNNER=%s is set; using Model Runner %s.",
-            use_v2_model_runner,
-            "V2" if use_v2_model_runner else "V1",
-        )
-        return use_v2_model_runner
+    if envs.VLLM_USE_V1_MODEL_RUNNER:
+        logger.info_once("VLLM_USE_V1_MODEL_RUNNER=1 is set; using Model Runner V1.")
+        return False
 
-    logger.info_once("VLLM_USE_V2_MODEL_RUNNER is unset; using Model Runner V2 by default.")
+    logger.info_once("VLLM_USE_V1_MODEL_RUNNER is unset; using Model Runner V2 by default.")
     return True

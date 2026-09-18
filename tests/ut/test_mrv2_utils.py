@@ -23,11 +23,10 @@ import vllm_ascend.mrv2_utils as mrv2_utils
 from vllm_ascend.mrv2_utils import use_v2_model_runner
 
 
-@pytest.mark.parametrize("env_value", [True, False])
-def test_environment_override_wins(monkeypatch, env_value):
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", env_value)
+def test_v1_override_selects_v1(monkeypatch):
+    monkeypatch.setattr(mrv2_utils.envs, "VLLM_USE_V1_MODEL_RUNNER", True)
 
-    assert use_v2_model_runner(SimpleNamespace()) is env_value
+    assert use_v2_model_runner(SimpleNamespace()) is False
 
 
 @pytest.mark.parametrize(
@@ -64,17 +63,26 @@ def test_environment_override_wins(monkeypatch, env_value):
     ],
 )
 def test_v2_is_default_for_every_configuration(monkeypatch, config):
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(mrv2_utils.envs, "VLLM_USE_V1_MODEL_RUNNER", False)
 
     assert use_v2_model_runner(config) is True
 
 
 def test_default_v2_logs_selection(monkeypatch):
     info_calls = []
-    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(mrv2_utils.envs, "VLLM_USE_V1_MODEL_RUNNER", False)
     monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: info_calls.append(args))
 
     assert use_v2_model_runner(SimpleNamespace()) is True
+    assert len(info_calls) == 1
+
+
+def test_v1_override_logs_selection(monkeypatch):
+    info_calls = []
+    monkeypatch.setattr(mrv2_utils.envs, "VLLM_USE_V1_MODEL_RUNNER", True)
+    monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: info_calls.append(args))
+
+    assert use_v2_model_runner(SimpleNamespace()) is False
     assert len(info_calls) == 1
 
 

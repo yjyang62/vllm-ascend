@@ -97,7 +97,7 @@ def server(
         # Qwen3ForCausalLM now defaults to MRv2. Sleep/wake generate is still
         # V1-only; pin the RLHF server to V1 until the MRv2 allocator path is
         # ready. Keep this on the subprocess env only.
-        "VLLM_USE_V2_MODEL_RUNNER": "0",
+        "VLLM_USE_V1_MODEL_RUNNER": "1",
     }
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
     cmd = [

@@ -82,7 +82,7 @@ def _assert_speculative_accuracy(outputs, metrics) -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_USE_V1_MODEL_RUNNER": "0",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "HCCL_BUFFSIZE": "2048",

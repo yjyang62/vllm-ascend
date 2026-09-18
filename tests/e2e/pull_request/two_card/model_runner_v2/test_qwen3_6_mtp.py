@@ -90,7 +90,7 @@ def _read_mtp_counters(metrics: list[Metric]) -> tuple[int, int]:
     os.environ,
     {
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_USE_V1_MODEL_RUNNER": "0",
         "HCCL_BUFFSIZE": "1024",
         "LCCL_DETERMINISTIC": "1",
         "HCCL_DETERMINISTIC": "true",

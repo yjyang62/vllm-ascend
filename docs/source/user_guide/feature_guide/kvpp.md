@@ -53,7 +53,7 @@ vllm serve <model-path> \
 
 Adjust the token budget and maximum number of sequences to device capacity and workload.
 
-For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-size` to the launch configuration. KVPP shares caches across PCP × TP ranks; Model Runner V1 does not support KVPP with PCP.
+For PCP, add `--prefill-context-parallel-size` to the launch configuration. KVPP shares caches across PCP × TP ranks; Model Runner V1 (`VLLM_USE_V1_MODEL_RUNNER=1`) does not support KVPP with PCP.
 
 For PP, add `enable_kvpp` to the existing PP launch configuration. Each stage allocates its caches independently. KVPP does not change PP layer partitioning.
 

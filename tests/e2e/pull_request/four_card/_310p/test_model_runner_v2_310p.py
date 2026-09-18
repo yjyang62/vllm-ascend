@@ -28,7 +28,7 @@ def _generate_qwen35_mrv2_prefix_mamba_outputs(enable_prefix_caching: bool) -> l
 
     if enable_prefix_caching:
         with (
-            patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"}),
+            patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": "0"}),
             VllmRunner(
                 "Qwen/Qwen3.5-4B",
                 tensor_parallel_size=2,
@@ -45,7 +45,7 @@ def _generate_qwen35_mrv2_prefix_mamba_outputs(enable_prefix_caching: bool) -> l
                 outputs.extend(vllm_model.generate_greedy([prompt], max_tokens=8))
     else:
         with (
-            patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"}),
+            patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": "0"}),
             VllmRunner(
                 "Qwen/Qwen3.5-4B",
                 tensor_parallel_size=2,
@@ -62,7 +62,7 @@ def _generate_qwen35_mrv2_prefix_mamba_outputs(enable_prefix_caching: bool) -> l
     return outputs
 
 
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": "0"})
 def test_qwen3_dense_mrv2_tp2_aclgraph_fp16():
     with VllmRunner(
         "Qwen/Qwen3-8B",
@@ -79,7 +79,7 @@ def test_qwen3_dense_mrv2_tp2_aclgraph_fp16():
         vllm_model.generate_greedy(["Hello, my name is"], max_tokens=5)
 
 
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": "0"})
 def test_qwen3_moe_mrv2_tp2_aclgraph_w8a8():
     with VllmRunner(
         "vllm-ascend/Qwen3-30B-A3B-W8A8",
@@ -99,7 +99,7 @@ def test_qwen3_moe_mrv2_tp2_aclgraph_w8a8():
         vllm_model.generate_greedy(["Hello, my name is"], max_tokens=5)
 
 
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": "0"})
 def test_qwen35_hybrid_mrv2_tp2_aclgraph_fp16():
     with VllmRunner(
         "Qwen/Qwen3.5-4B",
@@ -119,7 +119,7 @@ def test_qwen35_hybrid_mrv2_tp2_aclgraph_fp16():
 
 
 @wait_until_npu_memory_free(0.7)
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": "0"})
 def test_qwen35_hybrid_prefix_mamba_cache_mrv2_tp2_fp16():
     """MRv2 Qwen3.5 prefix-cache parity vs MRv1 one-card APC test."""
     prefix_cache_outputs = _generate_qwen35_mrv2_prefix_mamba_outputs(enable_prefix_caching=True)

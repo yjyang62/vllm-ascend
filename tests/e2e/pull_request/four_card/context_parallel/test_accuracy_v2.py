@@ -243,7 +243,7 @@ DSV3_2_SFA_PCP_PP_MTP_CASE = InferenceCase(
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_USE_V1_MODEL_RUNNER": "0",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
@@ -268,7 +268,7 @@ def test_dsv3_2_sfa_pcp_model_runner_v2_graph() -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_USE_V1_MODEL_RUNNER": "0",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
@@ -293,7 +293,7 @@ def test_dsv3_2_sfa_pcp_dp_model_runner_v2_graph() -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_USE_V1_MODEL_RUNNER": "0",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
@@ -318,7 +318,7 @@ def test_dsv3_2_sfa_pcp_pp_mtp_model_runner_v2_graph() -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_USE_V1_MODEL_RUNNER": "0",
         "VLLM_BATCH_INVARIANT": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",
@@ -372,7 +372,7 @@ def _run_pcp_spec_decode(
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_USE_V1_MODEL_RUNNER": "0",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "1024",
     },
@@ -402,7 +402,7 @@ def test_mtp_mla_spec_decode_with_pcp() -> None:
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_USE_V1_MODEL_RUNNER": "0",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "1024",
     },

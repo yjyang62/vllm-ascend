@@ -43,7 +43,7 @@ EAGLE_MODELS = ["vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B"]
         pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": "0"})
 def test_eagle_spec_decoding(
     model: str,
     eagle_model: str,

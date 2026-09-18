@@ -7,7 +7,7 @@ served with PP=2, TP=2 (4 NPU cards total).
 The same scenario is executed with Model Runner V1 and Model Runner V2,
 both with Short Request First (SRF) disabled and enabled. Within each SRF
 mode, the only configuration difference between the two model-runner runs
-is VLLM_USE_V2_MODEL_RUNNER.
+is VLLM_USE_V1_MODEL_RUNNER (`1` selects V1, unset/`0` keeps default V2).
 
 Test flow:
   1. Create an LLM engine with profiling_chunk_config enabled.
@@ -41,12 +41,12 @@ BASELINE_TTFT_S = 5.45
 
 
 @pytest.mark.parametrize(
-    ("use_v2_model_runner", "enable_srf"),
+    ("use_v1_model_runner", "enable_srf"),
     [
-        pytest.param("0", False, id="MRV1"),
-        pytest.param("1", False, id="MRV2"),
-        pytest.param("0", True, id="MRV1-SRF"),
-        pytest.param("1", True, id="MRV2-SRF"),
+        pytest.param("1", False, id="MRV1"),
+        pytest.param("0", False, id="MRV2"),
+        pytest.param("1", True, id="MRV1-SRF"),
+        pytest.param("0", True, id="MRV2-SRF"),
     ],
 )
 @patch.dict(
@@ -58,15 +58,15 @@ BASELINE_TTFT_S = 5.45
 )
 @wait_until_npu_memory_free()
 def test_profiling_chunk_ttft_performance(
-    use_v2_model_runner: str,
+    use_v1_model_runner: str,
     enable_srf: bool,
 ) -> None:
-    runner_name = "MRV2" if use_v2_model_runner == "1" else "MRV1"
+    runner_name = "MRV1" if use_v1_model_runner == "1" else "MRV2"
     scenario_name = f"{runner_name}+SRF" if enable_srf else runner_name
 
     # Keep all other runtime settings identical across cases.
     with (
-        patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": use_v2_model_runner}),
+        patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": use_v1_model_runner}),
         VllmRunner(
             MODEL,
             max_model_len=70000,

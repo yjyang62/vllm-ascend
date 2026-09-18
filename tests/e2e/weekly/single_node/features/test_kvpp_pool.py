@@ -68,7 +68,7 @@ def test_kvpp_memcache_reload(tmp_path):
             args,
             server_port=port,
             auto_port=False,
-            env_dict={**pool.server_envs, "VLLM_USE_V2_MODEL_RUNNER": "0", "VLLM_SERVER_DEV_MODE": "1"},
+            env_dict={**pool.server_envs, "VLLM_USE_V1_MODEL_RUNNER": "1", "VLLM_SERVER_DEV_MODE": "1"},
         ) as server:
             # Use a prompt spanning cache blocks so the replay exercises pool loading.
             prompt = PROMPTS[1]

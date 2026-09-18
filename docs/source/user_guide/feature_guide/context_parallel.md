@@ -51,11 +51,9 @@ DSA-CP supports prefix caching, chunked prefill, speculative decoding, P/D disag
 
 ### Prefill Context Parallel
 
-Enable ModelRunner V2 and set `prefill_context_parallel_size` to the number of PCP ranks:
+Model Runner V2 is the default. Set `prefill_context_parallel_size` to the number of PCP ranks:
 
 ```bash
-export VLLM_USE_V2_MODEL_RUNNER=1
-
 vllm serve <supported-model> \
     --tensor-parallel-size <tp-size> \
     --prefill-context-parallel-size <pcp-size> \
@@ -77,8 +75,6 @@ For general speculative decoding configuration and model requirements, see [Spec
 ##### MTP with MLA
 
 ```bash
-export VLLM_USE_V2_MODEL_RUNNER=1
-
 vllm serve <mtp-capable-mla-model> \
     --tensor-parallel-size 2 \
     --prefill-context-parallel-size 2 \
@@ -90,8 +86,6 @@ vllm serve <mtp-capable-mla-model> \
 ##### Eagle3 with GQA
 
 ```bash
-export VLLM_USE_V2_MODEL_RUNNER=1
-
 vllm serve <gqa-target-model> \
     --tensor-parallel-size 2 \
     --prefill-context-parallel-size 2 \

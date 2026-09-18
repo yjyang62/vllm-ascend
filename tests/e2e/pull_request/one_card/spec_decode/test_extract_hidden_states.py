@@ -23,7 +23,7 @@ states are correctly extracted and saved on the Ascend NPU. Parametrized over:
 * a hybrid attention model (Qwen3.5-0.8B, GatedDeltaNet + full_attention)
   loaded with dummy weights as a shape/round-trip smoke test. The hybrid case
   mirrors upstream vLLM PR #39949.
-* Model Runner V1 (Ascend default) and Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`),
+* Model Runner V2 (Ascend default) and Model Runner V1 (`VLLM_USE_V1_MODEL_RUNNER=1`),
   covering the Ascend adaptation of upstream vLLM PR #49811 on the 0828 pin.
 * token-in / token-out via ``skip_tokenizer_init`` + ``TokensPrompt`` on the
   text-only dense model (dummy weights). Qwen3.5 is multimodal, so skipping
@@ -77,7 +77,7 @@ class ExtractHiddenStatesCase:
     verify_nonzero: bool = True
     # Hybrid smoke test additionally checks the token_ids round-trip.
     verify_token_ids: bool = False
-    # When True, force Model Runner V2 via VLLM_USE_V2_MODEL_RUNNER.
+    # When True, keep the default Model Runner V2 path.
     use_v2_model_runner: bool = False
     # Token-in / token-out: skip tokenizer init and pass TokensPrompt.
     skip_tokenizer_init: bool = False
@@ -246,9 +246,9 @@ def _verify_token_in_token_out(output, token_prompt: list[int], *, max_tokens: i
 def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config, monkeypatch):
     """Extract hidden states from the target model and validate the dump."""
     if case.use_v2_model_runner:
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+        monkeypatch.delenv("VLLM_USE_V1_MODEL_RUNNER", raising=False)
     else:
-        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+        monkeypatch.setenv("VLLM_USE_V1_MODEL_RUNNER", "1")
 
     generate_inputs = _generate_inputs(case)
     if case.skip_tokenizer_init:

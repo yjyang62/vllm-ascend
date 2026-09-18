@@ -81,13 +81,11 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 
 ### Model Runner V2: Asynchronous EPLB
 
-Select MRv2 explicitly when the model or environment does not select it by
-default. Enable expert parallelism and upstream EPLB. Ascend uses the upstream
-default policy, selects the Gloo communicator automatically, and supports
-asynchronous movement only.
+Model Runner V2 is the default. Enable expert parallelism and upstream EPLB.
+Ascend uses the upstream default policy, selects the Gloo communicator
+automatically, and supports asynchronous movement only.
 
 ```bash
-export VLLM_USE_V2_MODEL_RUNNER=1
 unset DYNAMIC_EPLB
 unset EXPERT_MAP_RECORD
 

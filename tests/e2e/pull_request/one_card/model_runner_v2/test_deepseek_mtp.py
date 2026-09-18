@@ -39,7 +39,7 @@ MTP_MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
         pytest.param({}, id="default_full_and_piecewise"),
     ],
 )
-@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@patch.dict(os.environ, {"VLLM_USE_V1_MODEL_RUNNER": "0"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_mtp_spec_decoding(
     model: str,

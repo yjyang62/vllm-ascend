@@ -333,7 +333,7 @@ model with a confidence head.
 Enable it in `speculative_config`:
 
 ```shell
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
+vllm serve Qwen/Qwen3-8B \
   --speculative-config '{
     "method": "dspark",
     "model": "deepseek-ai/dspark_qwen3_8b_block7",
@@ -389,8 +389,8 @@ options.
   the draft attention can read. Omit the key (or remove it) to disable the
   window. Typical values are 512-4096; the window is block-aligned internally,
   so any positive value works.
-- Works on the default model runner (MRV1). Not yet supported under
-  `VLLM_USE_V2_MODEL_RUNNER=1`.
+- Works on Model Runner V1 (`VLLM_USE_V1_MODEL_RUNNER=1`). Not yet supported
+  on default Model Runner V2.
 - For `mtp` the window is ignored (force-disabled): MTP reuses the target
   model's own layers, so windowing it would change the target's computation.
 
@@ -468,10 +468,11 @@ The `extract_hidden_states` method is a special speculative decoding mode that d
 > [!NOTE]
 > This method produces only 1 output token per request. The primary output is the hidden states saved to disk, not the generated text.
 
-Both Model Runner V1 and Model Runner V2 are supported on Ascend. Enable V2 with:
+Both Model Runner V1 and Model Runner V2 are supported on Ascend. V2 is the
+default. Select V1 with:
 
 ```shell
-export VLLM_USE_V2_MODEL_RUNNER=1
+export VLLM_USE_V1_MODEL_RUNNER=1
 ```
 
 > [!NOTE]

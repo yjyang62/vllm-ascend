@@ -154,13 +154,9 @@ def _pin_v1_sfa_model_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     ``set_additional_forward_context`` reads TP groups on the V2 branch.
     This file never initializes distributed groups.
     """
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-    monkeypatch.setattr("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", False, raising=False)
-    monkeypatch.setattr(
-        "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
-        False,
-        raising=False,
-    )
+    monkeypatch.setenv("VLLM_USE_V1_MODEL_RUNNER", "1")
+    monkeypatch.setattr("vllm_ascend.envs.VLLM_USE_V1_MODEL_RUNNER", True, raising=False)
+    monkeypatch.setattr("vllm_ascend.mrv2_utils.envs.VLLM_USE_V1_MODEL_RUNNER", True, raising=False)
 
 
 def _get_vllm_config(

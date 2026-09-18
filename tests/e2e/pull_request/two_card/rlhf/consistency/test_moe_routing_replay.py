@@ -39,7 +39,7 @@ def test_moe_routing_replay(model, use_v2):
     if use_v2 and vllm_version_is("0.28.0"):
         pytest.skip("vLLM v0.28.0 does not support routed experts capture on MRV2")
     if use_v2:
-        env_vars["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        env_vars["VLLM_USE_V1_MODEL_RUNNER"] = "0"
 
     with patch.dict(os.environ, env_vars):
         prompts = ["Hello, please introduce yourself."]

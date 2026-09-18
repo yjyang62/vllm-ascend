@@ -87,6 +87,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Force Model Runner V1. Default 0: use Model Runner V2 for all
+    # configurations. Set to 1 to select V1. Valid values: 0 or 1.
+    # This configuration is not sensitive.
+    "VLLM_USE_V1_MODEL_RUNNER": lambda: bool(int(os.getenv("VLLM_USE_V1_MODEL_RUNNER", "0"))),
 }
 
 # end-env-vars-definition

@@ -45,7 +45,7 @@ import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
 # Re-apply the default-V2 runner selection and related V2/V1 feature patches
-# in worker processes. VLLM_USE_V2_MODEL_RUNNER=0 explicitly selects V1.
+# in worker processes. VLLM_USE_V1_MODEL_RUNNER=1 explicitly selects V1.
 import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
 
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa

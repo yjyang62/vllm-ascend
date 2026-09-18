@@ -204,7 +204,7 @@ def test_p_eagle_acceptance(
     # MRv2 FULL decode ACL graph capture D2Hs seq_lens via .tolist() for
     # parallel_drafting. Keep this acceptance case on V1 until that path is
     # capture-safe.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setenv("VLLM_USE_V1_MODEL_RUNNER", "1")
     main_model_name = P_EAGLE_MODELS[method]["main"]
     spec_model_name = P_EAGLE_MODELS[method]["spec"]
 
@@ -374,7 +374,7 @@ def test_qwen3_vwn_eagle3_tp2():
 
 def test_eagle3_sliding_window(monkeypatch):
     # draft_window_size is MRV1-only; Qwen3 + eagle3 now defaults to MRv2.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setenv("VLLM_USE_V1_MODEL_RUNNER", "1")
     method = "eagle3"
     num_speculative_tokens = 3
     draft_window_size = 512
@@ -468,7 +468,7 @@ def test_hang(monkeypatch):
     """
     # The deadlock was fixed on the V1 proposer. Qwen3_5MoeForCausalLM now
     # defaults to MRv2; keep this regression on V1.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setenv("VLLM_USE_V1_MODEL_RUNNER", "1")
     # Fail-fast: cap NPU operator execution timeout at 5 min. Without this the
     # hang deadlocks for ~9 min until CANN's default vector-core timeout
     # (~556s) fires — too long for CI.
@@ -579,7 +579,7 @@ def test_dflash2_acceptance(
     # After #16726 reverted UpdatableGraph, MRv2 PIECEWISE dummy profile calls
     # dflash2 candidate_selector without set_forward_context. Keep this
     # acceptance case on V1; test_dflash2_v2_acceptance covers V2 eager.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    monkeypatch.setenv("VLLM_USE_V1_MODEL_RUNNER", "1")
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 
@@ -663,7 +663,7 @@ def test_dflash2_v2_acceptance(
     method: str,
     num_speculative_tokens: int,
 ):
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+    os.environ["VLLM_USE_V1_MODEL_RUNNER"] = "0"
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 

@@ -714,7 +714,7 @@
 #       Ascend uses the NPU v2 runner by default for every model and feature
 #       combination. Upstream GPU-specific architecture, feature, and Triton
 #       gates must not silently switch an Ascend request back to v1.
-#       VLLM_USE_V2_MODEL_RUNNER=0 remains the explicit v1 escape hatch.
+#       VLLM_USE_V1_MODEL_RUNNER=1 remains the explicit v1 escape hatch.
 #    How:
 #       Call apply_v2_model_runner_config_patch() to install the Ascend
 #       default-v2 use_v2_model_runner property and neutralize upstream V2
