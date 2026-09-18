@@ -545,7 +545,7 @@ def test_extra_ctx_getattr_does_not_call_use_v2_model_runner(monkeypatch):
     assert forward_context.additional_kwargs["capturing"] is False
 
 
-def test_extra_ctx_whitelist_v2_hides_gpu_capturing_flag(monkeypatch):
+def test_extra_ctx_default_v2_hides_gpu_capturing_flag(monkeypatch):
     # GPU V2 ForwardContext has no vllm_config. Isolation follows the
     # eager-cached _USE_V2_EXTRA_KWARGS flag, not ctx.vllm_config.
     monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", True)
@@ -576,7 +576,7 @@ def test_extra_ctx_v1_stores_capturing_on_context(monkeypatch):
     assert "capturing" not in forward_context.additional_kwargs
 
 
-def test_extra_ctx_env_override_wins_over_whitelist(monkeypatch):
+def test_extra_ctx_v1_override_uses_context_capturing_flag(monkeypatch):
     monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", False)
     forward_context = SimpleNamespace(
         additional_kwargs={},

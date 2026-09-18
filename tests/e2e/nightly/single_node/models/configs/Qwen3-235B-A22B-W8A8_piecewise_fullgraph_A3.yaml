@@ -94,7 +94,6 @@ test_cases:
     model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
     envs:
       <<: *envs
-      VLLM_USE_V2_MODEL_RUNNER: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--enable-eplb"
