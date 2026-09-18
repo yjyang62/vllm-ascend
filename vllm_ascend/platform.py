@@ -458,13 +458,11 @@ class NPUPlatform(Platform):
         # NOTE: This still monkey-patches VllmConfig by replacing the
         # use_v2_model_runner property (the "patch way"). It is kept here
         # because upstream vLLM does not yet expose a platform hook to
-        # customize the default V2 model runner decision; the whitelist
-        # logic itself lives in vllm_ascend.mrv2_utils.
+        # make V2 the unconditional platform default.
         # The upstream V2 validation is also neutralized, since Ascend fully
-        # owns the V2 enablement decision (the platform / Triton gates in
-        # mrv2_utils differ from the upstream validation).
+        # owns the V2 enablement decision.
         # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
-        # override the default, and contribute the whitelist upstream.
+        # override the default runner selection.
         apply_v2_model_runner_config_patch()
 
         # Lazy import vllm/vllm-ascend to avoid circular import
