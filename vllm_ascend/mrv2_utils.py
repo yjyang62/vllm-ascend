@@ -108,8 +108,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         if getattr(model_config, "is_encoder_decoder", False) is True:
             reasons.append("encoder-decoder")
 
-    if _additional(vllm_config, "enable_kvpp") is True:
-        reasons.append("KVPP")
     if _is_configured(getattr(vllm_config, "ec_transfer_config", None)):
         reasons.append("VL encoder disaggregation")
     elif _is_configured(model_config):
@@ -150,7 +148,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * LoRA
     * pooling KV (``runner_type="pooling"``)
     * encoder-decoder (Whisper)
-    * KVPP (``additional_config.enable_kvpp``)
     * VL encoder disaggregation (``ec_transfer_config`` / encoder-only)
     * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
