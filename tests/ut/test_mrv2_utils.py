@@ -60,6 +60,7 @@ def test_environment_override_wins(monkeypatch, env_value):
         SimpleNamespace(
             kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV2"),
         ),
+        SimpleNamespace(additional_config={"enable_kvpp": True}),
     ],
     ids=[
         "empty-config",
@@ -68,6 +69,7 @@ def test_environment_override_wins(monkeypatch, env_value):
         "dynamic-unsupported-speculation",
         "dflash2-eager",
         "mooncake-pd",
+        "kvpp",
     ],
 )
 def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
@@ -92,7 +94,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
         SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
         SimpleNamespace(model_config=SimpleNamespace(is_encoder_decoder=True)),
-        SimpleNamespace(additional_config={"enable_kvpp": True}),
         SimpleNamespace(ec_transfer_config=object()),
         SimpleNamespace(
             model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True)),
@@ -129,7 +130,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "pooling-runner",
         "pooling-model",
         "encoder-decoder",
-        "kvpp",
         "vl-encoder-disaggregation",
         "vl-encoder-only",
         "vl-encoder-graph",
