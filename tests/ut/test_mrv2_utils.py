@@ -61,6 +61,13 @@ def test_environment_override_wins(monkeypatch, env_value):
             kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV2"),
         ),
         SimpleNamespace(additional_config={"enable_kvpp": True}),
+        SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector="AscendStoreConnector")),
+        SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                kv_connector="AscendStoreConnector",
+                kv_connector_extra_config={"backend": "memcache"},
+            )
+        ),
     ],
     ids=[
         "empty-config",
@@ -70,6 +77,8 @@ def test_environment_override_wins(monkeypatch, env_value):
         "dflash2-eager",
         "mooncake-pd",
         "kvpp",
+        "kv-pool-connector",
+        "kv-pool-memcache",
     ],
 )
 def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
@@ -111,13 +120,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
                 draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
             )
         ),
-        SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector="AscendStoreConnector")),
-        SimpleNamespace(
-            kv_transfer_config=SimpleNamespace(
-                kv_connector="AscendStoreConnector",
-                kv_connector_extra_config={"backend": "memcache"},
-            )
-        ),
     ],
     ids=[
         "lora",
@@ -139,8 +141,6 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "ngram-gpu-speculative-decoding",
         "parallel-drafting",
         "dflash2-graph",
-        "kv-pool-connector",
-        "kv-pool-memcache",
     ],
 )
 def test_blacklisted_features_default_to_v1(monkeypatch, config):
