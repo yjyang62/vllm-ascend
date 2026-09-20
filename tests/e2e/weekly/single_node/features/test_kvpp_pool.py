@@ -63,7 +63,7 @@ def test_kvpp_memcache_reload(tmp_path):
                 }
             ),
         ]
-        # KV pool is on the V2 blacklist, so this case stays on V1 without
+        # KV pool is off the V2 blacklist, so this case defaults to V2 without
         # an explicit runner env pin.
         with RemoteOpenAIServer(
             maybe_model_redirect(MODEL),
