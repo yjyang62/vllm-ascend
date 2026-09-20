@@ -31,7 +31,6 @@ else:
 
 _NGRAM_SPEC_METHODS = frozenset({"ngram", "ngram_gpu"})
 _DFLASH2_ARCHITECTURES = frozenset({"DFlash2DraftModel"})
-_KV_POOL_CONNECTORS = frozenset({"AscendStoreConnector"})
 # First matching prefix wins, so keep Hy3 ahead of Gemma4.
 _ARCH_PREFIXES = (("HYV3", "Hy3-preview"), ("Gemma4", "Gemma4"))
 
@@ -77,20 +76,11 @@ def _is_dflash2_graph(speculative_config: object) -> bool:
     return any(name in _DFLASH2_ARCHITECTURES for name in _architectures(draft))
 
 
-def _is_kv_pool(kv_transfer_config: object) -> bool:
-    connector = getattr(kv_transfer_config, "kv_connector", None)
-    if isinstance(connector, str) and connector in _KV_POOL_CONNECTORS:
-        return True
-    extra = getattr(kv_transfer_config, "kv_connector_extra_config", None)
-    return isinstance(extra, dict) and extra.get("backend") == "memcache"
-
-
 def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
     """Reasons this config is not V2-ready and should default to V1."""
     reasons: list[str] = []
     model_config = getattr(vllm_config, "model_config", None)
     spec_config = getattr(vllm_config, "speculative_config", None)
-    kv_transfer = getattr(vllm_config, "kv_transfer_config", None)
 
     if is_310p():
         reasons.append("310P")
@@ -131,8 +121,6 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         if _is_dflash2_graph(spec_config):
             reasons.append("dflash2 graph")
 
-    if _is_configured(kv_transfer) and _is_kv_pool(kv_transfer):
-        reasons.append("KV pool")
     return reasons
 
 
@@ -155,7 +143,6 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
     * parallel_drafting
     * dflash2 graph (DFlash2 drafts without ``enforce_eager``)
-    * KV pool (``AscendStoreConnector`` / memcache)
 
     Set ``VLLM_USE_V2_MODEL_RUNNER=0`` to force V1.
     """
