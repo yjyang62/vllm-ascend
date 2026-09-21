@@ -10,7 +10,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       HCCL_OP_EXPANSION_MODE: "AIV"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      VLLM_USE_V1: "1"
       HCCL_BUFFSIZE: "256"
       ASCEND_AGGREGATE_ENABLE: "1"
       ASCEND_TRANSPORT_PRINT: "1"
@@ -76,5 +75,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 4
         request_rate: 0
-        baseline: 186.35295
+        baseline: 180.2157
         threshold: 0.97

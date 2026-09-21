@@ -2,6 +2,7 @@
 
 ## Version Specific FAQs
 
+- [[v0.26.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/14766)
 - [[v0.23.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/12916)
 - [[v0.23.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/12238)
 - [[v0.22.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/10593)
@@ -277,7 +278,7 @@ export SOC_VERSION="ascend910_9391"
 # Atlas 300I
 export SOC_VERSION="ascend310p1"
 
-# Ascend 950 Products
+# 950PR&950DT Products
 export SOC_VERSION="<value starting with ascend950>"
 ```
 
