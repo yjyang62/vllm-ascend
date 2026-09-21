@@ -268,6 +268,7 @@ class RlConfig:
 
     enabled: bool = False
     sleep_mode_extra_cleanup: bool = False
+    experimental_hccp_lease: bool = False
     enable_training_consistency: bool = False
     enable_batch_invariant: bool = False
 
@@ -375,6 +376,7 @@ class AscendConfig:
             "rl_config": {
                 "enabled": false,
                 "sleep_mode_extra_cleanup": false,
+                "experimental_hccp_lease": false,
                 "enable_training_consistency": false,
                 "enable_batch_invariant": false
             },

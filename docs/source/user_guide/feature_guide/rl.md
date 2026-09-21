@@ -40,6 +40,7 @@ enables the development endpoints, and removes `expandable_segments` from
 | Field | When to enable it |
 | --- | --- |
 | `sleep_mode_extra_cleanup` | Release HCCL process groups and ACL graph workspaces during sleep in a same-NPU deployment |
+| `experimental_hccp_lease` | Opt-in prototype that keeps the HCCP service allocated during extra-cleanup sleep without an HCCL anchor group |
 | `enable_training_consistency` | Select the FA3 attention backend for training-inference consistency |
 | `enable_batch_invariant` | Enable batch-invariant kernels and deterministic communication settings |
 
@@ -356,6 +357,7 @@ for the supported load-balancing modes.
 | `--enable-sleep-mode` | Trainer and rollout engine share NPUs | Enable the CaMemAllocator memory pool |
 | `VLLM_WORKER_MULTIPROC_METHOD=spawn` | Sleep mode | Use the supported worker start method |
 | `rl_config.sleep_mode_extra_cleanup=true` | Optional for sleep mode | Release HCCL and ACL graph resources at the cost of slower wake-up |
+| `rl_config.experimental_hccp_lease=true` | Optional for extra-cleanup sleep | Keep the HCCP service allocated via a process-local preload shim; requires extra cleanup |
 | `rl_config.enable_training_consistency=true` | Training-inference consistency | Select FA3; requires the `flash_attn_npu_v3` package |
 | `rl_config.enable_batch_invariant=true` | Reproducible rollouts | Enable batch-invariant kernels and deterministic communication settings |
 | `--weight-transfer-config '{"backend": "hccl"}'` | Cross-NPU weight transfer | Register the Ascend HCCL transfer engine |

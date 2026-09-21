@@ -171,7 +171,13 @@ class NPUWorker(WorkerBase):
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
-        self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
+        rl_config = get_ascend_config().rl_config
+        lease = getattr(rl_config, "experimental_hccp_lease", False) is True
+        if lease and not (rl_config.enabled and rl_config.sleep_mode_extra_cleanup):
+            raise ValueError("experimental_hccp_lease requires RL sleep cleanup")
+        self.sleep_wakeup_manager = SleepWakeupManager(
+            vllm_config, self, lambda: getattr(self, "model_runner", None), experimental_hccp_lease=lease
+        )
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -280,8 +286,11 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
-        # Restore the buffers after level 2 sleep
-        if len(self._sleep_saved_buffers):
+        # Restore the buffers after level 2 sleep. With the experimental HCCP
+        # lease, delay restoration until KV cache is restored so staged
+        # weights-then-KV wakeup keeps fused slot metadata consistent.
+        lease_enabled = getattr(get_ascend_config().rl_config, "experimental_hccp_lease", False) is True
+        if (not lease_enabled or tags is None or "kv_cache" in tags) and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:

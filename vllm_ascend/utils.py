@@ -56,6 +56,7 @@ COMPILATION_PASS_KEY = "graph_fusion_manager"
 ASCEND_QUANTIZATION_METHOD = "ascend"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 FP8_METHOD = "fp8"
+SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME = "vllm_ascend_sleep_lifecycle_anchor"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
 
