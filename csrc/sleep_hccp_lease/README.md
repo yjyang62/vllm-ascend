@@ -32,8 +32,7 @@ are destroyed. The shim defers runtime Close while held and reuses the service
 on a matching Open. The final unheld Close reaches the real runtime.
 
 Validated: three level-1 sleep/wake cycles, including weights-then-KV staged
-wake, on the three-layer DeepSeek reproducer. Model buffer and four fused slot
-metadata restorations are included for that reproducer. This is not a complete
+wake, on the three-layer DeepSeek reproducer. This is not a complete
 persistent-buffer audit for other models. Level-2 updates, other hardware and
 toolkit versions, multi-node operation, and fault recovery are not validated.
 

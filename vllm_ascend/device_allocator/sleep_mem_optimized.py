@@ -30,13 +30,6 @@ from vllm.utils.mem_constants import GiB_bytes
 
 from vllm_ascend.compilation import acl_graph
 
-_FUSED_SLOT_METADATA_ATTRS = (
-    "_fused_block_table_addrs",
-    "_fused_slot_mapping_addrs",
-    "_fused_block_table_strides",
-    "_fused_block_sizes",
-)
-
 
 class SleepWakeupManager:
     def __init__(
@@ -50,7 +43,6 @@ class SleepWakeupManager:
         self.acl_graph = AclGraphSleepWakeupManager(vllm_config, model_runner_getter)
         self.hccl = HcclSleepWakeupManager(vllm_config, worker, use_hccp_lease=use_hccp_lease)
         self._lease_enabled = use_hccp_lease
-        self._saved_slot_metadata: list[tuple[Any, Any]] = []
         self._model_runner_getter = model_runner_getter
 
     @staticmethod
@@ -63,12 +55,6 @@ class SleepWakeupManager:
     def sleep(self) -> None:
         model_runner = self._model_runner_getter()
         free_bytes_before_cleanup = torch.npu.mem_get_info()[0]
-        if self._lease_enabled:
-            table = getattr(getattr(model_runner, "input_batch", None), "block_table", None)
-            for name in _FUSED_SLOT_METADATA_ATTRS:
-                tensor = getattr(table, name, None)
-                if tensor is not None:
-                    self._saved_slot_metadata.append((tensor, tensor.cpu().clone()))
         if model_runner.use_aclgraph:
             self.acl_graph.sleep()
         self.hccl.sleep()
@@ -82,14 +68,9 @@ class SleepWakeupManager:
     def wakeup(self, tags: list[str] | None = None) -> None:
         self.hccl.wakeup()
         model_runner = self._model_runner_getter()
-        restore_lease = self._lease_enabled and (tags is None or "kv_cache" in tags)
-        if restore_lease:
-            for tensor, backup in self._saved_slot_metadata:
-                tensor.copy_(backup)
-            self._saved_slot_metadata.clear()
         if model_runner.use_aclgraph:
             self.acl_graph.wakeup(tags)
-        if restore_lease:
+        if self._lease_enabled and (tags is None or "kv_cache" in tags):
             self.hccl.release_lease()
 
 
