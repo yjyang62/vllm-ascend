@@ -6,3 +6,4 @@ This section provides guides for benchmarking, performance tuning, profiling, an
 - **[Optimization and Tuning](optimization_and_tuning.md)** — Performance optimization
 - **[Service Profiling Guide](service_profiling_guide.md)** — Service profiling
 - **[msprobe Guide](msprobe_guide.md)** — Debugging with msprobe
+- **[RL Log Localization Guide](rl_log_guide.md)** — RL scenario log index (sleep / batch invariance / weight transfer)
