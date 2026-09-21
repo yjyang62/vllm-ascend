@@ -91,7 +91,6 @@ class TestRlConfig(TestBase):
 
         self.assertFalse(defaults.enabled)
         self.assertFalse(defaults.sleep_mode_extra_cleanup)
-        self.assertFalse(defaults.experimental_hccp_lease)
         self.assertTrue(enabled.enabled)
         self.assertTrue(enabled.sleep_mode_extra_cleanup)
         self.assertTrue(enabled.enable_training_consistency)

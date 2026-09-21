@@ -36,7 +36,7 @@ def test_release_error_keeps_ownership():
 
 def test_native_lease_acquires_before_destroying_groups():
     with patch("vllm_ascend.device_allocator.hccp_lease.HccpLease") as factory:
-        manager = HcclSleepWakeupManager(MagicMock(), MagicMock(), experimental_hccp_lease=True)
+        manager = HcclSleepWakeupManager(MagicMock(), MagicMock(), use_hccp_lease=True)
     worker = MagicMock()
     worker._pp_send_work = []
     manager.worker = worker
@@ -55,7 +55,7 @@ def test_native_lease_acquires_before_destroying_groups():
 def test_acquire_failure_does_not_destroy_groups():
     with patch("vllm_ascend.device_allocator.hccp_lease.HccpLease") as factory:
         factory.return_value.acquire.side_effect = RuntimeError("native unavailable")
-        manager = HcclSleepWakeupManager(MagicMock(), MagicMock(), experimental_hccp_lease=True)
+        manager = HcclSleepWakeupManager(MagicMock(), MagicMock(), use_hccp_lease=True)
     worker = MagicMock()
     worker._pp_send_work = []
     manager.worker = worker

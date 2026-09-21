@@ -45,11 +45,11 @@ class SleepWakeupManager:
         worker: Any,
         model_runner_getter: Callable[[], Any],
         *,
-        experimental_hccp_lease: bool = False,
+        use_hccp_lease: bool = False,
     ):
         self.acl_graph = AclGraphSleepWakeupManager(vllm_config, model_runner_getter)
-        self.hccl = HcclSleepWakeupManager(vllm_config, worker, experimental_hccp_lease=experimental_hccp_lease)
-        self._lease_enabled = experimental_hccp_lease
+        self.hccl = HcclSleepWakeupManager(vllm_config, worker, use_hccp_lease=use_hccp_lease)
+        self._lease_enabled = use_hccp_lease
         self._saved_slot_metadata: list[tuple[Any, Any]] = []
         self._model_runner_getter = model_runner_getter
 
@@ -158,11 +158,11 @@ class AclGraphSleepWakeupManager:
 
 
 class HcclSleepWakeupManager:
-    def __init__(self, vllm_config: VllmConfig, worker: Any, *, experimental_hccp_lease: bool = False):
+    def __init__(self, vllm_config: VllmConfig, worker: Any, *, use_hccp_lease: bool = False):
         self.vllm_config = vllm_config
         self.worker = worker
         self._lease = None
-        if experimental_hccp_lease:
+        if use_hccp_lease:
             from vllm_ascend.device_allocator.hccp_lease import HccpLease
 
             self._lease = HccpLease()

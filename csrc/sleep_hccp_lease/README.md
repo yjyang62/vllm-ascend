@@ -1,6 +1,6 @@
 # Experimental HCCP service lease without an anchor group
 
-This opt-in prototype keeps the HCCP service alive across destruction of all
+This extra-cleanup path keeps the HCCP service alive across destruction of all
 business HCCL groups. It does not create an anchor or preserve a business group.
 Business communicators and ACL graphs are recreated on wake-up.
 
@@ -21,11 +21,12 @@ Load the shim into the serving process and its worker children with
 `LD_PRELOAD=/absolute/path/libnet_lease.so`, and enable:
 
 ```json
-{"rl_config":{"enabled":true,"sleep_mode_extra_cleanup":true,"experimental_hccp_lease":true}}
+{"rl_config":{"enabled":true,"sleep_mode_extra_cleanup":true}}
 ```
 
-The default is false. Missing native symbols or an invalid lease transition
-raises an error; the implementation never silently creates an anchor.
+`sleep_mode_extra_cleanup` is off by default. When it is enabled, missing native
+symbols or an invalid lease transition raise an error; the implementation never
+silently creates an anchor.
 The HCCP service remains allocated while asleep, but its business communicators
 are destroyed. The shim defers runtime Close while held and reuses the service
 on a matching Open. The final unheld Close reaches the real runtime.

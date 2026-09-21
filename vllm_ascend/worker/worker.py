@@ -172,11 +172,12 @@ class NPUWorker(WorkerBase):
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         rl_config = get_ascend_config().rl_config
-        lease = getattr(rl_config, "experimental_hccp_lease", False) is True
-        if lease and not (rl_config.enabled and rl_config.sleep_mode_extra_cleanup):
-            raise ValueError("experimental_hccp_lease requires RL sleep cleanup")
+        extra_cleanup = (
+            getattr(rl_config, "enabled", False) is True
+            and getattr(rl_config, "sleep_mode_extra_cleanup", False) is True
+        )
         self.sleep_wakeup_manager = SleepWakeupManager(
-            vllm_config, self, lambda: getattr(self, "model_runner", None), experimental_hccp_lease=lease
+            vllm_config, self, lambda: getattr(self, "model_runner", None), use_hccp_lease=extra_cleanup
         )
 
         # Weight transfer engine is created in `load_model` once the model
@@ -286,19 +287,17 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
-        # Restore the buffers after level 2 sleep. With the experimental HCCP
-        # lease, delay restoration until KV cache is restored so staged
-        # weights-then-KV wakeup keeps fused slot metadata consistent.
-        lease_enabled = getattr(get_ascend_config().rl_config, "experimental_hccp_lease", False) is True
-        if (not lease_enabled or tags is None or "kv_cache" in tags) and len(self._sleep_saved_buffers):
+        rl_config = get_ascend_config().rl_config
+        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
+        # Extra cleanup uses the HCCP lease. Delay level-2 buffer restore until
+        # KV cache is restored so staged weights-then-KV wakeup stays consistent.
+        if (not cleanup_enabled or tags is None or "kv_cache" in tags) and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        rl_config = get_ascend_config().rl_config
-        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
 
