@@ -32,9 +32,17 @@ from vllm_ascend.compilation import acl_graph
 
 
 class SleepWakeupManager:
-    def __init__(self, vllm_config: VllmConfig, worker: Any, model_runner_getter: Callable[[], Any]):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        worker: Any,
+        model_runner_getter: Callable[[], Any],
+        *,
+        use_hccp_lease: bool = False,
+    ):
         self.acl_graph = AclGraphSleepWakeupManager(vllm_config, model_runner_getter)
-        self.hccl = HcclSleepWakeupManager(vllm_config, worker)
+        self.hccl = HcclSleepWakeupManager(vllm_config, worker, use_hccp_lease=use_hccp_lease)
+        self._lease_enabled = use_hccp_lease
         self._model_runner_getter = model_runner_getter
 
     @staticmethod
@@ -62,6 +70,8 @@ class SleepWakeupManager:
         model_runner = self._model_runner_getter()
         if model_runner.use_aclgraph:
             self.acl_graph.wakeup(tags)
+        if self._lease_enabled and (tags is None or "kv_cache" in tags):
+            self.hccl.release_lease()
 
 
 class AclGraphSleepWakeupManager:
@@ -129,9 +139,14 @@ class AclGraphSleepWakeupManager:
 
 
 class HcclSleepWakeupManager:
-    def __init__(self, vllm_config: VllmConfig, worker: Any):
+    def __init__(self, vllm_config: VllmConfig, worker: Any, *, use_hccp_lease: bool = False):
         self.vllm_config = vllm_config
         self.worker = worker
+        self._lease = None
+        if use_hccp_lease:
+            from vllm_ascend.device_allocator.hccp_lease import HccpLease
+
+            self._lease = HccpLease()
 
     @staticmethod
     def iter_alive_group_coordinators():
@@ -169,12 +184,20 @@ class HcclSleepWakeupManager:
             if callable(refresh_fn):
                 refresh_fn()
 
+    def release_lease(self) -> bool:
+        if self._lease is None:
+            return False
+        torch.npu.synchronize()
+        return self._lease.release()
+
     def sleep(self) -> None:
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             for handle in getattr(self.worker, "_pp_send_work", []):
                 handle.wait()
             self.worker._pp_send_work = []
             torch.npu.synchronize()
+            if self._lease is not None and torch.distributed.get_world_size() > 1:
+                self._lease.acquire()
             num_destroyed = self.destroy_hccl()
             if num_destroyed > 0:
                 logger.info("Destroyed %d HCCL process groups for sleep mode.", num_destroyed)

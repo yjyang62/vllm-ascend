@@ -171,7 +171,14 @@ class NPUWorker(WorkerBase):
         if vllm_config.model_config and vllm_config.model_config.enable_sleep_mode:
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
-        self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
+        rl_config = get_ascend_config().rl_config
+        extra_cleanup = (
+            getattr(rl_config, "enabled", False) is True
+            and getattr(rl_config, "sleep_mode_extra_cleanup", False) is True
+        )
+        self.sleep_wakeup_manager = SleepWakeupManager(
+            vllm_config, self, lambda: getattr(self, "model_runner", None), use_hccp_lease=extra_cleanup
+        )
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
