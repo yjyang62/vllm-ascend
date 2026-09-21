@@ -97,7 +97,7 @@ app/skills/model-atlas-adapter 目录中的技能。
 
 目标公开地址（仓库已打开 GitHub Pages，Source = GitHub Actions）：
 
-**https://yjyang62.github.io/vllm-ascend/?model=deepseek-v4**
+**<https://yjyang62.github.io/vllm-ascend/?model=deepseek-v4>**
 
 仓库根目录的 [`.github/workflows/deploy-model-atlas.yml`](../.github/workflows/deploy-model-atlas.yml) 在推送到 `main` 时构建 `model-atlas/` 并发布（`github-pages` 环境只允许 `main`）。同一份静态文件也会推到 `gh-pages` 分支。
 

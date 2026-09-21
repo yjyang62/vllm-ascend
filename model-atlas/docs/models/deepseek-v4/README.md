@@ -21,8 +21,8 @@ Document-Kind: model-knowledge
 - Lightning Indexer：`vllm_ascend/models/deepseek_v4/indexer.py`
 - 层压缩比：`get_dsv4_compress_ratio` in `vllm_ascend/utils.py`
 - Attention KV 与 Indexer KV 分离：`vllm_ascend/attention/dsa_attn_kv_plan.py`（Indexer 保持 FP8；A5 可用 `--kv-cache-dtype bfloat16` 改 attention KV）
-- 官方配置：https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/config.json
-- 论文：https://arxiv.org/abs/2606.19348
+- 官方配置：<https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/config.json>
+- 论文：<https://arxiv.org/abs/2606.19348>
 
 ## 本地打开
 
