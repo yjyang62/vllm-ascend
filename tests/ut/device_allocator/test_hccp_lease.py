@@ -34,30 +34,38 @@ def test_release_error_keeps_ownership():
     assert lease.held
 
 
-def test_native_lease_never_creates_anchor():
+def test_native_lease_acquires_before_destroying_groups():
     with patch("vllm_ascend.device_allocator.hccp_lease.HccpLease") as factory:
         manager = HcclSleepWakeupManager(MagicMock(), MagicMock(), experimental_hccp_lease=True)
+    worker = MagicMock()
+    worker._pp_send_work = []
+    manager.worker = worker
     with (
-        patch("torch.distributed.get_world_size", return_value=2),
-        patch("vllm_ascend.device_allocator.sleep_mem_optimized.init_model_parallel_group") as create,
-        patch("torch.npu.synchronize"),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_available", return_value=True),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_initialized", return_value=True),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.get_world_size", return_value=2),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.synchronize"),
+        patch.object(manager, "destroy_hccl", return_value=1) as destroy,
     ):
-        assert manager._ensure_lifecycle_anchor()
-        manager.release_lifecycle_anchor()
-    create.assert_not_called()
-    assert manager._lifecycle_anchor_group is None
+        manager.sleep()
     factory.return_value.acquire.assert_called_once()
-    factory.return_value.release.assert_called_once()
+    destroy.assert_called_once_with()
 
 
-def test_acquire_failure_does_not_silently_fallback_to_anchor():
+def test_acquire_failure_does_not_destroy_groups():
     with patch("vllm_ascend.device_allocator.hccp_lease.HccpLease") as factory:
         factory.return_value.acquire.side_effect = RuntimeError("native unavailable")
         manager = HcclSleepWakeupManager(MagicMock(), MagicMock(), experimental_hccp_lease=True)
+    worker = MagicMock()
+    worker._pp_send_work = []
+    manager.worker = worker
     with (
-        patch("torch.distributed.get_world_size", return_value=2),
-        patch("vllm_ascend.device_allocator.sleep_mem_optimized.init_model_parallel_group") as create,
-        pytest.raises(RuntimeError),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_available", return_value=True),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.is_initialized", return_value=True),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.distributed.get_world_size", return_value=2),
+        patch("vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.synchronize"),
+        patch.object(manager, "destroy_hccl") as destroy,
+        pytest.raises(RuntimeError, match="native unavailable"),
     ):
-        manager._ensure_lifecycle_anchor()
-    create.assert_not_called()
+        manager.sleep()
+    destroy.assert_not_called()

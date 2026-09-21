@@ -40,7 +40,7 @@ enables the development endpoints, and removes `expandable_segments` from
 | Field | When to enable it |
 | --- | --- |
 | `sleep_mode_extra_cleanup` | Release HCCL process groups and ACL graph workspaces during sleep in a same-NPU deployment |
-| `experimental_hccp_lease` | Opt-in prototype that keeps the HCCP service allocated during extra-cleanup sleep without an HCCL anchor group |
+| `experimental_hccp_lease` | Opt-in prototype that keeps the HCCP service allocated during extra-cleanup sleep |
 | `enable_training_consistency` | Select the FA3 attention backend for training-inference consistency |
 | `enable_batch_invariant` | Enable batch-invariant kernels and deterministic communication settings |
 

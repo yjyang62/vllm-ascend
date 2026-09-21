@@ -56,7 +56,7 @@ When `rl_config.sleep_mode_extra_cleanup` is enabled, `sleep()` additionally:
 - resets the model runner graph manager so ACL graphs can be captured again after wakeup;
 - waits for pending pipeline-parallel send work, synchronizes the NPU, and destroys HCCL process groups.
 
-`rl_config.experimental_hccp_lease=true` is an opt-in prototype for same-device extra cleanup. It keeps the HCCP service allocated without creating an HCCL lifecycle-anchor group, using a process-local `LD_PRELOAD` shim built from `csrc/sleep_hccp_lease/net_lease.c`. Missing native symbols fail closed; the implementation never silently falls back to an anchor. Business communicators and ACL graphs are still destroyed and recreated. See `csrc/sleep_hccp_lease/README.md`. Only the tested A3 / CANN 9.1.0 / driver 26.0.rc1 setup is covered.
+`rl_config.experimental_hccp_lease=true` is an opt-in prototype for same-device extra cleanup. Extra-cleanup still destroys and restores business HCCL groups; a process-local `LD_PRELOAD` shim built from `csrc/sleep_hccp_lease/net_lease.c` keeps the HCCP service allocated across that destroy/restore. Missing native symbols fail closed. See `csrc/sleep_hccp_lease/README.md`. Only the tested A3 / CANN 9.1.0 / driver 26.0.rc1 setup is covered.
 
 During `wake_up()`, vLLM Ascend restores the HCCL process groups, refreshes MoE dispatcher HCCL metadata, restores sleep-mode allocator memory, and recaptures ACL graphs when needed.
 
