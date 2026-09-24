@@ -183,15 +183,10 @@ FULL_FEATURE_MODEL_CASES = [
     {
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 @pytest.mark.parametrize("case", FULL_FEATURE_MODEL_CASES, ids=lambda case: case.name)
 def test_models_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
-    # DSA-CP full-graph hash routing pads router rows during V2 replay while
-    # input_ids stay at the real token count. Keep this case on V1.
-    if case.name == "deepseek_v4_w4a8_dsa_cp_full_features":
-        with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "0"}):
-            _run_accuracy_case(case)
-        return
     _run_accuracy_case(case)
