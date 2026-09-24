@@ -181,7 +181,7 @@ def test_register_kv_caches_keeps_separate_kv_and_initializes_backend(
     )
 
 
-def test_get_finished_records_store_barrier_on_npu(
+def test_wait_for_save_records_store_barrier_on_npu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeEvent:
@@ -217,17 +217,18 @@ def test_get_finished_records_store_barrier_on_npu(
         store_cpu_blocks=[6],
     )
     worker._store_compute_done = None
+    worker._store_submitted = False
     worker._load_events = []
     worker._store_events = []
     worker._pending_load_event_indices = set()
     worker._pending_store_event_indices = set()
     worker._completed_store_events = {}
 
-    assert worker.get_finished(set()) == (None, None)
+    worker.wait_for_save()
+    worker.wait_for_save()
 
-    load_call, store_call = worker._backend.calls
-    assert load_call["is_store"] is False
-    assert "wait_event" not in load_call
+    assert len(worker._backend.calls) == 1
+    store_call = worker._backend.calls[0]
     assert store_call["is_store"] is True
     store_event = store_call["wait_event"]
     assert isinstance(store_event, FakeEvent)

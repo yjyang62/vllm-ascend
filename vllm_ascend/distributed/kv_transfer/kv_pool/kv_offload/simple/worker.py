@@ -15,11 +15,16 @@ and only overrides what differs on NPU:
   CUDA-only, and transfer streams drop the lowest-priority hint that
   ``torch.npu.Stream`` does not yet expose.
 
+``wait_for_save`` is overridden so the store barrier is recorded on the
+NPU compute stream. Upstream records ``torch.cuda.current_stream()``,
+which does not order the copy after NPU KV writes. Loads stay in the
+inherited ``start_load_kv``; ``get_finished`` only polls.
+
 All other handler entry points — ``bind_connector_metadata``,
-``clear_connector_metadata``, ``start_load_kv``, ``wait_for_save``,
+``clear_connector_metadata``, ``start_load_kv``,
 ``build_connector_worker_meta``, ``handle_preemptions``,
-``_flush_and_sync_all``, ``_poll_stream_events`` — are inherited
-verbatim.
+``_flush_and_sync_all``, ``_poll_stream_events``, ``get_finished`` —
+are inherited verbatim.
 """
 
 from typing import TYPE_CHECKING
@@ -163,61 +168,35 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
             self.store_stream,
         )
 
-    def get_finished(
-        self,
-        finished_req_ids: set[str],
-    ) -> tuple[set[str] | None, set[str] | None]:
-        """Submit NPU transfers and report completed events.
+    def wait_for_save(self) -> None:
+        """Submit async NPU->CPU stores after the compute stream finishes KV writes.
 
-        This mirrors vLLM's worker state machine. The only platform-specific
-        difference is recording the store barrier with ``torch.npu`` instead
-        of the CUDA stream used by the upstream implementation.
+        Upstream submits stores here and orders them with
+        ``torch.cuda.current_stream()``. On NPU that event does not track the
+        compute stream, so the copy can read KV blocks before the forward
+        pass writes them. ``clear_connector_metadata`` calls this method, and
+        ``get_finished`` only polls completion.
         """
         metadata = self._connector_metadata
-        if metadata is not None:
-            if metadata.load_cpu_blocks:
-                self._backend.launch_copy(
-                    metadata.load_cpu_blocks,
-                    metadata.load_gpu_blocks,
-                    is_store=False,
-                    event_idx=metadata.load_event,
-                    events_list=self._load_events,
-                )
-            if metadata.store_gpu_blocks:
-                store_compute_done = self._store_compute_done
-                if store_compute_done is None:
-                    store_compute_done = torch.npu.Event()
-                    self._store_compute_done = store_compute_done
-                store_compute_done.record(torch.npu.current_stream())
-                self._backend.launch_copy(
-                    metadata.store_gpu_blocks,
-                    metadata.store_cpu_blocks,
-                    is_store=True,
-                    event_idx=metadata.store_event,
-                    events_list=self._store_events,
-                    wait_event=store_compute_done,
-                )
+        if metadata is None or not metadata.store_gpu_blocks or self._store_submitted:
+            return
 
-        finished_recving: set[str] = set()
-        if self._pending_load_event_indices:
-            load_watermark = self._poll_stream_events(is_store=False)
-            for event_idx in [
-                event_idx for event_idx in self._pending_load_event_indices if event_idx <= load_watermark
-            ]:
-                self._pending_load_event_indices.discard(event_idx)
-                req_ids = metadata.load_event_to_reqs.get(event_idx) if metadata is not None else None
-                if req_ids:
-                    finished_recving.update(req_ids)
-
-        if self._pending_store_event_indices:
-            store_watermark = self._poll_stream_events(is_store=True)
-            for event_idx in [
-                event_idx for event_idx in self._pending_store_event_indices if event_idx <= store_watermark
-            ]:
-                self._pending_store_event_indices.discard(event_idx)
-                self._completed_store_events[event_idx] = 1
-
-        return None, finished_recving or None
+        backend = self._backend
+        assert backend is not None
+        store_compute_done = self._store_compute_done
+        if store_compute_done is None:
+            store_compute_done = torch.npu.Event()
+            self._store_compute_done = store_compute_done
+        store_compute_done.record(torch.npu.current_stream())
+        backend.launch_copy(
+            metadata.store_gpu_blocks,
+            metadata.store_cpu_blocks,
+            is_store=True,
+            event_idx=metadata.store_event,
+            events_list=self._store_events,
+            wait_event=store_compute_done,
+        )
+        self._store_submitted = True
 
     @staticmethod
     def _build_block_views(
