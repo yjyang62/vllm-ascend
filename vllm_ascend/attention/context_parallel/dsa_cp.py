@@ -42,6 +42,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
+from vllm_ascend.models.deepseek_v4.compressor_state_window import fold_compressor_state_window
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -1806,6 +1807,16 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         output[...] = projected_output
         return output
 
+    def _fold_compressor_state_window(self, state_cache, block_table, start_pos, compress_ratio):
+        return fold_compressor_state_window(
+            block_table,
+            start_pos,
+            sliding_window=state_cache.sliding_window,
+            block_size=state_cache.block_size,
+            compress_ratio=compress_ratio,
+            max_query_tokens=self.vllm_config.scheduler_config.max_num_batched_tokens,
+        )
+
     def _forward(
         self,
         layer_name,
@@ -1929,6 +1940,12 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
                 compressor_attn_metadata.req_metadata,
             )
+            state_block_table, state_start_pos = self._fold_compressor_state_window(
+                self.compressor.state_cache,
+                compressor_kv_state_metadata.req_metadata.block_table,
+                req_metadata.start_pos,
+                self.compress_ratio,
+            )
             compressed_kv = torch.ops._C_ascend.compressor(
                 hidden_states_cache,
                 self.compressor_wkv.weight,
@@ -1938,10 +1955,10 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 self.compressor_norm.weight,
                 compress_sin.view(-1, compress_sin.shape[-1]),
                 compress_cos.view(-1, compress_cos.shape[-1]),
-                state_block_table=compressor_kv_state_metadata.req_metadata.block_table,
+                state_block_table=state_block_table,
                 cu_seqlens=actual_seq_lengths_query,
                 seqused=None,
-                start_pos=req_metadata.start_pos,
+                start_pos=state_start_pos,
                 rope_head_dim=self.rope_head_dim,
                 cmp_ratio=self.compress_ratio,
                 coff=coff,
@@ -2082,6 +2099,13 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         compressed_cos, compressed_sin, indexer_slot_mapping = self._compute_compressor_metadata(
             indexer_kv_scale_metadata.req_metadata,
         )
+        indexer_state_cache_layer = self.indexer.compressor.state_cache
+        state_block_table, state_start_pos = self._fold_compressor_state_window(
+            indexer_state_cache_layer,
+            indexer_kv_state_metadata.req_metadata.block_table,
+            indexer_kv_scale_metadata.req_metadata.start_pos,
+            self.indexer.compressor.compress_ratio,
+        )
         kv = torch.ops._C_ascend.compressor(
             x,
             self.indexcom_wkv.weight,
@@ -2091,10 +2115,10 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self.indexcom_norm.weight,
             compressed_sin.view(-1, compressed_sin.shape[-1]),
             compressed_cos.view(-1, compressed_cos.shape[-1]),
-            state_block_table=indexer_kv_state_metadata.req_metadata.block_table,
+            state_block_table=state_block_table,
             cu_seqlens=actual_seq_lengths_query,
             seqused=None,
-            start_pos=indexer_kv_scale_metadata.req_metadata.start_pos,
+            start_pos=state_start_pos,
             rope_head_dim=self.rope_head_dim,
             cmp_ratio=self.compress_ratio,
             coff=coff,
