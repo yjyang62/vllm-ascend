@@ -14,7 +14,11 @@ from unittest.mock import patch
 
 import torch
 
-from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
+from vllm_ascend.ops.rope_dsv4 import (
+    ComplexExpRotaryEmbedding,
+    dsa_rope_cache_len,
+    get_cos_and_sin_dsa,
+)
 
 
 def test_dsv4_rope_writes_back_inplace():
@@ -53,3 +57,41 @@ def test_dsv4_rope_writes_back_inplace():
 
     assert not torch.equal(x, snapshot)
     assert out is x
+
+
+def test_dsa_rope_cache_len_covers_max_model_len():
+    assert dsa_rope_cache_len(32, 2.0, 1000) == 1000
+    assert dsa_rope_cache_len(4096, 40, 1000) == 4096 * 40
+    assert dsa_rope_cache_len(32, 1.5, 0) == 48
+
+
+def test_get_cos_and_sin_dsa_gathers_positions_out_to_max_model_len():
+    max_model_len = 1000
+    with patch("vllm_ascend.ops.rope_dsv4.current_platform") as fake_platform:
+        fake_platform.device_type = "cpu"
+        vllm_config = SimpleNamespace(
+            speculative_config=None,
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+            model_config=SimpleNamespace(max_model_len=max_model_len),
+        )
+        rotary = ComplexExpRotaryEmbedding(
+            vllm_config=vllm_config,
+            layername="ut.dsv4_rope.max_model_len",
+            head_size=8,
+            rotary_dim=8,
+            max_position_embeddings=32,
+            base=10000,
+            scaling_factor=2.0,
+            rope_groups=["default"],
+        )
+
+    assert rotary.full_rope_cos.shape[0] >= max_model_len
+    assert rotary.full_rope_sin.shape[0] == rotary.full_rope_cos.shape[0]
+    # Yarn still sees the original sequence length; only the position axis grew.
+    assert rotary.full_rope_cos.shape[-1] == 8
+    position = torch.tensor([max_model_len - 1])
+    cos, sin = get_cos_and_sin_dsa(position, layer_names="ut.dsv4_rope.max_model_len")
+    gathered_cos = cos["ut.dsv4_rope.max_model_len"]
+    gathered_sin = sin["ut.dsv4_rope.max_model_len"]
+    torch.testing.assert_close(gathered_cos, rotary.full_rope_cos[position])
+    torch.testing.assert_close(gathered_sin, rotary.full_rope_sin[position])

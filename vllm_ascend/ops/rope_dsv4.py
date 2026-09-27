@@ -81,6 +81,16 @@ class RopeDataProxy:
             return layer_result
 
 
+def dsa_rope_cache_len(max_position_embeddings: int, scaling_factor: float, max_model_len: int) -> int:
+    """Rows in the DSA RoPE table indexed by ``get_cos_and_sin_dsa``.
+
+    Yarn frequencies stay on ``max_position_embeddings``. The table has to
+    cover every model position, including ``max_model_len - 1``.
+    """
+    scaled_len = math.ceil(float(max_position_embeddings) * float(scaling_factor))
+    return max(scaled_len, int(max_model_len))
+
+
 def get_cos_and_sin_dsa(
     positions: torch.Tensor | dict[str, torch.Tensor],
     use_cache: bool = False,
@@ -143,6 +153,7 @@ def get_cos_and_sin_dsa(
                 # row; expand() broadcasts that row across the rotary dim to
                 # match full_rope_* (which is [max_pos, 1, 1, rotary_dim]),
                 # so torch.gather(..., dim=0) selects row pos_tensor[i].
+                # full_rope_* is at least max_model_len rows (dsa_rope_cache_len).
                 gather_idx = (
                     pos_tensor.to(torch.long).reshape(-1, 1, 1, 1).expand(num_tokens, 1, 1, full_rope_cos.size(-1))
                 )
@@ -229,10 +240,14 @@ class ComplexExpRotaryEmbedding(nn.Module):
         beta_slow = extra_kwargs.get("beta_slow", 1)
         original_seq_len = extra_kwargs.get("original_max_position_embeddings", max_position_embeddings)
         apply_yarn_scaling = extra_kwargs.get("apply_yarn_scaling", True)
+        model_config = getattr(vllm_config, "model_config", None)
+        max_model_len = 0 if model_config is None else int(getattr(model_config, "max_model_len", 0) or 0)
+        cache_len = dsa_rope_cache_len(max_position_embeddings, scaling_factor, max_model_len)
         config_key = (
             f"rotary_dim{rotary_dim}_max_position_embeddings{max_position_embeddings}_"
-            f"original_seq_len{original_seq_len}_apply_yarn{apply_yarn_scaling}_base{base}_scaling_factor{scaling_factor}_"
-            f"beta_fast{beta_fast}_beta_slow{beta_slow}"
+            f"original_seq_len{original_seq_len}_apply_yarn{apply_yarn_scaling}_base{base}_"
+            f"scaling_factor{scaling_factor}_beta_fast{beta_fast}_beta_slow{beta_slow}_"
+            f"cache_len{cache_len}"
         )
         _ROPE_STATE.layer_info[layername] = (config_key, rope_groups)
 
@@ -253,7 +268,7 @@ class ComplexExpRotaryEmbedding(nn.Module):
                 apply_yarn_scaling=apply_yarn_scaling,
             )
             t = torch.arange(
-                max_position_embeddings * scaling_factor,
+                cache_len,
                 device=current_platform.device_type,
                 dtype=torch.float32,
             )

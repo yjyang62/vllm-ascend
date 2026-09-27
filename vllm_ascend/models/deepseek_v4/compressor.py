@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.deepseek_v4.compressor_state_window import fold_compressor_state_window
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 
@@ -190,6 +191,70 @@ class Compressor(nn.Module):
 
         return get_or_compute_compressor_metadata(metadata, self.compress_ratio, self.vllm_config)
 
+    def _state_window_capacity(self, num_reqs: int) -> int:
+        capacity = num_reqs
+        scheduler = getattr(self.vllm_config, "scheduler_config", None)
+        if scheduler is not None:
+            capacity = max(capacity, int(getattr(scheduler, "max_num_seqs", num_reqs)))
+        compilation = getattr(self.vllm_config, "compilation_config", None)
+        capture_size = getattr(compilation, "max_cudagraph_capture_size", None) if compilation is not None else None
+        if capture_size:
+            capacity = max(capacity, int(capture_size))
+        return capacity
+
+    def _ensure_state_window_buffers(
+        self,
+        num_reqs: int,
+        num_cols: int,
+        device: torch.device,
+        block_dtype: torch.dtype,
+        pos_dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Stable storage for the folded state table used by ACL graph replay."""
+        capacity = self._state_window_capacity(num_reqs)
+        block_buf = getattr(self, "_state_window_block_table", None)
+        pos_buf = getattr(self, "_state_window_start_pos", None)
+        if (
+            block_buf is None
+            or pos_buf is None
+            or block_buf.shape[0] < capacity
+            or block_buf.shape[1] != num_cols
+            or block_buf.device != device
+            or block_buf.dtype != block_dtype
+            or pos_buf.dtype != pos_dtype
+        ):
+            block_buf = torch.empty((capacity, num_cols), dtype=block_dtype, device=device)
+            pos_buf = torch.empty((capacity,), dtype=pos_dtype, device=device)
+            self._state_window_block_table = block_buf
+            self._state_window_start_pos = pos_buf
+        return block_buf[:num_reqs], pos_buf[:num_reqs]
+
+    def _fold_state_window(
+        self,
+        block_table: torch.Tensor,
+        start_pos: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        folded_table, folded_start = fold_compressor_state_window(
+            block_table,
+            start_pos,
+            sliding_window=self.state_cache.sliding_window,
+            block_size=self.state_cache.block_size,
+            compress_ratio=self.compress_ratio,
+            max_query_tokens=self.vllm_config.scheduler_config.max_num_batched_tokens,
+        )
+        if folded_table is block_table:
+            return folded_table, folded_start
+        block_view, pos_view = self._ensure_state_window_buffers(
+            folded_start.shape[0],
+            folded_table.shape[1],
+            folded_table.device,
+            folded_table.dtype,
+            folded_start.dtype,
+        )
+        block_view.copy_(folded_table)
+        pos_view.copy_(folded_start)
+        return block_view, pos_view
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -201,6 +266,12 @@ class Compressor(nn.Module):
         assert compressor_metadata is not None
         assert state_metadata is not None
         compress_cos, compress_sin, slot_mapping = self._compute_metadata(compressor_metadata)
+        # Metadata cos/sin were selected with the absolute start_pos. Only the
+        # state-cache arguments below are folded into the sliding window.
+        state_block_table, state_start_pos = self._fold_state_window(
+            state_metadata.block_table,
+            compressor_metadata.start_pos,
+        )
         compressed_kv = torch.ops._C_ascend.compressor(
             hidden_states,
             self.wkv.weight,
@@ -210,10 +281,10 @@ class Compressor(nn.Module):
             self.norm.weight,
             compress_sin.view(-1, compress_sin.shape[-1]),
             compress_cos.view(-1, compress_cos.shape[-1]),
-            state_block_table=state_metadata.block_table,
+            state_block_table=state_block_table,
             cu_seqlens=compressor_metadata.query_start_loc,
             seqused=None,
-            start_pos=compressor_metadata.start_pos,
+            start_pos=state_start_pos,
             rope_head_dim=self.rope_head_dim,
             cmp_ratio=self.compress_ratio,
             coff=2 if self.overlap else 1,
