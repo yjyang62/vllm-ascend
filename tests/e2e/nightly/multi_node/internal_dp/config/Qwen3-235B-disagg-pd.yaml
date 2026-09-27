@@ -11,7 +11,11 @@ env_common: &env_common
   OMP_NUM_THREADS: 1
   TASK_QUEUE_ENABLE: 1
   SERVER_PORT: 8080
-  
+  # V2 decode TPOT is ~13% higher than V1, so prefiller KV can sit past the
+  # default 480s Mooncake abort. Nightly-A3 36327818144 force-freed 39
+  # requests (TTFT p99 622s) and missed 0.97*2161.95 by 15 tok/s.
+  VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: 3600
+
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0]
