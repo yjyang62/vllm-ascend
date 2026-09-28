@@ -79,6 +79,7 @@ TILING_DATA_FIELD_DEF(int64_t, blockSize);
 TILING_DATA_FIELD_DEF(int64_t, valuePerToken);
 TILING_DATA_FIELD_DEF(int64_t, scalePerToken);
 TILING_DATA_FIELD_DEF(int64_t, blockStride);
+TILING_DATA_FIELD_DEF(int64_t, rowStride);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(KvCompressEpilog, KvCompressEpilogTilingData)
@@ -151,6 +152,7 @@ private:
     int64_t layout_ = 1;
     int64_t blockSize_ = 0;
     int64_t blockStrideAttr_ = 0;  // 0 = auto-compute, >0 = user-specified
+    int64_t rowStride_ = 0;
 
     // Data types
     ge::DataType xDtype_ = ge::DT_BF16;

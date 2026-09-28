@@ -185,7 +185,13 @@ template <typename T0, typename U, typename T1>
                 for (int32_t curValidIdx = 0; curValidIdx < validIdx; curValidIdx++) {
                     int32_t slot = indexLocal.GetValue(curValidIdx);
                     int64_t gmOffset = static_cast<int64_t>(slot) * tilingData->kvCacheCol;
-                    if (tilingData->layout == 1) {
+                    if (tilingData->layout == 1 && tilingData->blockSize > 1) {
+                        // Page-padded cache: slot = block * blockSize + offset,
+                        // and blockStride may be larger than one packed block.
+                        int64_t blockIdx = static_cast<int64_t>(slot) / tilingData->blockSize;
+                        int64_t slotInBlock = static_cast<int64_t>(slot) % tilingData->blockSize;
+                        gmOffset = blockIdx * tilingData->blockStride + slotInBlock * tilingData->rowStride;
+                    } else if (tilingData->layout == 1) {
                         int64_t rowStride = tilingData->blockStride > 0 ? tilingData->blockStride : tilingData->kvCacheCol;
                         gmOffset = static_cast<int64_t>(slot) * rowStride;
                     }
