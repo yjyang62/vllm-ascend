@@ -50,6 +50,79 @@ def is_a5_bf16_kv_enabled(vllm_config) -> bool:
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
+# kv_compress_epilog accepts a 4D cache only when this axis is the single head.
+_EPILOG_HEAD_AXIS = 2
+
+
+def _rows_are_packed(tensor: torch.Tensor) -> bool:
+    """Return whether token rows occupy one contiguous span.
+
+    ``view(-1, row)`` is legal only after size-1 axes are dropped and the
+    remaining strides are packed. Padding between KV pages breaks that chain.
+    """
+    sizes: list[int] = []
+    strides: list[int] = []
+    for size, stride in zip(tensor.shape, tensor.stride()):
+        if size == 1:
+            continue
+        sizes.append(int(size))
+        strides.append(int(stride))
+    if not sizes:
+        return True
+    if strides[-1] != 1:
+        return False
+    packed = 1
+    for size, stride in zip(reversed(sizes), reversed(strides), strict=True):
+        if stride != packed:
+            return False
+        packed *= size
+    return True
+
+
+def _epilog_kv_cache(cache: torch.Tensor) -> torch.Tensor:
+    """Return the cache tensor ``kv_compress_epilog`` should write in place.
+
+    Packed caches collapse to ``[rows, 1, head_dim]``. A page-padded cache
+    cannot: ``view`` raises because the block stride spans the padding gap.
+    Keep ``[blocks, block_size, 1, head_dim]`` so the kernel steps by that
+    block stride. The result aliases ``cache``.
+    """
+    if _rows_are_packed(cache):
+        return cache.view(-1, 1, cache.shape[-1])
+    if cache.dim() == 3:
+        cache = cache.unsqueeze(_EPILOG_HEAD_AXIS)
+    if cache.dim() != 4 or int(cache.size(_EPILOG_HEAD_AXIS)) != 1:
+        raise RuntimeError(
+            "kv_compress_epilog cache must be packed rows or a single-head page, "
+            f"got shape {tuple(cache.shape)} stride {tuple(cache.stride())}."
+        )
+    token_stride = int(cache.size(-1)) * int(cache.stride(-1))
+    tokens_per_block = int(cache.size(1))
+    page_stride = int(cache.stride(0))
+    if int(cache.stride(-1)) != 1 or (tokens_per_block > 1 and int(cache.stride(1)) != token_stride):
+        raise RuntimeError(
+            "kv_compress_epilog page has a gap inside the block, "
+            f"got shape {tuple(cache.shape)} stride {tuple(cache.stride())}."
+        )
+    if page_stride < tokens_per_block * token_stride:
+        raise RuntimeError(
+            "kv_compress_epilog page stride is smaller than one block, "
+            f"got shape {tuple(cache.shape)} stride {tuple(cache.stride())}."
+        )
+    return cache
+
+
+def _epilog_updates(updates: torch.Tensor) -> torch.Tensor:
+    """Return updates as a packed ``[tokens, row]`` tensor.
+
+    The epilog only reads ``updates``. A copy is fine when the rows are not
+    already packed; ``reshape`` keeps a gapped tensor when the shape does not
+    change.
+    """
+    row = updates.shape[-1]
+    if _rows_are_packed(updates):
+        return updates.view(-1, row)
+    return updates.contiguous().view(-1, row)
 
 
 @dataclass(frozen=True)
@@ -118,8 +191,8 @@ class DsaAttnKvPlan:
             torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, slot_mapping, x)
             return
         torch.ops._C_ascend.kv_compress_epilog(
-            kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
-            x=x.view(-1, x.shape[-1]),
+            kv_compress_cache=_epilog_kv_cache(cache),
+            x=_epilog_updates(x),
             slot_mapping=slot_mapping,
             quant_group_size=64,
             quant_mode=2,

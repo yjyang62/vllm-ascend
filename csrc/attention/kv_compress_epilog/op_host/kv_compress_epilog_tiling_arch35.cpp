@@ -248,7 +248,38 @@ ge::graphStatus KvCompressEpilogTiling::DoOpTiling()
                   blockSize_, valuePerToken, scalePerToken, blockStride, autoBlockStride, blockStrideAttr_);
     } else {
         int64_t autoRowStride = kvCacheCol_;
-        if (blockStrideAttr_ > 0) {
+        auto shapeKvCache = context_->GetInputShape(KV_COMPRESS_CACHE_INPUT_INDEX);
+        OPS_ERR_IF(shapeKvCache == nullptr,
+                  OPS_LOG_E(context_, "kv_compress_cache input shape is null"),
+                  return ge::GRAPH_FAILED);
+        const gert::Shape& kvCacheShape = shapeKvCache->GetStorageShape();
+        int64_t cacheRank = static_cast<int64_t>(kvCacheShape.GetDimNum());
+        int64_t cacheBlockSize = cacheRank >= 2 ? kvCacheShape.GetDim(1) : 1;
+        int64_t cacheRowStride = cacheRank >= 1 ? kvCacheShape.GetDim(cacheRank - 1) : kvCacheCol_;
+        // dim 1 > 1 is a paged cache: stride(0) jumps a whole page, which may
+        // include padding, and each token inside the page is cacheRowStride
+        // elements. A flat [rows, 1, head_dim] cache keeps the old slot * row
+        // addressing because its block axis is 1.
+        if (cacheBlockSize > 1) {
+            blockSize_ = cacheBlockSize;
+            rowStride_ = cacheRowStride;
+            int64_t packedBlock = cacheBlockSize * cacheRowStride;
+            if (blockStrideAttr_ > 0) {
+                blockStride = blockStrideAttr_;
+                OPS_ERR_IF(blockStride < packedBlock,
+                          OPS_LOG_E(context_,
+                                   "block_stride (%ld) must be >= block_size * row (%ld)",
+                                   blockStride, packedBlock),
+                          return ge::GRAPH_FAILED);
+            } else {
+                blockStride = packedBlock;
+            }
+            OPS_ERR_IF(cacheRowStride < kvCacheCol_,
+                      OPS_LOG_E(context_,
+                               "cache row (%ld) is narrower than the packed token (%ld)",
+                               cacheRowStride, kvCacheCol_),
+                      return ge::GRAPH_FAILED);
+        } else if (blockStrideAttr_ > 0) {
             blockStride = blockStrideAttr_;
             OPS_ERR_IF(blockStride < autoRowStride,
                       OPS_LOG_E(context_, "block_stride (%ld) must be >= layout=1 row width (%ld)",
@@ -259,8 +290,8 @@ ge::graphStatus KvCompressEpilogTiling::DoOpTiling()
         }
 
         OPS_LOG_I(context_->GetNodeName(),
-                  "layout=1: kvCacheCol=%ld rowStride=%ld (auto=%ld, attr=%ld)",
-                  kvCacheCol_, blockStride, autoRowStride, blockStrideAttr_);
+                  "layout=1: kvCacheCol=%ld blockSize=%ld pageStride=%ld tokenStride=%ld (autoRow=%ld, attr=%ld)",
+                  kvCacheCol_, blockSize_, blockStride, rowStride_, autoRowStride, blockStrideAttr_);
     }
 
     // UB estimation: pre-compute per-row sizes
@@ -318,6 +349,7 @@ ge::graphStatus KvCompressEpilogTiling::DoOpTiling()
     tilingData_.set_valuePerToken(valuePerToken);
     tilingData_.set_scalePerToken(scalePerToken);
     tilingData_.set_blockStride(blockStride);
+    tilingData_.set_rowStride(rowStride_);
     tilingData_.set_perGroupSize(quantGroupSize_);
 
     return ge::GRAPH_SUCCESS;

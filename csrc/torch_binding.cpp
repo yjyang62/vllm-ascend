@@ -1609,6 +1609,8 @@ void kv_compress_epilog_npu(
     }
 
     int64_t round_scale = round_scale_flag ? 1 : 0;
+    // Flat cache: stride(0) is the per-slot row step. Paged cache (block axis
+    // longer than 1): stride(0) is the page step, including any padding gap.
     int64_t cache_stride = cache.stride(0);
     EXEC_NPU_CMD(aclnnKvCompressEpilog, cache, x, slot_mapping, quant_group_size, quant_mode, round_scale,
                  layout, cache_stride);

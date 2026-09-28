@@ -88,6 +88,57 @@ def test_non_a5_plan_preserves_shared_kv_runtime_kwargs():
         assert "cu_seqlens_ori_kv" in kwargs
 
 
+def test_fp8_epilog_views_packed_cache_as_rows():
+    """A contiguous cache still collapses to one row per flat slot."""
+    with _on(AscendDeviceType.A5):
+        plan = get_dsa_attn_kv_plan(_config(False))
+        cache = torch.zeros(2, 4, 1, 8)
+        updates = torch.zeros(3, 1, 8)
+        slots = torch.tensor([0, 1, -1], dtype=torch.int32)
+        with mock.patch.object(torch.ops._C_ascend, "kv_compress_epilog") as epilog:
+            plan.dsa_kv_compress_scatter(cache, updates, slots)
+        kwargs = epilog.call_args.kwargs
+        seen = kwargs["kv_compress_cache"]
+        assert seen.shape == (8, 1, 8)
+        assert seen.data_ptr() == cache.data_ptr()
+        assert kwargs["x"].shape == (3, 8)
+
+
+def test_fp8_epilog_keeps_page_padded_cache():
+    """Padding between pages is not a legal view; the epilog must alias the page."""
+    with _on(AscendDeviceType.A5):
+        plan = get_dsa_attn_kv_plan(_config(False))
+        page_stride = 40
+        raw = torch.zeros(2 * page_stride)
+        cache = torch.as_strided(raw, size=(2, 4, 1, 8), stride=(page_stride, 8, 8, 1))
+        with pytest.raises(RuntimeError, match="view size is not compatible"):
+            cache.view(-1, 1, cache.shape[-1])
+        updates = torch.zeros(2, 8)
+        slots = torch.tensor([0, 4], dtype=torch.int32)
+        with mock.patch.object(torch.ops._C_ascend, "kv_compress_epilog") as epilog:
+            plan.dsa_kv_compress_scatter(cache, updates, slots)
+        seen = epilog.call_args.kwargs["kv_compress_cache"]
+        assert seen.shape == cache.shape
+        assert seen.data_ptr() == cache.data_ptr()
+        assert tuple(seen.stride()) == (page_stride, 8, 8, 1)
+        assert epilog.call_args.kwargs["x"].shape == (2, 8)
+
+
+def test_fp8_epilog_keeps_padded_single_token_pages():
+    """A page stride larger than one token is still the slot step when block size is 1."""
+    with _on(AscendDeviceType.A5):
+        plan = get_dsa_attn_kv_plan(_config(False))
+        raw = torch.zeros(2 * 16)
+        cache = torch.as_strided(raw, size=(2, 1, 1, 8), stride=(16, 8, 8, 1))
+        updates = torch.zeros(1, 8)
+        slots = torch.tensor([1], dtype=torch.int32)
+        with mock.patch.object(torch.ops._C_ascend, "kv_compress_epilog") as epilog:
+            plan.dsa_kv_compress_scatter(cache, updates, slots)
+        seen = epilog.call_args.kwargs["kv_compress_cache"]
+        assert seen.data_ptr() == cache.data_ptr()
+        assert tuple(seen.stride()) == (16, 8, 8, 1)
+
+
 def test_scatter_skips_none_updates():
     with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(False))
