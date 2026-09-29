@@ -163,6 +163,12 @@ class NPUWorker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
+        # The platform hook does not run in this worker process. Re-apply the
+        # A5 DeepSeek-V4 auto→FP8 pin so allocation matches the engine.
+        from vllm_ascend.attention.dsa_attn_kv_plan import apply_a5_deepseek_v4_default_kv_dtypes
+
+        apply_a5_deepseek_v4_default_kv_dtypes(vllm_config)
+
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:

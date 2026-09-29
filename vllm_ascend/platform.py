@@ -463,6 +463,7 @@ class NPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # Lazy import vllm/vllm-ascend to avoid circular import
+        from vllm_ascend.attention.dsa_attn_kv_plan import apply_a5_deepseek_v4_default_kv_dtypes
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
 
@@ -485,8 +486,11 @@ class NPUPlatform(Platform):
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
 
-        # 3.Auto detect quantization method and verify cache dtype
+        # 3.Auto detect quantization method and verify cache dtype.
+        # Pin A5 DeepSeek-V4 auto KV dtypes before the FP8 capability check so
+        # the allocated cache matches the compressed-cache operator plan.
         maybe_auto_detect_quantization(vllm_config)
+        apply_a5_deepseek_v4_default_kv_dtypes(vllm_config)
         if vllm_config.cache_config.cache_dtype == "fp8" or vllm_config.attention_config.indexer_kv_dtype == "fp8":
             assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
 
