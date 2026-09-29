@@ -11,6 +11,7 @@ import torch
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
+    apply_a5_deepseek_v4_default_kv_dtypes,
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
     resolve_dsv4_cache_dtype,
@@ -191,13 +192,14 @@ def test_non_a5_pins_cache_dtype_to_the_model_dtype():
             assert resolve_dsv4_cache_dtype(launch, "bfloat16") == "bfloat16"
 
 
-def test_a5_collapses_non_bfloat16_requests_to_auto():
-    # "auto" resolves to the model dtype everywhere downstream, so it carries
-    # the FP8 mode without changing any value upstream would have computed.
+def test_a5_resolves_auto_to_fp8_and_keeps_explicit_dtypes():
+    # auto must not stay auto: allocation would use the BF16 model dtype while
+    # the compressed-cache plan still takes the FP8 epilog.
     with _on(AscendDeviceType.A5):
         assert resolve_dsv4_cache_dtype("bfloat16", "bfloat16") == "bfloat16"
-        assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "auto"
-        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "auto"
+        assert resolve_dsv4_cache_dtype("bf16", "bfloat16") == "bfloat16"
+        assert resolve_dsv4_cache_dtype("auto", "bfloat16") == "fp8"
+        assert resolve_dsv4_cache_dtype("fp8", "bfloat16") == "fp8"
 
 
 def test_a5_mode_survives_the_spec_path_rewrite():
@@ -210,3 +212,52 @@ def test_a5_mode_survives_the_spec_path_rewrite():
 
         pinned = resolve_dsv4_cache_dtype("bfloat16", "bfloat16")
         assert is_a5_bf16_kv_enabled(_cache_config(pinned))
+
+
+def _dsv4_config(cache_dtype: str = "auto", indexer_kv_dtype: str = "auto", model_type: str = "deepseek_v4"):
+    hf_config = SimpleNamespace(model_type=model_type)
+    return SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=hf_config, hf_text_config=hf_config),
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+        attention_config=SimpleNamespace(indexer_kv_dtype=indexer_kv_dtype),
+    )
+
+
+def test_a5_deepseek_v4_auto_kv_dtypes_become_fp8():
+    config = _dsv4_config()
+    with _on(AscendDeviceType.A5):
+        apply_a5_deepseek_v4_default_kv_dtypes(config)
+    assert config.cache_config.cache_dtype == "fp8"
+    assert config.attention_config.indexer_kv_dtype == "fp8"
+    assert not is_a5_bf16_kv_enabled(config)
+
+
+def test_explicit_main_bf16_does_not_block_indexer_auto():
+    config = _dsv4_config(cache_dtype="bfloat16", indexer_kv_dtype="auto")
+    with _on(AscendDeviceType.A5):
+        apply_a5_deepseek_v4_default_kv_dtypes(config)
+    assert config.cache_config.cache_dtype == "bfloat16"
+    assert config.attention_config.indexer_kv_dtype == "fp8"
+    assert is_a5_bf16_kv_enabled(config)
+
+
+def test_explicit_kv_dtypes_stay_unchanged_on_a5():
+    config = _dsv4_config(cache_dtype="fp8", indexer_kv_dtype="int8")
+    with _on(AscendDeviceType.A5):
+        apply_a5_deepseek_v4_default_kv_dtypes(config)
+    assert config.cache_config.cache_dtype == "fp8"
+    assert config.attention_config.indexer_kv_dtype == "int8"
+
+
+def test_auto_kv_dtypes_stay_unchanged_off_a5_or_other_models():
+    a3_config = _dsv4_config()
+    with _on(AscendDeviceType.A3):
+        apply_a5_deepseek_v4_default_kv_dtypes(a3_config)
+    assert a3_config.cache_config.cache_dtype == "auto"
+    assert a3_config.attention_config.indexer_kv_dtype == "auto"
+
+    other_model = _dsv4_config(model_type="qwen3")
+    with _on(AscendDeviceType.A5):
+        apply_a5_deepseek_v4_default_kv_dtypes(other_model)
+    assert other_model.cache_config.cache_dtype == "auto"
+    assert other_model.attention_config.indexer_kv_dtype == "auto"
