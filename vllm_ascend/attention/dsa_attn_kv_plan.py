@@ -8,11 +8,14 @@ from typing import Any
 
 import torch
 import torch_npu
+from vllm.logger import logger
 
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 _BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
+_AUTO_KV_DTYPE = "auto"
+_A5_DSV4_DEFAULT_KV_DTYPE = "fp8"
 
 
 def _supports_dsv4_compressed_cache() -> bool:
@@ -22,15 +25,64 @@ def _supports_dsv4_compressed_cache() -> bool:
 def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
     """Return the KV cache dtype the platform should pin for DeepSeek-V4.
 
-    On A5 the launch request has to stay readable afterwards, because it is the
-    only thing that separates an explicit bfloat16 KV request from ``auto``.
-    ``auto`` and the model dtype resolve identically everywhere downstream, so
-    collapsing every non-bfloat16 request to ``auto`` preserves the upstream
-    values while keeping the mode recoverable.
+    On A5, ``auto`` must become ``fp8``. Downstream ``auto`` means the model
+    dtype, which is BF16, while the compressed-cache plan treats a non-BF16
+    request as the FP8 ``kv_compress_epilog`` path. Explicit ``bfloat16`` stays
+    BF16 so SparseFlashMla remains selectable. Any other explicit dtype is
+    left unchanged.
     """
     if not _supports_dsv4_compressed_cache():
         return model_dtype
-    return "bfloat16" if str(cache_dtype).lower() in _BF16_KV_CACHE_DTYPES else "auto"
+    normalized = str(cache_dtype).lower()
+    if normalized in _BF16_KV_CACHE_DTYPES:
+        return "bfloat16"
+    if normalized == _AUTO_KV_DTYPE:
+        return _A5_DSV4_DEFAULT_KV_DTYPE
+    return str(cache_dtype)
+
+
+def _is_exact_deepseek_v4(model_config) -> bool:
+    for candidate in (
+        getattr(model_config, "hf_text_config", None),
+        getattr(model_config, "hf_config", None),
+    ):
+        if getattr(candidate, "model_type", None) == "deepseek_v4":
+            return True
+    return False
+
+
+def apply_a5_deepseek_v4_default_kv_dtypes(vllm_config) -> None:
+    """Pin DeepSeek-V4 ``auto`` KV dtypes to FP8 on A5 before cache allocation.
+
+    The main cache and the indexer cache are independent. An explicit main
+    BF16 request does not stop an indexer ``auto`` from becoming FP8.
+    """
+    if not _supports_dsv4_compressed_cache():
+        return
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None or not _is_exact_deepseek_v4(model_config):
+        return
+
+    cache_config = getattr(vllm_config, "cache_config", None)
+    if cache_config is not None and str(getattr(cache_config, "cache_dtype", "")).lower() == _AUTO_KV_DTYPE:
+        model_dtype = getattr(model_config, "dtype", "bfloat16")
+        cache_config.cache_dtype = resolve_dsv4_cache_dtype(_AUTO_KV_DTYPE, str(model_dtype))
+        logger.info_once(
+            "DeepSeek-V4 on Ascend A5 resolves kv cache dtype auto to %s "
+            "so the compressed KV plan matches the allocated cache.",
+            cache_config.cache_dtype,
+        )
+
+    attention_config = getattr(vllm_config, "attention_config", None)
+    if (
+        attention_config is not None
+        and str(getattr(attention_config, "indexer_kv_dtype", "")).lower() == _AUTO_KV_DTYPE
+    ):
+        attention_config.indexer_kv_dtype = _A5_DSV4_DEFAULT_KV_DTYPE
+        logger.info_once(
+            "DeepSeek-V4 on Ascend A5 resolves indexer kv dtype auto to %s.",
+            attention_config.indexer_kv_dtype,
+        )
 
 
 def is_a5_bf16_kv_enabled(vllm_config) -> bool:
