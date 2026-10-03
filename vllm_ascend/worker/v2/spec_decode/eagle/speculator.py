@@ -23,6 +23,9 @@ from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
     ensure_draft_hf_overrides,
 )
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
+    disable_profiling_chunk_for_draft,
+)
 
 
 class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
@@ -34,14 +37,15 @@ class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
         # Reusing the target's EP/EPLB flags makes VllmConfig validate the
         # draft as an expert model and fail because the draft has no experts.
         ensure_draft_hf_overrides(self.draft_model_config)
-        return replace(
-            self.vllm_config,
-            model_config=self.draft_model_config,
-            parallel_config=replace(
-                self.vllm_config.parallel_config,
-                pipeline_parallel_size=1,
-                prefill_context_parallel_size=1,
-                enable_expert_parallel=False,
-                enable_eplb=False,
-            ),
-        )
+        with disable_profiling_chunk_for_draft(self.vllm_config):
+            return replace(
+                self.vllm_config,
+                model_config=self.draft_model_config,
+                parallel_config=replace(
+                    self.vllm_config.parallel_config,
+                    pipeline_parallel_size=1,
+                    prefill_context_parallel_size=1,
+                    enable_expert_parallel=False,
+                    enable_eplb=False,
+                ),
+            )
