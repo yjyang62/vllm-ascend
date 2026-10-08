@@ -876,19 +876,26 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # (MTP / DSpark / DFlash). Only needed when the decoder consumes
         # target-model hidden states; allocating it unconditionally would
         # permanently cost max_num_batched_tokens * hc_dim per rank.
-        # Aligned with upstream DeepSeekV4 (see vllm PR #50312).
+        # Allocate before the first forward. FULL_DECODE_ONLY captures this
+        # forward, and a buffer created inside that capture keeps the warmup
+        # residual. The eager drafter then proposes from a stale tensor and
+        # every draft token is rejected.
         spec_config = vllm_config.speculative_config
         self._needs_mtp_hidden_states = bool(
             get_pp_group().is_last_rank
             and spec_config is not None
             and (spec_config.use_eagle() or spec_config.uses_draft_model())
         )
-        self._mtp_buffer_shape = (
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            hc_dim,
+        self._mtp_hidden_buffer: torch.Tensor | None = (
+            torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                hc_dim,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
+            if self._needs_mtp_hidden_states
+            else None
         )
-        self._mtp_buffer_dtype = vllm_config.model_config.dtype
-        self._mtp_hidden_buffer: torch.Tensor | None = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -982,14 +989,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if self.use_sequence_parallel_moe:
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
-        # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        if self._needs_mtp_hidden_states:
-            if self._mtp_hidden_buffer is None:
-                self._mtp_hidden_buffer = torch.empty(
-                    self._mtp_buffer_shape,
-                    dtype=self._mtp_buffer_dtype,
-                    device=self.device,
-                )
+        # Refresh the pre-hc_head residual. The buffer is allocated in
+        # __init__; creating it here would be captured by FULL_DECODE_ONLY.
+        if self._mtp_hidden_buffer is not None:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
