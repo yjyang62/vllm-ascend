@@ -30,7 +30,6 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    get_or_register_attention_buffer,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -223,6 +222,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     understand this class
     """
 
+    # One matrix per model and head size, shared by builders of this config.
+    # Created outside the sleep mem-pools, so it is not a module buffer.
+    _shared_hadamard: ClassVar[dict[tuple[int, int, str], torch.Tensor]] = {}
+
     def __init__(
         self,
         kv_cache_spec: AscendMLAAttentionSpec,
@@ -265,22 +268,22 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.hadamard = None
         if hf_config.model_type == "deepseek_v4":
             indexer_head_dim = hf_config.index_head_dim
-            try:
-                from scipy.linalg import hadamard  # type: ignore[import-untyped]
-            except ImportError as e:
-                raise ImportError(
-                    "DeepSeek-V4 indexer attention requires SciPy for Hadamard transform. Please install scipy."
-                ) from e
             log_dim = math.ceil(math.log2(indexer_head_dim))
             dim_padded = 2**log_dim
-            self.hadamard = get_or_register_attention_buffer(
-                self.vllm_config,
-                layer_names,
-                "_dsa_cp_hadamard",
-                lambda: torch.tensor(hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device).to(
+            cache_key = (id(self.vllm_config), dim_padded, str(self.device))
+            shared = AscendDSACPMetadataBuilder._shared_hadamard.get(cache_key)
+            if shared is None:
+                try:
+                    from scipy.linalg import hadamard  # type: ignore[import-untyped]
+                except ImportError as e:
+                    raise ImportError(
+                        "DeepSeek-V4 indexer attention requires SciPy for Hadamard transform. Please install scipy."
+                    ) from e
+                shared = torch.tensor(hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device).to(
                     torch.bfloat16
-                ),
-            )
+                )
+                AscendDSACPMetadataBuilder._shared_hadamard[cache_key] = shared
+            self.hadamard = shared
         # Full-decode graphs pad the request count beyond max_num_seqs
         # (cudagraph capture sizes plus the FIA dummy request), so size all
         # per-request buffers for the graph-mode maximum. Otherwise the
@@ -2252,6 +2255,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             dtype=torch.int64,
             device=device,
         )
+        self._global_rope_buffers: dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]] = {}
 
     @classmethod
     def get_cudagraph_support(
@@ -2426,7 +2430,9 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         num_actual_reqs: int | None,
         common_ratio_to_sas_metadata: dict[Any, Any],
     ) -> dsa_v1.AscendDSAMetadata:
-        if local_common_attn_metadata.num_actual_tokens > 0:
+        # A captured graph still runs its padded queries, so their metadata
+        # must be refreshed even when this rank owns no tokens.
+        if local_common_attn_metadata.query_start_loc_cpu[-1] > 0:
             return super().build(
                 common_prefix_len,
                 local_common_attn_metadata,
@@ -2489,12 +2495,26 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
                 common_ratio_to_sas_metadata={},
                 can_use_rope_cache=False,
             )
+            if (
+                not has_prefill
+                and self._is_decode_sharded
+                and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            ):
+                # Keep the global RoPE at graph-stable addresses of its own.
+                req_metadata = global_dsa_metadata.req_metadata
+                assert req_metadata is not None
+                req_metadata.cos, req_metadata.sin = req_metadata.cos.copy_to_buffers(
+                    self._global_rope_buffers, self._hidden_restore_idx_buffer.numel()
+                )
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,
             common_attn_metadata,
             pcp_cache_group_idx,
             has_prefill,
         )
+        if local_common_attn_metadata.num_actual_tokens == 0:
+            # The placeholder request of an empty rank is graph padding too.
+            num_actual_reqs = 0
         local_common_attn_metadata = self._build_graph_common_attn_metadata(
             local_common_attn_metadata,
             num_actual_reqs,
