@@ -1,5 +1,4 @@
 import enum
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -42,41 +41,6 @@ def mark_fused_preprocess_weights(impl: MLAAttentionImpl) -> None:
     for layer in (impl.fused_qkv_a_proj, impl.q_proj):
         if layer is not None:
             layer._fused_preprocess_managed = managed
-
-
-def get_or_register_attention_buffer(
-    vllm_config: VllmConfig,
-    layer_names: list[str],
-    name: str,
-    factory: Callable[[], torch.Tensor],
-) -> torch.Tensor:
-    """Return a shared non-persistent buffer owned by attention modules."""
-    # TODO: Revisit this after torch_npu supports traversing mem-pool
-    # allocations during sleep/wake. The buffer could then be allocated from
-    # the appropriate mem-pool for CaMem to manage its device-memory lifetime.
-    static_forward_context = vllm_config.compilation_config.static_forward_context
-    modules = []
-    for layer_name in layer_names:
-        module = static_forward_context.get(layer_name)
-        if not isinstance(module, torch.nn.Module):
-            raise ValueError(f"Attention layer {layer_name!r} is not a registered torch.nn.Module")
-        modules.append(module)
-
-    if not modules:
-        raise ValueError("At least one attention layer is required to own the buffer")
-
-    buffer = next((getattr(module, name) for module in modules if hasattr(module, name)), None)
-    if buffer is None:
-        buffer = factory()
-
-    for module in modules:
-        existing = getattr(module, name, None)
-        if existing is None:
-            module.register_buffer(name, buffer, persistent=False)
-        elif existing is not buffer:
-            raise ValueError(f"Attention buffer {name!r} is already registered with a different tensor")
-
-    return buffer
 
 
 def build_valid_topk_mask(
@@ -293,9 +257,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Metadata for Decode Context Parallelism (DCP) operations.
     context_parallel_metadata: AscendDCPMetadata | None = None
-    group_len: torch.Tensor = None
-    group_key_idx: torch.Tensor = None
-    group_key_cache_idx: torch.Tensor = None
     # Per-request / per-token request identity used by the Sparse KV offload
     # resident LRU (adler32-hashed request ids and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
@@ -315,6 +276,14 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
+
+    # Per-request replay start: 0 for every request that is not replaying, else
+    # where that request's replayed run begins. A backend clamps a replaying
+    # request's sliding-window lower bound to it: below that point the window's
+    # KV is not being rebuilt -- the replayed positions are padded on the
+    # cacheable groups -- and only the shared prefix is there. ``None`` means
+    # the same as all zeros; dummy/profiling/capture batches do not fill it.
+    replay_start: torch.Tensor | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -367,13 +336,11 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
-            group_len=self.group_len,
-            group_key_idx=self.group_key_idx,
-            group_key_cache_idx=self.group_key_cache_idx,
             req_topk_buffer_slots=_slice_reqs(self.req_topk_buffer_slots),
             req_topk_buffer_active=_slice_reqs(self.req_topk_buffer_active),
             copy_sfa_draft_index=self.copy_sfa_draft_index,
             offload_dummy=self.offload_dummy,
+            replay_start=_slice_reqs(self.replay_start),
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),
             token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),
         )
