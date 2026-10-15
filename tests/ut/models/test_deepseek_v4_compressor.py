@@ -114,6 +114,13 @@ class TestCompressorForward:
         compressor.wkv = SimpleNamespace(weight=torch.ones((4, 4)))
         compressor.wgate = SimpleNamespace(weight=torch.ones((4, 4)))
         compressor.norm = SimpleNamespace(weight=torch.ones(4))
+        compressor.state_cache = SimpleNamespace(
+            sliding_window=8 if compress_ratio == 4 else 128,
+            block_size=8 if compress_ratio == 4 else 16,
+        )
+        compressor.vllm_config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=16, max_num_seqs=2),
+        )
         cache_req_metadata = SimpleNamespace(
             query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
             start_pos=torch.tensor([1], dtype=torch.int32),
@@ -155,6 +162,80 @@ class TestCompressorForward:
         assert call.kwargs["start_pos"] is cache_req_metadata.start_pos
         assert call.kwargs["cmp_ratio"] == compress_ratio
         assert call.kwargs["coff"] == expected_coff
+
+    def test_long_mtp_decode_folds_state_block_table_into_window(self):
+        """A >20k MTP decode must hand the kernel window-local physical blocks.
+
+        V1 metadata already rebases ``start_pos`` and the state block ids by
+        ``sliding_window``. V2 keeps absolute columns, and CONTINUOUS mode
+        indexes ``start_pos / block_size`` with no bounds check.
+        """
+        start_pos_value = 27697
+        query_tokens = 2
+        compress_ratio = 4
+        block_size = 8
+        sliding_window = 8
+        absolute_column = start_pos_value // block_size
+        block_table = torch.arange(absolute_column + 8, dtype=torch.int32).view(1, -1) + 10
+        stale_prefix_id = int(block_table[0, 0])
+        live_block_id = int(block_table[0, absolute_column])
+        start_pos = torch.tensor([start_pos_value], dtype=torch.int32)
+        original_start = start_pos.clone()
+        original_table = block_table.clone()
+
+        compressor = Compressor.__new__(Compressor)
+        torch.nn.Module.__init__(compressor)
+        compressor.overlap = True
+        compressor.compress_ratio = compress_ratio
+        compressor.rope_head_dim = 2
+        compressor.norm_eps = 1e-6
+        compressor.ape = torch.ones((compress_ratio, 4))
+        compressor.wkv = SimpleNamespace(weight=torch.ones((4, 4)))
+        compressor.wgate = SimpleNamespace(weight=torch.ones((4, 4)))
+        compressor.norm = SimpleNamespace(weight=torch.ones(4))
+        compressor.state_cache = SimpleNamespace(sliding_window=sliding_window, block_size=block_size)
+        compressor.vllm_config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=2048, max_num_seqs=4),
+        )
+        cache_req_metadata = SimpleNamespace(
+            query_start_loc=torch.tensor([0, query_tokens], dtype=torch.int32),
+            start_pos=start_pos,
+        )
+        state_req_metadata = SimpleNamespace(block_table=block_table)
+        metadata = AscendCompressorMetadata(
+            cache=SimpleNamespace(req_metadata=cache_req_metadata),
+            state=SimpleNamespace(req_metadata=state_req_metadata),
+        )
+        compress_cos = torch.ones((1, 1, 2))
+        compress_sin = torch.zeros((1, 1, 2))
+        slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
+        compressor._compute_metadata = MagicMock(return_value=(compress_cos, compress_sin, slot_mapping))
+
+        with patch.object(
+            torch.ops._C_ascend,
+            "compressor",
+            create=True,
+            return_value=torch.ones((1, 1, 4)),
+        ) as compressor_op:
+            compressor(
+                hidden_states=torch.ones((query_tokens, 4)),
+                state_cache=torch.ones((1, block_size, 1, 4)),
+                metadata=metadata,
+            )
+
+        passed_table = compressor_op.call_args.kwargs["state_block_table"]
+        passed_start = compressor_op.call_args.kwargs["start_pos"]
+        folded_start = int(passed_start[0])
+        folded_column = folded_start // block_size
+        assert passed_table.shape[1] < block_table.shape[1]
+        assert folded_column < passed_table.shape[1]
+        assert int(passed_table[0, folded_column]) == live_block_id
+        assert int(passed_table[0, folded_column]) != stale_prefix_id
+        assert folded_start % block_size == start_pos_value % block_size
+        assert passed_start is not start_pos
+        assert torch.equal(start_pos, original_start)
+        assert torch.equal(block_table, original_table)
+        compressor._compute_metadata.assert_called_once_with(cache_req_metadata)
 
 
 class TestCompressorStateCache:
