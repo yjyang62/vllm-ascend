@@ -11,38 +11,58 @@
 # prefill) via impl.forward(), so prefill_backend.run_prefill_* is never called.
 # We register a no-op AscendMLAPrefillBackend and patch get_mla_prefill_backend
 # so that MLAAttention.__init__ completes without error.
+#
+# Older vLLM (including the 0.27.1 lane) does not have
+# vllm.v1.attention.backends.mla.prefill. Skip this patch there so plugin
+# import does not raise ModuleNotFoundError.
 
-import torch
-import vllm.model_executor.layers.attention.mla_attention
-from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+from importlib.util import find_spec
 
-
-class AscendMLAPrefillBackend(MLAPrefillBackend):
-    @staticmethod
-    def get_name() -> str:
-        return "ASCEND"
-
-    @classmethod
-    def is_available(cls) -> bool:
-        return True
-
-    def run_prefill_new_tokens(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        return_softmax_lse: bool,
-    ) -> torch.Tensor:
-        raise NotImplementedError("Ascend MLA prefill is handled by AscendSFAImpl/AscendMLAImpl")
-
-    def run_prefill_context_chunk(
-        self,
-        chunk_idx: int,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError("Ascend MLA prefill is handled by AscendSFAImpl/AscendMLAImpl")
+_MLA_PREFILL_BACKEND_MODULE = "vllm.v1.attention.backends.mla.prefill.base"
 
 
-vllm.model_executor.layers.attention.mla_attention.get_mla_prefill_backend = lambda vllm_config: AscendMLAPrefillBackend
+def _apply_mla_prefill_backend_patch() -> bool:
+    if find_spec(_MLA_PREFILL_BACKEND_MODULE) is None:
+        return False
+
+    import torch
+    import vllm.model_executor.layers.attention.mla_attention
+    from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+
+    if not hasattr(vllm.model_executor.layers.attention.mla_attention, "get_mla_prefill_backend"):
+        return False
+
+    class AscendMLAPrefillBackend(MLAPrefillBackend):
+        @staticmethod
+        def get_name() -> str:
+            return "ASCEND"
+
+        @classmethod
+        def is_available(cls) -> bool:
+            return True
+
+        def run_prefill_new_tokens(
+            self,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            return_softmax_lse: bool,
+        ) -> torch.Tensor:
+            raise NotImplementedError("Ascend MLA prefill is handled by AscendSFAImpl/AscendMLAImpl")
+
+        def run_prefill_context_chunk(
+            self,
+            chunk_idx: int,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            raise NotImplementedError("Ascend MLA prefill is handled by AscendSFAImpl/AscendMLAImpl")
+
+    vllm.model_executor.layers.attention.mla_attention.get_mla_prefill_backend = lambda vllm_config: (
+        AscendMLAPrefillBackend
+    )
+    return True
+
+
+_apply_mla_prefill_backend_patch()
