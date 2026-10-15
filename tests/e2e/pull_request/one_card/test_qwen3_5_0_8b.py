@@ -76,8 +76,15 @@ def test_mamba_ssm_multimodal_reasoning_mtp_full_decode_only():
 
 
 @wait_until_npu_memory_free()
-def test_hybrid_prefix_match_unit_cached_output_consistency():
+def test_hybrid_prefix_match_unit_cached_output_consistency(monkeypatch):
     """Verify fine-grained hybrid prefix hits preserve generated tokens."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True, raising=False)
+    monkeypatch.setattr(
+        "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+        True,
+        raising=False,
+    )
     model_path = hf_snapshot_download(
         "Qwen/Qwen3.5-0.8B",
         local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,

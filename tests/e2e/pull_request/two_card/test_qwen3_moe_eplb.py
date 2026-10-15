@@ -43,7 +43,12 @@ async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
         "--compilation-config",
         compilation_config,
     ]
-    env_dict = {"HCCL_BUFFSIZE": "1024"}
+    env_dict = {
+        # V2 rejects these dynamic EPLB fields, and the V2 --enable-eplb
+        # rewrite no longer matches the greedy baseline. Compare on V1.
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
+        "HCCL_BUFFSIZE": "1024",
+    }
     with RemoteOpenAIServer(model, server_args, server_port=port, auto_port=False, env_dict=env_dict) as server:
         client = server.get_async_client()
         batch = await client.completions.create(

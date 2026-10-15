@@ -147,6 +147,18 @@ def _validate_spec(spec: BatchSpec) -> None:
 _VLLM_CONFIG_CACHE: dict = {}
 
 
+@pytest.fixture(autouse=True)
+def _pin_v2_sfa_model_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run this SFA kernel check on Model Runner V2."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setattr("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True, raising=False)
+    monkeypatch.setattr(
+        "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+        True,
+        raising=False,
+    )
+
+
 def _get_vllm_config(
     model: str,
     dtype: torch.dtype,
@@ -481,7 +493,7 @@ def test_sfa_sparse_flash_attention_precision(
     dtype: torch.dtype,
     tensor_parallel_size: int,
 ) -> None:
-    """SFA kernel vs fp32 dense MQA reference (decode, prefill, mixed, MTP)."""
+    """SFA V1 kernel vs fp32 dense MQA reference (decode, prefill, mixed, MTP)."""
     vllm_config = _get_vllm_config(model, dtype, tensor_parallel_size=tensor_parallel_size)
     _run_precision_check(
         BATCH_SPECS[batch_spec_name],
