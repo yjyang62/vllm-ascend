@@ -44,6 +44,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.distributed.layerwise_runtime_tensors import ASCEND_CONV1D_WEIGHT
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
@@ -51,7 +52,7 @@ from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
-_PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+_PACKED_CONV_WEIGHT_NAME = ASCEND_CONV1D_WEIGHT
 
 
 @lru_cache(maxsize=1)
@@ -68,7 +69,8 @@ def _get_base_conv1d(layer: nn.Module) -> nn.Module:
 
     LoRA replaces ``conv1d`` with a wrapper while retaining the original
     linear layer in ``base_layer``. The packed parameter must stay on that base
-    module so layerwise reload materializes source and derived state together.
+    module so post-load packing refreshes the same kernel storage. Layerwise
+    reload does not expect this derived tensor in the checkpoint.
     """
     conv1d = layer.conv1d
     return getattr(conv1d, "base_layer", conv1d)

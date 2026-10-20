@@ -29,6 +29,9 @@ if HAS_TRITON:
 # worker before model loading resolves kv_cache_dtype. No-op on kvquant_27.
 import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
 
+# Must run before model load records layerwise reload metadata.
+import vllm_ascend.patch.worker.patch_layerwise_reload  # noqa
+
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
