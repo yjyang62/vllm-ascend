@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.distributed.layerwise_runtime_tensors import EXPERT_IDS_PER_EP_RANK
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
@@ -145,7 +146,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             expert_ids_per_ep_rank = getattr(alltoall_comm.token_dispatcher, "expert_ids_per_ep_rank", None)
             if expert_ids_per_ep_rank is not None:
                 self.routed_experts.register_buffer(
-                    "expert_ids_per_ep_rank",
+                    EXPERT_IDS_PER_EP_RANK,
                     expert_ids_per_ep_rank,
                     persistent=False,
                 )
