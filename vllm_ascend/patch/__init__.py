@@ -1678,3 +1678,29 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+# ** 37. File: worker/patch_layerwise_reload.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.model_loader.reload.meta.SKIP_LOAD_TENSORS`
+#      `vllm.model_executor.model_loader.reload.meta.SKIP_TENSORS`
+#    Why:
+#       Layerwise reload finishes a layer only after the loaded element count
+#       reaches get_layer_size. Ascend registers two tensors that never arrive
+#       from the checkpoint: expert_ids_per_ep_rank (AllToAll routing table)
+#       and ascend_conv1d_weight (GDN/KDA kernel layout packed from conv1d.weight).
+#       Those layers therefore keep every incoming weight buffer. On HCCL the
+#       buffers alias the packed broadcast storage, and a Qwen3.5-35B-A3B weight
+#       update OOMs before post-load packing can run.
+#    How:
+#       Before model load, add both names to SKIP_LOAD_TENSORS and SKIP_TENSORS.
+#       The two sets are distinct: the first is the checkpoint-count exclusion,
+#       and the second keeps the original runtime or derived storage in place.
+#       process_weights_after_loading still repacks ascend_conv1d_weight from
+#       the newly loaded source convolution.
+#    Related PR (if no, explain why):
+#       No. These tensors are created by vllm-ascend, and upstream has no hook
+#       for a plugin to register runtime tensors with layerwise reload.
+#    Future Plan:
+#       Remove this patch once upstream can ignore tensors that have no
+#       checkpoint loader, or exposes a registration API that plugins can use
+#       without mutating SKIP_LOAD_TENSORS and SKIP_TENSORS.
+#
