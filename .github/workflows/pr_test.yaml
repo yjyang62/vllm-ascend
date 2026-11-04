@@ -86,7 +86,11 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          # The gitleaks secret scan runs later in this job and needs the base
+          # branch ref plus the history down to the merge base (`fetch-depth: 1`
+          # only creates the pull request merge ref, which broke every PR run).
+          # Keep this at 0 unless the scan stops depending on the base branch.
+          fetch-depth: 0
 
       - name: Prepare CI metadata
         id: vllm
